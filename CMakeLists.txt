@@ -94,3 +94,14 @@ endif()
 
 # Le altre lane (engine MLX, server OpenAI/Anthropic, CLI) non hanno
 # ancora codice: si aggiungono QUI quando esistono, non come target vuoti.
+
+# --- lane_http: il codec che legge i byte da internet PRIMA che arrivino al JSON ---------
+# Separate dal JSON perché il livello è un altro: qui ciò che deve essere corretto è il
+# FRAMING (dove finisce la richiesta), non il contenuto. Un server con questo codec e senza
+# JSON regge connessioni; il contrario no.
+add_library(fmlx_http STATIC src/server/fmlx_http.c)
+target_include_directories(fmlx_http PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+add_executable(test_http tests/http/test_http.c)
+target_link_libraries(test_http PRIVATE fmlx_http)
+add_test(NAME http COMMAND test_http)
