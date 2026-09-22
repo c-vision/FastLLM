@@ -87,7 +87,7 @@ Hugging Face **senza toccare la rete**. Ogni regola è misurata da una fonte, no
 
 - **radice**: `HF_HUB_CACHE` → legacy `HUGGINGFACE_HUB_CACHE` → `HF_HOME/hub` →
   `XDG_CACHE_HOME/huggingface/hub` → `~/.cache/huggingface/hub`, con `expanduser` prima di
-  `expandvars` (`huggingface_hub/constants.py:129-155`). La precedenza del legacy su `HF_HOME`
+  `expandvars` (`huggingface_hub/constants.py:166-189`). La precedenza del legacy su `HF_HOME`
   sembra strana e invece è esatta: in quel file il legacy è il *default* di `HF_HUB_CACHE`.
 - **nome dei blob, e qui c'è la trappola**: 64 esadecimali = **SHA256 del contenuto** (verificato
   su 2/2 blob LFS, incluso `model.safetensors` da 335.450.584 byte); 40 esadecimali **NON** è lo
@@ -115,26 +115,48 @@ La logica di cache e il trasporto sono due file separati perché la prima si pro
 `tests/hf/test_hf_fetch.c` usa un transport finto (20 casi, 172 verifiche) e scopre i bug di
 DOVE-finiscono-i-byte, che sono gli unici che corrompono un cache condiviso.
 
-Regole misurate, non ricordate (ogni riga cita il punto di `huggingface_hub` 0.36.2 su questa
-macchina, e alcune sono state scritte qui dopo che la misura le ha scoperte):
+Regole misurate, non ricordate. **Su questa macchina ci sono DUE `huggingface_hub` 0.36.2 che non
+sono lo stesso file** (`~/ai/env-vllmlx`, serie `requests`, e `~/ai/env-mflux`, serie `httpx`): i
+numeri di riga sottostanno sono di `env-mflux` salvo dove scritto diversamente, e i due set sono
+**entrambi in `LICENSES.md`** perché citare una riga senza dire quale copia si è aperta non è una
+prova, è una scommessa.
 
 - **Lock**: `<cache>/.locks/<models--org--nome>/<etag>.lock`, preso con `flock(LOCK_EX|LOCK_NB)` e
   rilasciato **chiudendo il fd** — il file NON si cancella (`_unix.py:103-108` fa solo `LOCK_UN` +
   `close`; il cache reale è pieno di `.lock`). Scrivere `O_CREAT|O_EXCL` su quel path — la mia prima
   bozza — avrebbe bloccato il secondo download per sempre: "il file c'è" non vuol dire "è preso".
-- **Temporaneo**: `<etag>.incomplete`, nome **determinato** (`file_download.py:1176`). Un suffisso
-  casuale — la mia seconda bozza — non lo ritrovano né l'altro processo né il prossimo avvio: 30 GB
-  di lavoro si riferebbero da zero.
+- **Temporaneo e resume — la lezione delle due copie.** Il comportamento del `.incomplete` **non è
+  lo stesso** nelle due installazioni:
+
+  | | `env-vllmlx` (serie `requests`) | `env-mflux` (serie `httpx`) |
+  |---|---|---|
+  | nome logico del temp | `blobs/<etag>.incomplete` — `:1176` | `blobs/<etag>.incomplete` — `:1237` |
+  | nome **reale** del temp | lo stesso, condiviso fra processi | `<etag>.<8 hex uuid4>.incomplete` — `:1908` |
+  | fallimento a metà | **resta**: «By default, we will try to resume the download if possible» `:1700-1704` | **cancellato** `:1944-1947` |
+  | perché è cambiato | — | `:1900-1907`: su Lustre/GPFS/alcuni NFS `flock(2)` **riesce silenziosamente a tutti**, quindi un temporaneo condiviso con un lock non onorato **corrompe il cache**; col nome per processo un lock rotto costa solo banda duplicata |
+
+  FastMLX sta sulla semantica di **sinistra** — nome determinato, partial mantenuto — perché il caso
+  d'uso è un CLI interrotto a 30 GB: un suffisso casuale — la mia seconda bozza — non lo ritrovano
+  né l'altro processo né il prossimo avvio. **Costo onesto: siamo più esposti a un lock non
+  onorato.** Regge a due condizioni, entrambe verificate qui: `flock` deve essere vero (su APFS lo
+  è, misurato: secondo processo in attesa ≥140 ms con timeout 150) e il lock va preso **prima** di
+  aprire il temporaneo, sempre. **Su un filesystem di rete questa lane non è sicura**: lì il nome per
+  processo è la scelta giusta e il resume cross-processo si perde.
 - **Il commit vince sul ref**: i byte vanno nello snapshot di `X-Repo-Commit`, non in quello di
-  `refs/<ramo>` di ieri; il ref si riscrive DOPO (`:1567`, `:1569-1576`), e un ref in sola lettura
-  non trasforma un download riuscito in un errore.
+  `refs/<ramo>` di ieri. La misura è `:1732-1737` — **il commit viene dalla risposta e se manca è
+  errore**, non si ripiega sul ref locale; il ref si aggiorna DOPO, e un ref in sola lettura non
+  trasforma un download riuscito in un errore.
 - **Range ignorato = si azzera**: se il server risponde 200 a una richiesta con `from > 0`, il
-  transport tronca il temporaneo prima di scrivere (`:429-433`), o il file sarebbe un corpo doppio.
+  transport tronca il temporaneo prima di scrivere (`:384-396`: `seek(0)` + `truncate()` +
+  `resume_size = 0`), o il file sarebbe un corpo doppio.
+- **Temporaneo già completo ⇒ nessun GET**: `:359-361` (`resume_size == expected_size` → `return`).
+  È la guardia che rende il "resume" un non-evento quando il lavoro è finito.
 - **Il limite è il file intero**, non "quanto manca": fermare la risposta a metà sarebbe un falso
   positivo; resta la guardia contro il server che dichiara 1 KB e ne streamma 1 TB.
-- **Credenziali**: `Accept-Encoding: identity` (altrimenti l'hash non combacia mai), token **mai**
-  spedito a un host diverso da quello della richiesta (`:1601-1603` — il CDN ha già l'URL firmato)
-  e **mai** in un messaggio d'errore.
+- **Credenziali**: `Accept-Encoding: identity` (altrimenti l'hash non combacia mai, `:1612`), token
+  **mai** spedito a un host diverso da quello della richiesta (`:1762-1766`: `headers.pop
+  ("authorization")` quando `netloc` cambia — il CDN ha già l'URL firmato) e **mai** in un messaggio
+  d'errore.
 - **L'etag DIVENTA un nome di file**: passa dalla stessa regola del path letto da un symlink
   (`fmlx_hf_name_is_safe`), perché una risposta ostile non deve scegliere un path nel nostro cache.
 - **Verifica prima del `rename`**: il nome definitivo compare solo quando i byte hanno già passato

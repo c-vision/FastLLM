@@ -9,17 +9,26 @@
  * e riporta ciò che il server ha detto (meta) o i suoi byte (get). Tutto il resto è in
  * fmlx_hf_fetch.c, dove si può provare senza rete.
  *
- * Regole prese da huggingface_hub 0.36.2, con la riga dove sta la misura:
- *  - HEAD per i metadati e `Accept-Encoding: identity` (file_download.py:1470): senza, il
+ * Regole prese da huggingface_hub 0.36.2, con la riga dove sta la misura. *(Le copie installate su
+ * questa macchina sono DUE, entrambe "0.36.2" e NON lo stesso file: i numeri qui sotto sono della
+ * copia `~/ai/env-mflux`, serie `httpx`. L'altra copia, `~/ai/env-vllmlx` (serie `requests`), ha
+ * le STESSE regole a righe diverse — la tabella dei due set è in `LICENSES.md`. Una riga senza
+ * quale copia si è aperta non è una prova.)*
+ *  - HEAD per i metadati e `Accept-Encoding: identity` (file_download.py:1612): senza, il
  *    Content-Length racconterebbe il corpo compresso e l'hash non combacerebbe mai;
  *  - nel HEAD i redirect ASSOLUTI non si seguono: la 302 porta già gli X-Linked-* e il suo
- *    Location è l'URL del GET (:1599-1600). Quelli RELATIVI sì, rifatti a mano (:282-302), che
- *    è il caso del repo rinominato — e si sostituisce SOLO il path, come fa :297;
- *  - GET sul Location senza token se l'host è diverso (:1601-1603). Qui è doppia prudenza:
- *    `CURLOPT_UNRESTRICTED_AUTH` resta 0, quindi curl per conto suo non porta l'Authorization
- *    attraverso un redirect cross-host;
+ *    `Location` È l'URL del GET (`:1629`, e il commento `:1627-1628` dice perché non si può usare
+ *    l'URL richiesto). Quelli RELATIVI sì, rifatti a mano da
+ *    `_httpx_follow_relative_redirects_with_backoff` (`utils/_http.py:718-733`, con
+ *    `follow_redirects=False` a `:723`): si aggiorna l'URL e si ripete, MAI lasciando che il client
+ *    salti da sé a un CDN — è il caso del repo rinominato;
+ *  - GET sul Location senza token se l'host è diverso (`file_download.py:1760-1766`:
+ *    `urlparse(url).netloc != urlparse(metadata.location).netloc` → `headers.pop("authorization")`).
+ *    Qui è doppia prudenza: `CURLOPT_UNRESTRICTED_AUTH` resta 0, quindi curl per conto suo non porta
+ *    l'Authorization attraverso un redirect cross-host;
  *  - se un GET con `Range:` si sente rispondere 200 (e non 206) il server ha ignorato il Range:
- *    il file si azzera PRIMA di scrivere (:429-433), altrimenti il temporaneo è un corpo doppio.
+ *    il file si azzera PRIMA di scrivere (`:384-396`: `seek(0)` + `truncate()` + `resume_size = 0`),
+ *    altrimenti il temporaneo è un corpo doppio.
  *
  * Disciplina del mutex: `g_ctx.mu` protegge UN handle riusato (keepalive). Ogni via d'uscita
  * dalla sezione critica passa per l'etichetta `out:`, così non esiste un `return` che lasci il

@@ -92,7 +92,9 @@ FmlxHfHashKind fmlx_hf_blob_hash_kind(const char *blob_name);
 
 /* ---- ambiente ---- */
 
-/* Radice del cache, nell'ordine MISURATO in huggingface_hub/constants.py:129-155:
+/* Radice del cache, nell'ordine MISURATO in huggingface_hub/constants.py:166-189 (copia
+ * `~/ai/env-mflux`; l'altra copia 0.36.2 di questa macchina ha le stesse regole a righe
+ * diverse, vedi LICENSES.md):
  * HF_HUB_CACHE, poi HUGGINGFACE_HUB_CACHE (legacy: è il DEFAULT di HF_HUB_CACHE, quindi viene
  * PRIMA di HF_HOME), poi $HF_HOME/hub, poi $XDG_CACHE_HOME/huggingface/hub, poi
  * $HOME/.cache/huggingface/hub. `~` e `$VAR` sono espansi nell'ordine di Python (tilde prima);
@@ -101,7 +103,7 @@ FmlxHfHashKind fmlx_hf_blob_hash_kind(const char *blob_name);
 FmlxHfStatus fmlx_hf_cache_root(char *out, size_t out_len);
 
 /* 1 = l'ambiente chiede il solo-offline: HF_HUB_OFFLINE o TRANSFORMERS_OFFLINE, veri i valori
- * "1","ON","YES","TRUE" (case-insensitive), misurato in constants.py:10 e :165. */
+ * "1","ON","YES","TRUE" (case-insensitive), misurato in constants.py:11 e :202. */
 int fmlx_hf_offline(void);
 
 /* Endpoint: HF_ENDPOINT senza "/" finale, altrimenti quello di default. */
@@ -117,7 +119,7 @@ FmlxHfStatus fmlx_hf_repo_dir(const char *cache_root, const char *repo_id, char 
 
 /* Nome di directory per un repo id (SENZA radice): "models--<org>--<nome>", con "/" rimpiazzata da
  * "--". È il `repo_folder_name` di HF, e non è solo la cartella del cache: è ANCHE il nome della
- * sottodirectory che huggingface_hub crea sotto `.locks/` (file_download.py:1202, misurato).
+ * sottodirectory che huggingface_hub crea sotto `.locks/` (file_download.py:1203, misurato).
  * Ambiguità ereditata da HF: "a--b/c" e "a/b--c" producono lo STESSO nome di directory. */
 FmlxHfStatus fmlx_hf_repo_dirname(const char *repo_id, char *out, size_t out_len);
 

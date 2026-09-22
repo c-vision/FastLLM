@@ -283,7 +283,7 @@ static void test_cache_root(void) {
     CK_ST(fmlx_hf_cache_root(out, sizeof out), FMLX_HF_OK);
     CK(strcmp(out, "/opt/f/hub") == 0, "'${VAR}' non espansa: '%s'", out);
 
-    /* catena di preferenza, come constants.py:129-155 */
+    /* catena di preferenza, come constants.py:166-189 */
     clear_env();
     setenv("HOME", "/home/tester", 1);
     setenv("HF_HOME", "/h", 1);
@@ -343,7 +343,7 @@ static void test_offline_endpoint(void) {
     CK(strcmp(ep, "https://hub-ci.huggingface.co") == 0, "rstrip('/') '%s'", ep);
     unsetenv("HF_ENDPOINT");
 
-    /* forma esatta di HUGGINGFACE_CO_URL_TEMPLATE (constants.py:68) */
+    /* forma esatta di HUGGINGFACE_CO_URL_TEMPLATE (constants.py:69) */
     CK_ST(fmlx_hf_url("mlx-community/Qwen3-0.6B-4bit", "main", "config.json", 1, url, sizeof url), FMLX_HF_OK);
     CK(strcmp(url, "https://huggingface.co/mlx-community/Qwen3-0.6B-4bit/resolve/main/config.json") == 0,
        "URL resolve '%s'", url);

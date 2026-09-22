@@ -32,7 +32,7 @@ void fmlx_hf_normalize_etag(const char *raw, char *out, size_t out_len) {
     if (out_len == 0) return;
     out[0] = '\0';
     if (!raw) return;
-    /* Esattamente `etag.lstrip("W/").strip('"')` di huggingface_hub (file_download.py:642-660).
+    /* Esattamente `etag.lstrip("W/").strip('"')` di huggingface_hub (`_normalize_etag`, file_download.py:596).
      * lstrip in Python elimina QUALSIASI carattere iniziale dell'insieme {W,/}, non il prefisso
      * "W/", e strip('"') ne elimina QUALSIASI numero alle due estremità, non uno: la copiamo tale
      * e quale perché il nome del blob deve coincidere con quello che scriverebbe huggingface_hub,
@@ -131,7 +131,7 @@ static int64_t file_size(const char *path) {
 
 /* Confronta il NETLOC di due URL, senza distinguere maiuscole/minuscole (RFC 3986: l'host non le
  * distingue). È la decisione da cui dipende se mandarci il token: huggingface_hub fa lo stesso
- * confronto (`urlparse(url).netloc != urlparse(metadata.location).netloc`, :1601) e se divergono
+ * confronto (`urlparse(url).netloc != urlparse(metadata.location).netloc`, :1764) e se divergono
  * TOGLIE l'authorization, perché il secondo host è un CDN con URL firmato. Una forma inattesa
  * (manca "://") conta come DIVERSA: la scelta prudente è non spedire la credenziale. */
 static int same_authority(const char *a, const char *b) {
@@ -269,14 +269,16 @@ static FmlxHfStatus fetch_one(const char *repo_id, const char *revision, const c
     if (s != FMLX_HF_OK) return s;
     /* Il commit dove finiscono i byte è quello che il server ha detto per QUESTO URL, non quello
      * che il cache pensa del ramo: un refs/main fermo a ieri descriverebbe come "ieri" dei byte di
-     * oggi. huggingface_hub fa allo stesso modo (metadata.commit_hash, file_download.py:1569-1576,
-     * con il ref riaggiornato a :1567). Se il server non lo dice, il ref locale è il meglio che
-     * abbiamo — e il fatto resta nel messaggio, non in silenzio. */
+     * oggi. huggingface_hub fa allo stesso modo (`commit_hash = metadata.commit_hash`,
+     * file_download.py:1733) e SE NON C'È È ERRORE (`:1734-1737`), non un ripiegamento sul ref:
+     * qui siamo più morbidi perche' un ramo locale e' informazione reale, ma il fatto resta nel
+     * messaggio, non in silenzio. */
     commit_ok = fmlx_hf_blob_hash_kind(meta.commit) == FMLX_HF_HASH_GIT_BLOB;
     if (meta.not_found) {
         /* 404/405: il marker va scritto nel commit del server se c'è, altrimenti in quello locale.
          * Scritto, chi chiede lo stesso file non rifà più la domanda alla rete. È anche qui che
-         * HF scrive il ref (:1567): il nome vale anche se il file non esiste. */
+         * HF scrive il ref nello stesso ramo del marker `.no_exist`: il nome vale anche se il file
+         * non esiste. */
         if (commit_ok) snprintf(sha, sizeof sha, "%s", meta.commit);
         if (commit_ok || sha_from_local) {
             s = write_no_exist_marker(repo, sha, relpath);
@@ -299,7 +301,7 @@ static FmlxHfStatus fetch_one(const char *repo_id, const char *revision, const c
     if (!fmlx_hf_name_is_safe(meta.etag))
         return fmlx_hf_fail(FMLX_HF_ERR_BAD_ETAG, "etag inaccettabile come nome: '%s'", meta.etag);
     /* Senza lunghezza dichiarata non c'è modo di provare un troncamento: huggingface_hub la esige
-     * allo stesso modo (file_download.py:1588 "does not have a Content-Length"). */
+     * allo stesso modo (file_download.py:1752, "Distant resource does not have a Content-Length."). */
     if (meta.size < 0)
         return fmlx_hf_fail(FMLX_HF_ERR_NO_SIZE, "%s: il server non dichiara la lunghezza", relpath);
     if (d.max_bytes > 0 && meta.size > d.max_bytes)
@@ -308,7 +310,7 @@ static FmlxHfStatus fetch_one(const char *repo_id, const char *revision, const c
 
     /* 5) lock. STESSO file e STESSA chiamata di sistema che usa chi condivide questo cache:
      *    huggingface_hub prende `<root>/.locks/<repo_folder_name>/<etag>.lock` (file_download.py
-     *    :1058 e :1202, misurato) e lo blocca con `fcntl.flock(fd, LOCK_EX|LOCK_NB)`
+     *    :1058 (`locks_dir`) e :1203 (`lock_path`), misurato) e lo blocca con `fcntl.flock(fd, LOCK_EX|LOCK_NB)`
      *    (filelock/_unix.py:76). Da lì due conseguenze che cambiano il codice:
      *      - il file ESISTE per sempre, anche a download finito: `_release` fa solo LOCK_UN + close
      *        (:103-108), NON cancella nulla — e infatti il cache reale è pieno di .lock. "C'è" non
@@ -348,9 +350,17 @@ static FmlxHfStatus fetch_one(const char *repo_id, const char *revision, const c
     }
 
     /* 6) dove stanno i byte: `blobs/<etag>` e, mentre scende, `blobs/<etag>.incomplete`. Il nome
-     *    del temporaneo è DETERMINATO (come in huggingface_hub, file_download.py:1176) proprio
-     *    perché la ripresa funzioni tra processi: un `.incomplete.<casuale>` non lo troverebbe
-     *    più nessuno, e 30 GB di lavoro si ripeterebbero da zero. */
+     *    del temporaneo è DETERMINATO proprio perché la ripresa funzioni tra processi: un
+     *    `.incomplete.<casuale>` non lo troverebbe più nessuno, e 30 GB di lavoro si ripeterebbero
+     *    da zero. NON è una divergenza da huggingface_hub: è una SCELTA TRA DUE COPIE di "0.36.2"
+     *    installate su questa macchina. La serie `requests` (`~/ai/env-vllmlx`) fa esattamente
+     *    così — temp condiviso `:1176`, mantenuto: «By default, we will try to resume the download
+     *    if possible» `:1700-1704`. La serie `httpx` (`~/ai/env-mflux`) è cambiata in
+     *    `<etag>.<8hex>.incomplete` (`:1908`) **cancellato a ogni fallimento** (`:1944-1947`),
+     *    perché su Lustre/GPFS/alcuni NFS `flock(2)` riesce silenziosamente a tutti (`:1900-1907`).
+     *    Qui si paga il secondo rischio per avere il primo comportamento, che è ciò che serve a un
+     *    terminale: il costo è scritto nel README e regge solo se il lock è preso prima di aprire
+     *    il temporaneo — sempre. */
     s = fmlx_hf_pjoin(blobs, sizeof blobs, repo, "blobs");
     if (s != FMLX_HF_OK) goto done;
     if (mkdir_p(blobs) != 0) {
@@ -375,14 +385,14 @@ static FmlxHfStatus fetch_one(const char *repo_id, const char *revision, const c
     if (from > meta.size) from = 0;
 
     /* GET: non si chiede MAI la testa quando il temporaneo è già completo (stessa guardia di
-     * huggingface_hub, file_download.py:391) — il server risponderebbe 416. */
+     * huggingface_hub, file_download.py:359-361) — il server risponderebbe 416. */
     if (from == meta.size) {
         written = 0;
     } else {
         const char *dl_url = meta.location[0] ? meta.location : url;
         const char *dl_token = token;
         /* Su un host DIVERSO dal hub (CDN) il token non si manda: la firma dell'URL è già
-         * l'autorizzazione. È la regola di file_download.py:1601-1603, e senza di essa ogni
+         * l'autorizzazione. È la regola di file_download.py:1760-1766, e senza di essa ogni
          * download LFS esporrebbe la credenziale a un terzo host. */
         if (token && !same_authority(url, dl_url)) dl_token = NULL;
         fd = open(tmp, O_CREAT | O_WRONLY | (from > 0 ? 0 : O_TRUNC), 0644);

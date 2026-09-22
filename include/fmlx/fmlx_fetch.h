@@ -7,13 +7,14 @@
  * confine del sistema (HTTP è il mondo esterno), ed è l'unico modo di dimostrare che un file
  * riparato finisce davvero nel punto giusto del cache.
  *
- * Le intestazioni lette sono quelle che huggingface_hub legge davvero (misurato in
- * `file_download.py:1478-1489`):
+ * Le intestazioni lette sono quelle che huggingface_hub legge davvero (copia `~/ai/env-mflux`,
+ * `file_download.py:1623-1632`; la serie `requests` le dice a `:1478-1489` — stesse
+ * regole, righe diverse: tabella delle due copie in `LICENSES.md`):
  *   commit  = X-Repo-Commit
  *   etag    = X-Linked-Etag, altrimenti ETag, "normalizzato" come lstrip("W/").strip('"')
- *             (`file_download.py:642-660`) — è il NOME del blob, quindi non è un dettaglio;
+ *             (`_normalize_etag`, file_download.py:596) — è il NOME del blob, quindi non è un dettaglio;
  *   size    = X-Linked-Size, altrimenti Content-Length.
- * REGEX_COMMIT_HASH `^[0-9a-f]{40}$` e REGEX_SHA256 `^[0-9a-f]{64}$` (file_download.py:81,84)
+ * REGEX_COMMIT_HASH `^[0-9a-f]{40}$` e REGEX_SHA256 `^[0-9a-f]{64}$` (file_download.py:70,73)
  * sono la STESSA regola che `fmlx_hf_blob_hash_kind` applica per lunghezza: due codici indipendenti
  * dicono la stessa cosa, e questa è la conferma che i 40 hex NON sono uno SHA1 nudo.
  *
@@ -22,7 +23,12 @@
  *     allora `rename()` (stessa directory = atomica) e symlink. Un processo interrotto lascia solo
  *     un `.incomplete`, mai un blob mezzo col nome giusto. Il nome del temporaneo è DETERMINATO
  *     proprio perché un ALTRO processo — o lo stesso al riavvio — lo trovi e riprenda da dove era
- *     arrivato invece di riscaricare 30 GB (huggingface_hub file_download.py:1176).
+ *     arrivato invece di riscaricare 30 GB. QUI SI DIVERGE da huggingface_hub, deliberatamente: lì
+ *     il path logico è `<etag>.incomplete` (`:1237`) ma si scende in `<etag>.<8hex-uuid>.incomplete`
+ *     (`:1908`) e il temporaneo VIEN CANCELLATO a ogni fallimento (`:1944-1947`), cioè il resume fra
+ *     processi non c'è; il motivo (`:1900-1907`) è che su Lustre/GPFS/NFS `flock(2)` riesce
+ *     silenziosamente a tutti. Un nome determinato è quindi più esposto a un lock non onorato:
+ *     regge SOLO SE il lock è preso prima di aprire il temporaneo, sempre.
  *   - Lock: `<root>/.locks/<repo-dir>/<etag>.lock`, trattenuto con `flock(LOCK_EX|LOCK_NB)` finché
  *     il fd resta aperto. Il file ESISTE anche quando è libero (è così nel cache reale, dove i lock
  *     non si cancellano mai), quindi "c'è" non vuol dire "è preso": lo dice solo flock. Scaduti
@@ -56,11 +62,13 @@ typedef struct {
     void *ctx;
     /* HEAD dei metadati: DEVE compilare `out` senza scaricare il corpo. Due regole prese da
      * huggingface_hub, perché sono ciò che il server risponde in modo diverso:
-     *  - `Accept-Encoding: identity`, altrimenti Content-Length racconterebbe il corpo compresso
-     *    (constants in file_download.py:1470) e l'hash non combacerebbe MAI;
+     *  - `Accept-Encoding: identity` (file_download.py:1612), altrimenti Content-Length
+     *    racconterebbe il corpo compresso e l'hash non combacerebbe MAI;
      *  - i redirect ASSOLUTI non si seguono (sono la risposta 302 con già negli header
-     *    X-Linked-*: finiscono in `location`), quelli RELATIVI sì — HF li rifà a mano
-     *    (`_request_wrapper`, file_download.py:282-302) per il caso di repo rinominato.
+     *    X-Linked-*: finiscono in `location`), quelli RELATIVI sì — HF li rifà a mano con
+     *    `_httpx_follow_relative_redirects_with_backoff` (`:1615-1617`) e il `location` è la
+     *    `Location` della risposta, non l'URL richiesto (`:1627-1629`: "we might have followed
+     *    relative redirects") — è il caso del repo rinominato.
      */
     FmlxHfStatus (*meta)(void *ctx, const char *url, const char *token, FmlxHfMeta *out);
     /* GET con `Range: bytes=<from>-` se from > 0; APPEND su `fd`; scrive in *written i byte NUOVI
@@ -70,8 +78,9 @@ typedef struct {
      * "quanto manca": se il server ignora il Range risponde con tutto il corpo, e fermarlo a metà
      * sarebbe un falso positivo che costringe a ricominciare. Se il server risponde 200 a una
      * richiesta con `from > 0` ha IGNORATO il Range: il transport DEVE azzerare il file prima di
-     * scrivere (stessa guardia di file_download.py:429-433), altrimenti il temporaneo sarebbe un
-     * corpo doppio. */
+     * scrivere (stessa guardia di file_download.py:384-396: `seek(0)` + `truncate()` +
+     * `resume_size = 0`), altrimenti il temporaneo sarebbe un corpo doppio. Se il temporaneo ha già
+     * `expected_size` byte, il GET non parte affatto (`:359-361`). */
     FmlxHfStatus (*get)(void *ctx, const char *url, const char *token, int64_t from, int64_t limit,
                         int fd, int64_t *written);
 } FmlxHfTransport;

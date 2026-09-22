@@ -66,8 +66,11 @@ static const char W3[] = "0123456789"; /* 10 byte */
 static const char *EP = "https://huggingface.co";
 static const char *REPO = "org/repo";
 /* Il nome di directory sotto .locks/ è il NOME DELLA CARTELLA del repo, non "<org>--<nome>":
- * misurato su file_download.py:1202 (`repo_folder_name(...)`) e sul cache reale di questa
- * macchina (`~/.cache/huggingface/hub/.locks/models--...`). Prima versione di questo test: 6
+ * misurato su file_download.py:1203 (`lock_path = os.path.join(locks_dir, repo_folder_name(...), f"{etag}.lock")`) e sul cache reale di questa
+ * macchina. Qui ce ne sono DUE, entrambe con `.locks/` (misurato: 24 voci / 10 lock e 12 / 7):
+ * `~/ai/hf-cache/hub`, perché `~/.zshrc:52` pone `HF_HOME=/Users/gaetano/ai/hf-cache`, e
+ * `~/.cache/huggingface/hub`, che è il default quando `HF_HOME` non arriva (shell non
+ * interattiva). Prima versione di questo test: 6
  * fallimenti dovuti a questa supposizione. */
 static const char *DN = "models--org--repo";
 

@@ -1,13 +1,16 @@
 /* fmlx_hf_cache.c — percorsi e cache locale di HF Hub, SENZA rete (vedi fmlx_hf.h).
  *
  * Ogni regola di qui è misurata da una fonte citata, non ricordata:
- *  - radice del cache: `huggingface_hub/constants.py:129-155` (HF_HUB_CACHE → legacy
+ * Le righe citate qui sotto sono della copia `~/ai/env-mflux` di huggingface_hub 0.36.2;
+ * su questa macchina ne esiste ANCHE un'altra `~/ai/env-vllmlx` (stesso numero, altro file)
+ * con le STESSE regole a righe diverse: tabella in LICENSES.md.
+ *  - radice del cache: `huggingface_hub/constants.py:166-189` (HF_HUB_CACHE → legacy
  *    HUGGINGFACE_HUB_CACHE → HF_HOME/hub → XDG_CACHE_HOME/huggingface/hub → ~/.cache/...,
  *    con expanduser PRIMA di expandvars);
- *  - offline: `constants.py:165` + `ENV_VARS_TRUE_VALUES` a `constants.py:10` = {1,ON,YES,TRUE};
- *  - endpoint e URL: `constants.py:67-68` (ENDPOINT con rstrip("/") e
+ *  - offline: `constants.py:202` + `ENV_VARS_TRUE_VALUES` a `constants.py:11` = {1,ON,YES,TRUE};
+ *  - endpoint e URL: `constants.py:68-69` (ENDPOINT con rstrip("/") e
  *    "{endpoint}/{repo_id}/resolve/{revision}/{filename}");
- *  - nome di directory: `constants.py:99` REPO_ID_SEPARATOR = "--", e un id SENZA namespace
+ *  - nome di directory: `constants.py:118` REPO_ID_SEPARATOR = "--", e un id SENZA namespace
  *    resta un solo segmento (`utils/_cache_manager.py:480` mostra models--roberta-base).
  */
 #include "fmlx/fmlx_hf.h"
@@ -177,7 +180,7 @@ static int expand_vars(const char *in, char *out, size_t out_len) {
     return 0;
 }
 
-/* Stesso ordine di Python: expanduser PRIMA di expandvars (constants.py:130-155). */
+/* Stesso ordine di Python: expanduser PRIMA di expandvars (constants.py:168-189: expanduser dopo expandvars, entrambi su HF_HOME e HF_HUB_CACHE). */
 static int hf_expand(const char *in, char *out, size_t out_len) {
     char tmp[FMLX_HF_PATH_MAX];
     if (expand_tilde(in, tmp, sizeof tmp) != 0) return -1;
@@ -200,7 +203,7 @@ FmlxHfStatus fmlx_hf_cache_root(char *out, size_t out_len) {
         rtrim_slash(out);
         return FMLX_HF_OK;
     }
-    /* Il legacy ha la precedenza su HF_HOME: in constants.py:145 HUGGINGFACE_HUB_CACHE è il
+    /* Il legacy ha la precedenza su HF_HOME: a constants.py:189 HUGGINGFACE_HUB_CACHE è il
      * DEFAULT di HF_HUB_CACHE, quindi viene consultato prima, non dopo. */
     v = getenv("HUGGINGFACE_HUB_CACHE");
     if (v && *v) {
@@ -246,7 +249,7 @@ static int truthy(const char *v) {
 }
 
 int fmlx_hf_offline(void) {
-    /* constants.py:165: HF_HUB_OFFLINE oppure TRANSFORMERS_OFFLINE, valori {1,ON,YES,TRUE} */
+    /* constants.py:202: HF_HUB_OFFLINE oppure TRANSFORMERS_OFFLINE, valori {1,ON,YES,TRUE} */
     return truthy(getenv("HF_HUB_OFFLINE")) || truthy(getenv("TRANSFORMERS_OFFLINE"));
 }
 
@@ -291,7 +294,7 @@ FmlxHfStatus fmlx_hf_repo_dir(const char *cache_root, const char *repo_id, char 
     FmlxHfStatus s = fmlx_hf_repo_dirname(repo_id, dir, sizeof dir);
     if (s != FMLX_HF_OK) return s;
     /* Ambiguità ereditata, non nostra: "a--b/c" e "a/b--c" danno LO STESSO nome di directory,
-     * perche' HF separa con "--" e non sfugge nulla (constants.py:99). Non possiamo risolverla
+     * perche' HF separa con "--" e non sfugge nulla (constants.py:118). Non possiamo risolverla
      * qui, quindi la dichiariamo: chi ha bisogno di un mapping iniettivo deve passare l'id. */
     return fmlx_hf_pjoin(out, out_len, cache_root, dir);
 }
@@ -397,7 +400,7 @@ FmlxHfStatus fmlx_hf_url_with(const char *endpoint, const char *repo_id, const c
         s = fmlx_hf_check_relpath(relpath);
         if (s != FMLX_HF_OK) return s;
         if (strchr(repo_id, '/')) {
-            /* id con namespace: com'è nel template di constants.py:68 */
+            /* id con namespace: com'è nel template di constants.py:69 */
         } else if (!segment_ok(repo_id, strlen(repo_id), 1)) {
             return fmlx_hf_fail(FMLX_HF_ERR_REPO_ID, "repo id '%s' vietato", repo_id);
         }
