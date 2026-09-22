@@ -9,3 +9,4 @@ work/
 compile_commands.json
 .cache/
 .DS_Store
+__pycache__/

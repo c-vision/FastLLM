@@ -61,5 +61,36 @@ add_test(NAME hf_fetch COMMAND test_hf_fetch ${CMAKE_CURRENT_BINARY_DIR}/work)
 add_executable(hf_fetch_probe tools/hf_fetch_probe.c)
 target_link_libraries(hf_fetch_probe PRIVATE fmlx_hf_fetch)
 
+# --- lane_json: il codec che tocca ogni byte in entrata e in uscita dalle API -------------
+# Due file separati perché parser e writer hanno contratti diversi: il parser RIFIUTA con
+# un codice per causa e un offset, il writer NON DEVE MAI produrre output a metà.
+add_library(fmlx_json STATIC src/json/fmlx_json.c src/json/fmlx_jsonw.c)
+target_include_directories(fmlx_json PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+add_executable(test_json tests/json/test_json.c)
+target_link_libraries(test_json PRIVATE fmlx_json)
+add_test(NAME json COMMAND test_json)
+
+add_executable(test_jsonw tests/json/test_jsonw.c)
+target_link_libraries(test_jsonw PRIVATE fmlx_json)
+add_test(NAME jsonw COMMAND test_jsonw)
+
+# Verdetto del parser su un input: è lo strumento con cui il parser è stato confrontato con
+# `json.loads` (tools/json_oracle.py). Da solo NON è un test — stampa e basta.
+add_executable(json_diff tools/json_diff.c)
+target_link_libraries(json_diff PRIVATE fmlx_json)
+
+# Il differenziale gira in ctest SOLO DOVE Python c'è: `find_package`Quiet, e il test si
+# registra solo se l'interprete esiste. La macchina senza Python NON lo vede verde per
+# assenza: semplicemente non c'è, e il numero di test in output lo dice.
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME json_oracle
+             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/json_oracle.py diff
+                     ${CMAKE_CURRENT_SOURCE_DIR}/tests/json/corpus.hex $<TARGET_FILE:json_diff>)
+    set_tests_properties(json_oracle PROPERTIES
+        PASS_REGULAR_EXPRESSION "divergenze dure 8, round-trip 0")
+endif()
+
 # Le altre lane (engine MLX, server OpenAI/Anthropic, CLI) non hanno
 # ancora codice: si aggiungono QUI quando esistono, non come target vuoti.
