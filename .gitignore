@@ -1,0 +1,11 @@
+build/
+build-*/
+work/
+*.o
+*.a
+*.dylib
+*.so
+*.metallib
+compile_commands.json
+.cache/
+.DS_Store
