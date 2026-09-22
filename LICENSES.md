@@ -48,7 +48,8 @@ ha già scaricato, e i test costruiscono un cache finto sotto `build/work/`.
 | cosa | da dove | licenza | obbligo |
 |---|---|---|---|
 | kernel Metal `oq_a8*` (già usati da GMBasic) | `GMBasic/native/gmb_metal_oq_a8/` → a monte **oMLX** | **Apache-2.0** (`LICENSE-oMLX-Apache-2.0.txt`, `THIRD_PARTY_NOTICES.md`) | §4(a)(b)(c): copia della licenza, notice di modifica, conservazione degli attributi |
-| host/engine MLX | `mlx` e `mlx-c` (Apple) | Apache-2.0 | link dinamico a runtime; notice se si redistribuisce |
+| host/engine MLX | `mlx` (Apple/ml-explore) e `mlx-c` (ml-explore) — sorgenti letti su questa macchina in `GMBasic/libs/mlx-deps/{mlx-src,mlx-c-src}` | **MIT** — **misurato sui due `LICENSE`** (2026-09-22), non assunto. La riga che stava qui diceva "Apache-2.0": falso |
+| ↳ come si linkano | `libmlx.a` (31 MB) + `libmlxc.a` (1,0 MB) in `libs/mlx-deps/precompiled/darwin-arm64`; GMBasic forza `BUILD_SHARED_LIBS OFF` (`native/gmb_host_ai_mlx/CMakeLists.txt:24`) | **link STATICO**, non dinamico: l'obbligo MIT (testo integrale + copyright nel bundle) **scatta alla distribuzione**, non è opzionale "se si redistribuisce" |
 | link a ggml/llama.cpp per i tipi IQ non ancora coperti (invece di riscriverli) | llama.cpp / ggml | MIT | attribuzione se si linka statico o si copia |
 | motore ds4 (`ds4_infer.c`) | `/Users/gaetano/ds4/` | MIT | attribuzione |
 
