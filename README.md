@@ -11,8 +11,10 @@ da Hugging Face). Piano completo: `AiWiki/01-Projects/FastMLX/Piani/(open) - Fas
 |---|---|
 | `src/lane_gguf/fmlx_gguf.c` — lettore GGUF di riferimento | **esiste, compilato, testato** (259 verifiche) |
 | `src/lane_gguf/fmlx_quant.c` — dequant ggml → F32 (13 tipi) | **esiste, compilato, testato** (461 verifiche + gate differenziale) |
+| `src/hf/fmlx_hf_cache.c` + `fmlx_hf_hash.c` — cache HF letto, senza rete | **esiste, compilato, testato** (131 verifiche + sonda sul cache reale) |
+| `src/hf/fmlx_hf_fetch.c` + `fmlx_hf_curl.c` — download, lock, resume, verifica | **esiste, compilato, testato** (172 verifiche senza rete + probe sul server vero) |
 | `src/lane_mlx/` — motore MLX estratto da GMBasic | non scritto (dipende da D2) |
-| `src/server/`, `src/cli/`, `src/hf/` | non scritti |
+| `src/server/` (OpenAI + Anthropic), `src/cli/` (stile Ollama) | non scritti |
 
 Qui sotto c'è solo ciò che compila davvero. Nessuna cartella vuota "perché il piano la prevede".
 L'enumerazione di ciò che MLX/caricatore loader GGUF sanno davvero fare, con i `file:riga` della
@@ -78,14 +80,98 @@ Le codebook IQ2 (`src/lane_gguf/fmlx_iq2_tables.h`) sono **generate**, non trasc
 disco (ds4 + i due duplicati del vault GMBasic) e rifiuta di scrivere se divergono anche di uno
 solo dei 256×64 + 128×8 bit. Licenza MIT ggml: vedi `LICENSES.md`.
 
+## La lane HF (cache) oggi
+
+`include/fmlx/fmlx_hf.h` + `src/hf/fmlx_hf_cache.c` + `src/hf/fmlx_hf_hash.c`: legge il cache di
+Hugging Face **senza toccare la rete**. Ogni regola è misurata da una fonte, non ricordata:
+
+- **radice**: `HF_HUB_CACHE` → legacy `HUGGINGFACE_HUB_CACHE` → `HF_HOME/hub` →
+  `XDG_CACHE_HOME/huggingface/hub` → `~/.cache/huggingface/hub`, con `expanduser` prima di
+  `expandvars` (`huggingface_hub/constants.py:129-155`). La precedenza del legacy su `HF_HOME`
+  sembra strana e invece è esatta: in quel file il legacy è il *default* di `HF_HUB_CACHE`.
+- **nome dei blob, e qui c'è la trappola**: 64 esadecimali = **SHA256 del contenuto** (verificato
+  su 2/2 blob LFS, incluso `model.safetensors` da 335.450.584 byte); 40 esadecimali **NON** è lo
+  SHA1 del contenuto — 6/6 blob locali lo smentiscono — ma il **git blob id**, SHA1 di
+  `"blob <len>\0" + contenuto` (3/3 confermati con `git hash-object`). Un verificatore che
+  assumesse lo SHA1 nudo scarterebbe *ogni* file non-LFS del cache come corrotto.
+- **profondità dei symlink**: `(../)×(2 + barre del path) + blobs/<nome>`, confrontata come
+  *forma* e non risolta con `realpath`: un symlink che punta altrove è `ERR_LINK_FORM`, non un
+  path da seguire. La regola è confermata dal caso reale più profondo trovato su questa macchina
+  (`…/coreml/fill-mask/float32_model.mlpackage/Manifest.json`, cinque `../`).
+- **quattro "non trovato" diversi**, perché solo uno dei quattro giustifica una richiesta di rete:
+  repo assente, snapshot assente, entry non scaricata, file **che il remote non ha** (marker
+  `.no_exist`, misurato come file vuoto). `ERR_NOT_ON_REMOTE` è il codice che impedisce al
+  downloader di rincorrere per sempre un 404.
+- Le entry **file regolare** dentro lo snapshot (scritte da un altro tool, senza symlink) sono
+  usabili ma `fmlx_hf_verify` risponde `ERR_NOT_VERIFIABLE`, **non** "ok": il nome non promette
+  nulla, e un falso positivo qui è un file corrotto accettato.
+
+Cosa **non** fa ancora: nessun protocollo xet (esiste nel cache come staging, l'ho misurato ma non
+l'ho implementato), nessuna API `delete`/`upload`.
+
+## Lane download (`src/hf/fmlx_hf_fetch.c` + `fmlx_hf_curl.c`) — esiste, compilato, provato
+
+La logica di cache e il trasporto sono due file separati perché la prima si prova **senza rete**:
+`tests/hf/test_hf_fetch.c` usa un transport finto (20 casi, 172 verifiche) e scopre i bug di
+DOVE-finiscono-i-byte, che sono gli unici che corrompono un cache condiviso.
+
+Regole misurate, non ricordate (ogni riga cita il punto di `huggingface_hub` 0.36.2 su questa
+macchina, e alcune sono state scritte qui dopo che la misura le ha scoperte):
+
+- **Lock**: `<cache>/.locks/<models--org--nome>/<etag>.lock`, preso con `flock(LOCK_EX|LOCK_NB)` e
+  rilasciato **chiudendo il fd** — il file NON si cancella (`_unix.py:103-108` fa solo `LOCK_UN` +
+  `close`; il cache reale è pieno di `.lock`). Scrivere `O_CREAT|O_EXCL` su quel path — la mia prima
+  bozza — avrebbe bloccato il secondo download per sempre: "il file c'è" non vuol dire "è preso".
+- **Temporaneo**: `<etag>.incomplete`, nome **determinato** (`file_download.py:1176`). Un suffisso
+  casuale — la mia seconda bozza — non lo ritrovano né l'altro processo né il prossimo avvio: 30 GB
+  di lavoro si riferebbero da zero.
+- **Il commit vince sul ref**: i byte vanno nello snapshot di `X-Repo-Commit`, non in quello di
+  `refs/<ramo>` di ieri; il ref si riscrive DOPO (`:1567`, `:1569-1576`), e un ref in sola lettura
+  non trasforma un download riuscito in un errore.
+- **Range ignorato = si azzera**: se il server risponde 200 a una richiesta con `from > 0`, il
+  transport tronca il temporaneo prima di scrivere (`:429-433`), o il file sarebbe un corpo doppio.
+- **Il limite è il file intero**, non "quanto manca": fermare la risposta a metà sarebbe un falso
+  positivo; resta la guardia contro il server che dichiara 1 KB e ne streamma 1 TB.
+- **Credenziali**: `Accept-Encoding: identity` (altrimenti l'hash non combacia mai), token **mai**
+  spedito a un host diverso da quello della richiesta (`:1601-1603` — il CDN ha già l'URL firmato)
+  e **mai** in un messaggio d'errore.
+- **L'etag DIVENTA un nome di file**: passa dalla stessa regola del path letto da un symlink
+  (`fmlx_hf_name_is_safe`), perché una risposta ostile non deve scegliere un path nel nostro cache.
+- **Verifica prima del `rename`**: il nome definitivo compare solo quando i byte hanno già passato
+  l'hash che quel nome promette. Un blob falso non esiste, punto; un `.incomplete` troncato resta.
+
+**Contatto con il server vero** (`build/hf_fetch_probe`, fuori da `ctest` di proposito):
+`google-bert/bert-base-uncased/config.json` → `45a2321a7ecfdaaf60a6c1fd7f5463994cc8907d`, e
+`git hash-object` sul blob scaricato dice lo STESSO nome: la regola del "git blob id" verificata
+contro i byte del server, non contro il nostro codice. Il lato SHA256 (LFS) è verificato sullo
+stesso file reale da 335 MB del cache locale (`hash=2 → ok`).
+
+**Trasporto del download, deciso con una misura.** Avevo scritto che su questa macchina non
+esistono le intestazioni di curl: **falso**. `MacOSX.sdk/usr/include/curl/curl.h` c'è, e un probe
+compilato e linkato con `cc … -lcurl` ha stampato `libcurl/8.7.1 SecureTransport`. Così è: la lane
+di download usa **libcurl di sistema** (`find_package(CURL)`, TLS via SecureTransport — nessuna
+dipendenza da vendere, nessun CA bundle da distribuire), non un figlio di `/usr/bin/curl` e non
+socket nudi senza TLS come `gmb_network.c`. Gli SHA per la verifica vengono da `CommonCrypto`
+(`CC_SHA1`/`CC_SHA256`, header nell'SDK): una nostra copia di SHA1 sarebbe l'unico modo di
+sbagliarla in silenzio.
+
 ## Build e test
 
 ```sh
 cmake -S . -B build
 cmake --build build          # -Wall -Wextra -Werror
-ctest --test-dir build --output-on-failure
+ctest --test-dir build --output-on-failure   # 4 suite, nessuna tocca la rete
 ./build/fmlx_gguf_inspect <file.gguf>   # testata, tipi, allineamento, coda di byte
+./build/hf_probe --tree <org>/<repo> [<rev>]   # cache HF reale: locate + verifica, sola lettura
+HF_HUB_CACHE=work/probe-cache ./build/hf_fetch_probe <org>/<repo> [<rev>] [<file>] [<max byte>]
+                                         # download VERO, in una cache di lavoro: mai la reale
 ```
+
+`hf_probe` è l'unico contatto con i dati reali ed è **in fuori da `ctest` di proposito**: la suite
+devve girare su una macchina senza cache e senza rete. La sua ragione di esistere è che un parser
+testato solo su fixture sintetiche può essere coerente con se stesso e sbagliato col mondo — è
+esattamente ciò che è successo alla tabella dei tipi (vedi sopra), e il cache reale di questa
+macchina ha due radici diverse (`HF_HOME` e `~/.cache`) che il probe distingue da solo.
 
 La suite (`tests/gguf/test_gguf.c`) **non scarica nulla**: i file validi si scrivono col writer
 di fixture del progetto stesso, i file malati si costruiscono byte per byte. Copre i casi (a)–(g)
