@@ -19,6 +19,7 @@
 #define FMLX_CLI_H
 
 #include "fmlx/fmlx_fetch.h"
+#include "fmlx/fmlx_serve.h"
 
 #include <stdio.h>
 
@@ -79,6 +80,8 @@ typedef struct {
     char repo[FMLX_HF_PATH_MAX]; /* l'argomento posizionale: vuoto se il verbo non ne vuole */
     const char *revision;        /* default "main": il default di Hugging Face, non una scelta nostra */
     FmlxPullOpts pull;
+    FmlxServeOpts serve; /* le opzioni di `serve` stanno LÌ: una bandiera che esiste a CLI deve
+                          * esistere anche nel server, o sarebbe una bandiera che mente (§1.1) */
     int quiet;
     int want_help; /* -h/--help: NON è un errore, e l'uscita è 0 */
 } FmlxCliArgs;
@@ -91,6 +94,14 @@ typedef struct {
  * Con `a->quiet` una riga per repo (id e basta): la forma per i parse di una shell.
  * `out`/`err` separate come per il `pull`: l'elenco è dato, i problemi no. */
 FmlxCliStatus fmlx_models_exec(const FmlxCliArgs *a, FILE *out, FILE *err);
+
+/* ---- serve ---- */
+
+/* Il `serve` da terminale: risolve host/port/chiave (flag > ambiente > default, piano §14),
+ * stampa UNA riga all'operatore e passa tutto al loop. NON ha un transport: non tocca la rete,
+ * la ascolta. Con `a->quiet` niente riga di ascolto, ma i log per-richiesta restano su `err`:
+ * un server che tace del tutto non è silenzioso, è opaco. */
+FmlxCliStatus fmlx_serve_exec(const FmlxCliArgs *a, FILE *out, FILE *err);
 
 /* Azzera SEMPRE `out`, anche quando fallisce: un args mezzo riempito in mano al dispatch è il modo
  * migliore per eseguire il verbo sbagliato. `msg` riceve la ragione (può essere NULL). */

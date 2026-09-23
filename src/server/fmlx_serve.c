@@ -1,0 +1,396 @@
+/* fmlx_serve.c — la metà sporca del server: bind, accept, read, write, keep-alive.
+ *
+ * Qui non c'è nessuna decisione su COSA rispondere: quella è in `fmlx_serve_respond.c` ed è
+ * provata in memoria. Questo file ha una sola ragione di essere corretto, ed è la stessa del codec
+ * che sta sotto: **sapere dove finisce una richiesta e dove comincia la successiva**. Un loop che
+ * sbaglia il conteggio dei byte del corpo lascia il residuo nella finestra del prossimo request, e
+ * quello che ne viene fuori non è un bug visibile: è un server che risponde in modo diverso a
+ * seconda di chi è arrivato prima.
+ *
+ * TRE COSE CHE SEMBRANO OTTIMIZZAZIONI E NON LO SONO:
+ *  1. un solo buffer di lettura, allocato una volta per `serve` e non per connessione: la memoria
+ *     del server non deve dipendere da quanti client si presentano;
+ *  2. `SIGPIPE` ignorato: scrivere su un socket chiuso da un browser che si annoia È normale, e
+ *     non è un motivo per far morire il processo senza una riga;
+ *  3. `Expect: 100-continue` onorato PRIMA di leggere un corpo grande: se il client non sa che può
+ *     mandarlo, si siede nei tempi morti e il ritardo sembra colpa nostra.
+ *
+ * La fine di una connessione NON È UN ERRORE. Il loop locale la tratta come una condizione, non
+ * come un `FmlxHttpStatus`: i codici del codec descrivono byte che arrivano, non l'assenza di
+ * byte, e inventarne uno per «il client ha chiuso» vorrebbe dire farne un codice da mappare su una
+ * risposta che invece non si manda.
+ */
+#include "fmlx/fmlx_serve.h"
+
+#include <errno.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <signal.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <unistd.h>
+
+/* ---- memoria ---- */
+
+int fmlx_serve_buf_init(FmlxServeBuf *b, size_t resp_cap, size_t repos_cap) {
+    if (!b) return -1;
+    b->resp = NULL;
+    b->resp_cap = 0;
+    b->repos = NULL;
+    b->repos_cap = 0;
+    if (!resp_cap) resp_cap = FMLX_SERVE_RESP_MAX;
+    if (!repos_cap) repos_cap = FMLX_HF_CATALOG_REPOS_MAX;
+    b->resp = malloc(resp_cap);
+    if (!b->resp) return -1;
+    b->repos = calloc(repos_cap, sizeof b->repos[0]);
+    if (!b->repos) {
+        free(b->resp);
+        b->resp = NULL;
+        return -1;
+    }
+    b->resp_cap = resp_cap;
+    b->repos_cap = repos_cap;
+    return 0;
+}
+
+void fmlx_serve_buf_free(FmlxServeBuf *b) {
+    if (!b) return;
+    free(b->resp);
+    free(b->repos);
+    b->resp = NULL;
+    b->resp_cap = 0;
+    b->repos = NULL;
+    b->repos_cap = 0;
+}
+
+/* ---- il filo che esce ---- */
+
+/* Scrive tutto, o dice perché no. `EINTR` si riprova (un segnale non è un fallimento). NON si
+ * recupera `EAGAIN`: il socket è in blocking, e un `continue` su EAGAIN sarebbe una CPU al 100%
+ * con il client che non legge. */
+static int write_all(int fd, const char *p, size_t n) {
+    while (n) {
+        ssize_t w = send(fd, p, n, 0);
+        if (w > 0) {
+            p += w;
+            n -= (size_t)w;
+            continue;
+        }
+        if (w < 0 && errno == EINTR) continue;
+        return -1;
+    }
+    return 0;
+}
+
+static void logf(FILE *log, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
+
+static void logf(FILE *log, const char *fmt, ...) {
+    va_list ap;
+
+    if (!log) return;
+    va_start(ap, fmt);
+    vfprintf(log, fmt, ap);
+    va_end(ap);
+    fputc('\n', log);
+    fflush(log);
+}
+
+/* Il target nel log: la slice punta nel buffer di lettura e NON è terminato, quindi si copia.
+ * 96 byte bastano a leggere una riga di log e il taglio è marcato con ` ~`, così che «il path era
+ * più lungo» non diventi «il path era quello». */
+static void log_target(const FmlxSlice *t, char *out, size_t n) {
+    size_t i = 0;
+    while (i < t->n && i + 4 < n) {
+        out[i] = t->p[i] == '\n' || t->p[i] == '\r' ? '?' : t->p[i]; /* un log non si spezza */
+        i++;
+    }
+    if (i < t->n) {
+        snprintf(out + i, n - i, " ~");
+        return;
+    }
+    out[i] = '\0';
+}
+
+/* ---- una risposta del loop, non del responder ---- */
+
+/* Il loop deve rispondere a cose che il responder non vede nemmeno: una testata che il codec
+ * rifiuta, o un corpo promesso più grande della finestra. Si passa DA `fmlx_api_error_response`
+ * anche qui: una testata scritta a mano è il modo in cui un `Content-Length` smette di coincidere
+ * coi byte inviati, e una connessione appesa è peggio di un 400. */
+static int loop_refuse(FmlxServeBuf *sbuf, FmlxApiErr err, const char *code, const char *msg,
+                       size_t *out_len) {
+    FmlxApiErrCtx e;
+
+    memset(&e, 0, sizeof e);
+    e.err = err;
+    e.code = code;
+    e.message = msg;
+    *out_len = 0;
+    if (fmlx_api_error_response(&e, 0, sbuf->resp, sbuf->resp_cap, out_len) != FMLX_API_OK)
+        return -1;
+    /* Il `http10` è 0 di proposito: se il parser ha rifiutato, la request-line può essere
+     * QUALSIASI cosa e la sua versione non è un fatto accertato. Il `close` invece lo è: questa
+     * funzione esiste solo nei punti in cui il loop sta per chiudere. */
+    if (fmlx_serve_agree_head(0, sbuf, out_len, 0) != FMLX_SERVE_OK) return -1;
+    return 0;
+}
+
+/* Due cause distinte, due codici: `chunked` è «non lo implemento» (501); il resto è «quello che
+ * hai mandato non è una richiesta che posso leggere in sicurezza» (400). Un `Transfer-Encoding`
+ * insieme a `Content-Length` non è «non supportato»: è una divergenza fra noi e un proxy, e
+ * rispondere 501 mentirebbe sulla causa. */
+static int loop_refuse_parse(FmlxServeBuf *sbuf, FmlxHttpStatus s, size_t *out_len) {
+    char msg[192];
+
+    if (s == FMLX_HTTP_ERR_CHUNKED) {
+        snprintf(msg, sizeof msg,
+                 "Transfer-Encoding: chunked is not supported: send Content-Length");
+        return loop_refuse(sbuf, FMLX_API_NOT_SUPPORTED, FMLX_SERVE_CODE_CHUNKED, msg, out_len);
+    }
+    snprintf(msg, sizeof msg, "malformed HTTP request: %s", fmlx_http_status_str(s));
+    return loop_refuse(sbuf, FMLX_API_INVALID_REQUEST, FMLX_SERVE_CODE_FRAMING, msg, out_len);
+}
+
+/* ---- una connessione ---- */
+
+typedef struct {
+    char *buf;
+    size_t cap; /* la finestra: testata + corpo */
+    size_t len; /* byte letti e non ancora consumati */
+} Conn;
+
+/* Serve UNA connessione fino alla fine e la lascia chiusa al chiamante. Ritorna senza errori: un
+ * socket che si rompe non è un fallimento del server, e l'unica cosa che il loop deve sapere è
+ * QUANTE richieste sono state servite — contate in `*req_no`, che è anche il criterio di
+ * `--once`/`max_conns`. */
+static void serve_conn(int fd, const FmlxServeOpts *o, FmlxServeBuf *sbuf, Conn *cn, FILE *log,
+                       unsigned *req_no, const volatile sig_atomic_t *stop) {
+    for (;;) {
+        FmlxHttpReq req;
+        FmlxHttpStatus hs;
+        FmlxServeSt st;
+        size_t need, out_len = 0, used;
+        int ka = 0, sent_100 = 0;
+        const char *body;
+        char tgt[100];
+
+        if (*stop) return;
+        fmlx_http_req_init(&req);
+
+        /* 1. La testata: si legge finché il codec dice NEED_MORE. */
+        for (;;) {
+            ssize_t r;
+            hs = fmlx_http_parse_req(cn->buf, cn->len, &req);
+            if (hs != FMLX_HTTP_NEED_MORE) break;
+            if (cn->len >= cn->cap) {
+                /* Il codec fermerebbe da sé una testata oltre FMLX_HTTP_MAX_HEAD; questo è il
+                 * paraurti per una finestra più piccola della sua — senza di qui, NEED_MORE
+                 * resterebbe vero per sempre e la connessione sembrerebbe lenta invece che rotta. */
+                hs = FMLX_HTTP_ERR_HEAD_TOO_LARGE;
+                break;
+            }
+            r = recv(fd, cn->buf + cn->len, cn->cap - cn->len, 0);
+            if (r > 0) {
+                cn->len += (size_t)r;
+                continue;
+            }
+            if (r < 0 && errno == EINTR) continue;
+            return; /* 0 o errore: il client ha chiuso senza completare una testata */
+        }
+        if (hs != FMLX_HTTP_OK) {
+            if (loop_refuse_parse(sbuf, hs, &out_len) == 0 && out_len)
+                write_all(fd, sbuf->resp, out_len);
+            log_target(&req.err_field, tgt, sizeof tgt);
+            logf(log, "richiesta rifiutata dal codec [%s]%s%s", fmlx_http_status_str(hs),
+                 tgt[0] ? " header=" : "", tgt);
+            return; /* MAI keep-alive dopo un errore di incorniciatura: è la regola anti-smuggling */
+        }
+
+        /* 2. Il corpo, che il codec per contratto NON tocca. `need` è la PROMESSA di
+         * `Content-Length`, confrontata col limite prima di leggere: non si aspetta un corpo da
+         * 4 GB per dirlo dopo. */
+        need = req.has_body ? (size_t)req.content_length : 0;
+        if (need > fmlx_serve_body_limit(o)) {
+            if (loop_refuse(sbuf, FMLX_API_INVALID_REQUEST, FMLX_SERVE_CODE_BODY_LARGE,
+                            "request body is larger than this server accepts", &out_len) == 0 &&
+                out_len)
+                write_all(fd, sbuf->resp, out_len);
+            logf(log, "corpo promesso di %llu byte oltre il limite: connessione chiusa",
+                 (unsigned long long)req.content_length);
+            return;
+        }
+        while (req.head_len + need > cn->len) {
+            ssize_t r;
+            if (!sent_100 && fmlx_http_expects_continue(&req)) {
+                static const char cont[] = "HTTP/1.1 100 Continue\r\n\r\n";
+                if (write_all(fd, cont, sizeof cont - 1) < 0) return;
+                sent_100 = 1;
+            }
+            r = recv(fd, cn->buf + cn->len, cn->cap - cn->len, 0);
+            if (r > 0) {
+                cn->len += (size_t)r;
+                continue;
+            }
+            if (r < 0 && errno == EINTR) continue;
+            logf(log, "corpo promesso e mai arrivato: connessione chiusa");
+            return;
+        }
+
+        /* 3. La risposta, che è DECISA altrove. */
+        body = cn->buf + req.body_off;
+        st = fmlx_serve_respond(&req, body, need, o, sbuf, &out_len, &ka);
+        (*req_no)++;
+        log_target(&req.target, tgt, sizeof tgt);
+        if (st != FMLX_SERVE_OK || !out_len) {
+            logf(log, "%.*s %s -> nessuna risposta (%s): connessione chiusa", (int)req.method.n,
+                 req.method.p, tgt, fmlx_serve_status_str(st));
+            return;
+        }
+        if (write_all(fd, sbuf->resp, out_len) < 0) {
+            logf(log, "%.*s %s -> il client ha chiuso prima di leggere", (int)req.method.n,
+                 req.method.p, tgt);
+            return;
+        }
+        logf(log, "#%u %.*s %s -> %u byte%s", *req_no, (int)req.method.n, req.method.p, tgt,
+             (unsigned)out_len, ka ? "" : ", connessione chiusa");
+
+        /* 4. Pipelining: si consumano la testata PIÙ il corpo promesso. Lasciarli lì è il buco per
+         * cui il request successivo verrebbe letto dall'offset sbagliato. */
+        used = req.head_len + need;
+        if (used > cn->len) used = cn->len;
+        memmove(cn->buf, cn->buf + used, cn->len - used);
+        cn->len -= used;
+        if (!ka) return;
+    }
+}
+
+/* ---- il loop ---- */
+
+static volatile sig_atomic_t g_stop;
+static void (*saved_int)(int);
+static void (*saved_term)(int);
+
+static void on_stop_signal(int sig) {
+    (void)sig;
+    g_stop = 1; /* un flag, non una printf: è l'unica cosa lecita in un handler */
+}
+
+/* Solo quando il chiamante NON ha dato un suo `stop`: chi incorpora il server in un processo più
+ * grande ha già i suoi segnali, e rubarglieli sarebbe un effetto collaterale invisibile. */
+static void install_handlers(void) {
+    struct sigaction sa, old;
+
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = on_stop_signal;
+    sigemptyset(&sa.sa_mask);
+    /* NESSUN SA_RESTART: `accept` deve poter tornare EINTR. Con il restart il processo riceverebbe
+     * il segnale DOPO aver aspettato il prossimo client, e Ctrl-C sembrerebbe non funzionare. */
+    sigaction(SIGINT, &sa, &old);
+    saved_int = old.sa_handler;
+    sigaction(SIGTERM, &sa, &old);
+    saved_term = old.sa_handler;
+    signal(SIGPIPE, SIG_IGN); /* il pipe rotto non è un errore del server: vedi l'intestazione */
+}
+
+static void restore_handlers(void) {
+    signal(SIGINT, saved_int ? saved_int : SIG_DFL);
+    signal(SIGTERM, saved_term ? saved_term : SIG_DFL);
+}
+
+FmlxServeSt fmlx_serve(const FmlxServeOpts *o, FmlxServeBuf *sbuf, FILE *log,
+                       volatile sig_atomic_t *stop, unsigned *served) {
+    FmlxServeBuf owned;
+    int use_owned = 0, one = 1, ls = -1, fd;
+    struct addrinfo hints, *ai = NULL, *p;
+    char port[16];
+    const char *host = (o && o->host) ? o->host : FMLX_SERVE_HOST_DEFAULT;
+    int lport = (o && o->port) ? o->port : FMLX_SERVE_PORT_DEFAULT;
+    Conn cn;
+    volatile sig_atomic_t *want_stop;
+    unsigned req_no = 0;
+
+    if (lport < 1 || lport > 65535) return FMLX_SERVE_BAD_ARG;
+    if (served) *served = 0;
+    memset(&cn, 0, sizeof cn);
+    if (!sbuf) {
+        memset(&owned, 0, sizeof owned);
+        /* Memoria negata, NON un argomento insensato: i due codici devono dire cose diverse,
+         * perché "hai passato una porta sbagliata" e "il processo non ha più RAM" sono due
+         * diagnostiche opposte per chi legge il log. */
+        if (fmlx_serve_buf_init(&owned, 0, 0) != 0) {
+            logf(log, "memoria negata per i buffer del server");
+            return FMLX_SERVE_BUF_SMALL;
+        }
+        sbuf = &owned;
+        use_owned = 1;
+    }
+    cn.cap = FMLX_HTTP_MAX_HEAD + fmlx_serve_body_limit(o) + 1;
+    cn.buf = malloc(cn.cap);
+    if (!cn.buf) {
+        logf(log, "memoria negata per la finestra di lettura (%llu byte)",
+             (unsigned long long)cn.cap);
+        if (use_owned) fmlx_serve_buf_free(sbuf);
+        return FMLX_SERVE_BUF_SMALL;
+    }
+
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family = AF_UNSPEC; /* IPv4 e IPv6: escludere uno dei due di default è una sorpresa */
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_flags = AI_PASSIVE | AI_NUMERICSERV;
+    snprintf(port, sizeof port, "%d", lport);
+    if (getaddrinfo(host, port, &hints, &ai) != 0) {
+        logf(log, "l'indirizzo '%s' non si risolve", host);
+        free(cn.buf);
+        if (use_owned) fmlx_serve_buf_free(sbuf);
+        return FMLX_SERVE_BAD_ARG;
+    }
+    for (p = ai; p; p = p->ai_next) {
+        ls = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+        if (ls < 0) continue;
+        setsockopt(ls, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+        if (bind(ls, p->ai_addr, p->ai_addrlen) == 0 && listen(ls, FMLX_SERVE_LISTEN_BACKLOG) == 0)
+            break;
+        close(ls);
+        ls = -1;
+    }
+    freeaddrinfo(ai);
+    if (ls < 0) {
+        logf(log, "non riesco ad ascoltare su %s:%d: %s", host, lport, strerror(errno));
+        free(cn.buf);
+        if (use_owned) fmlx_serve_buf_free(sbuf);
+        return FMLX_SERVE_BAD_ARG;
+    }
+
+    want_stop = stop ? stop : &g_stop;
+    if (!stop) install_handlers();
+
+    logf(log, "in ascolto su http://%s:%d: rispondo a /v1/models e /health, il motore non è "
+              "collegato",
+         host, lport);
+    for (;;) {
+        if (*want_stop) break;
+        fd = accept(ls, NULL, NULL);
+        if (fd < 0) {
+            if (errno == EINTR) continue; /* il segnale si vede dal giro dopo, su *want_stop */
+            logf(log, "accept: %s", strerror(errno));
+            if (errno == EMFILE || errno == ENFILE) break;
+            continue;
+        }
+        setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+        serve_conn(fd, o, sbuf, &cn, log, &req_no, want_stop);
+        close(fd);
+        if (o && o->max_conns && req_no >= o->max_conns) break;
+    }
+    shutdown(ls, SHUT_RDWR);
+    close(ls);
+    if (!stop) restore_handlers();
+    free(cn.buf);
+    if (use_owned) fmlx_serve_buf_free(sbuf);
+    if (served) *served = req_no;
+    return FMLX_SERVE_OK;
+}

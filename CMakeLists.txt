@@ -147,14 +147,33 @@ add_executable(test_api tests/api/test_api.c)
 target_link_libraries(test_api PRIVATE fmlx_api)
 add_test(NAME api COMMAND test_api)
 
+# --- lane_serve: il layer ③ — le risposte e il loop TCP --------------------------------------
+# DUE file, non uno, perché hanno due contratti diversi: `fmlx_serve_respond.c` è PURA (una
+# richiesta già incorniciata entra, una risposta completa esce — si prova in memoria, senza socket,
+# senza orologio, senza malloc), `fmlx_serve.c` è il LOOP (socket, segnali, byte fin dove la testata
+# promette). Nello stesso file, l'unica parte provabile in-process dipenderebbe dalla build di
+# quella che chiede una porta libera: e un test di framing diventerebbe un test di rete.
+add_library(fmlx_serve STATIC src/server/fmlx_serve_respond.c src/server/fmlx_serve.c)
+target_include_directories(fmlx_serve PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(fmlx_serve PUBLIC fmlx_api fmlx_hf)
+
+# Il work directory qui serve DAVVERO: `/v1/models` e `/health` leggono il cache da disco, quindi
+# o il test costruisce un cache finto su disco, o sta provando un cammino che non ha mai corso.
+add_executable(test_serve tests/server/test_serve.c)
+target_link_libraries(test_serve PRIVATE fmlx_serve)
+add_test(NAME serve COMMAND test_serve ${CMAKE_CURRENT_BINARY_DIR}/work-serve)
+
 # --- lane_cli: il binario `fastmlx` (piano §10.3, §13) --------------------------------------
 # Un file per verbo, non uno: `pull` è una lane con un report e delle regole sui path, `models` è
 # una tabella letta da disco, l'argv è una terza cosa che cambia con motivi diversi (una bandiera
 # nuova contro un ordine di download). Il `main` sta da solo perché è l'unica parte NON provabile
 # in-process.
-add_library(fmlx_cli STATIC src/cli/fmlx_pull.c src/cli/fmlx_models.c src/cli/fmlx_cli.c)
+add_library(fmlx_cli STATIC src/cli/fmlx_pull.c src/cli/fmlx_models.c src/cli/fmlx_cli.c
+                            src/cli/fmlx_serve.c)
 target_include_directories(fmlx_cli PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(fmlx_cli PUBLIC fmlx_hf_fetch)
+# `fmlx_serve` tra le dipendenze PUBBLICHE: il verbo c'è solo se il loop c'è, e un `serve` che
+# compilasse senza il socket sarebbe il "comando che risponde di sì" che il piano vieta.
+target_link_libraries(fmlx_cli PUBLIC fmlx_hf_fetch fmlx_serve)
 
 add_executable(fastmlx src/cli/fastmlx_main.c)
 target_link_libraries(fastmlx PRIVATE fmlx_cli)

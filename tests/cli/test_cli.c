@@ -55,6 +55,10 @@ static int checks, failures;
         CK_ST(fmlx_cli_parse((int)(sizeof av_ / sizeof av_[0]), av_, &a, msg, sizeof msg), (want)); \
     } while (0)
 
+/* NULL = il buffer non è stato nemmeno allocato: `strstr` non lo accetta, e un test che crasha su
+ * una `open_memstream` fallita racconterebbe un fallimento di sintassi dove c'è una risorse. */
+#define HAS(hay, needle) ((hay) && strstr((hay), (needle)) != NULL)
+
 /* Un transport che non sa fare niente: serve a provare il CAMMINO d'errore della CLI senza
  * ricostruire il finto server di test_pull.c (che è un altro oggetto, e già provato lì). */
 static FmlxHfStatus dead_meta(void *c, const char *u, const char *t, FmlxHfMeta *o) {
@@ -177,9 +181,12 @@ static void case_bandiere_rifiutate(void) {
  *
  * `models`/`list` NON sono in questa lista da quando esiste `fmlx_models_exec`: sono verbi che
  * girano, e un test che li lasciasse qui passerebbe anche se il dispatch fosse rotto (perché
- * NOT_WIRED sarebbe comunque il codice "giusto" per la lista sbagliata). */
+ * NOT_WIRED sarebbe comunque il codice "giusto" per la lista sbagliata).
+ * `serve` è uscito dalla lista per lo stesso motivo, ma con un sintomo diverso: ora è cablato, e
+ * chiamarlo qui NON darebbe NOT_WIRED — si siederebbe su `accept` in attesa di un client che non
+ * arriva, che è il modo in cui un test diventa un blocco da uccidere a mano. */
 static void case_motori_non_collegati(void) {
-    static const char *const verbs[] = {"run", "chat", "serve", "ps", "doctor", "cp", "rm"};
+    static const char *const verbs[] = {"run", "chat", "ps", "doctor", "cp", "rm"};
     size_t i;
     char first[FMLX_HF_PATH_MAX];
     int distinct = 0;
@@ -206,9 +213,100 @@ static void case_motori_non_collegati(void) {
         free(outb);
         free(errb);
     }
-    /* Sette verbi, almeno TRE messaggi diversi: è la prova che il testo dipende dal verbo e non è
+    /* Sei verbi, almeno TRE messaggi diversi: è la prova che il testo dipende dal verbo e non è
      * una stringa sola ripetuta. */
-    CK(distinct >= 3, "messaggi distinti=%d su 7 verbi", distinct);
+    CK(distinct >= 3, "messaggi distinti=%d su 6 verbi", distinct);
+}
+
+/* ---- serve ---- */
+
+/* `serve` è cablato: quello che si prova QUI è l'argv e la precedenza delle opzioni. Il loop TCP
+ * vero è provato in `test_serve.c` (che ha un socket suo, su 127.0.0.1, con `max_conns=1`):
+ * ripetere quel giro in questo file vorrebbe dire incollare un test nel posto sbagliato — e un
+ * `serve` chiamato qui senza quel limite si sederebbe su `accept` per sempre. */
+static void case_serve_bandiere(void) {
+    FmlxCliArgs a;
+    char msg[256];
+
+    CK_PARSE(FMLX_CLI_OK, "fastmlx", "serve", "--host", "0.0.0.0", "--port", "8137", "--max-body",
+             "4096", "--once");
+    CK(!strcmp(a.serve.host, "0.0.0.0"), "--host non arrivata al server: %s",
+       a.serve.host ? a.serve.host : "(null)");
+    CK(a.serve.port == 8137, "--port=%d", a.serve.port);
+    CK(a.serve.max_body == 4096, "--max-body=%zu", a.serve.max_body);
+    /* `--once` È `max_conns = 1`: una bandiera che non arriva al loop è una bandiera che mente, e
+     * il sintomo è un `serve` che non finisce mai in una shell di prova. */
+    CK(a.serve.max_conns == 1, "--once -> max_conns=%u", a.serve.max_conns);
+
+    CK_PARSE(FMLX_CLI_OK, "fastmlx", "serve");
+    CK(a.serve.port == 0 && a.serve.host == NULL && a.serve.max_conns == 0,
+       "senza bandiere il server usa i suoi default, non zero a caso");
+
+    /* La stessa severità della bandiera e dell'ambiente: `--port abc` non è "porta non impostata",
+     * è un typo, e accettarlo vorrebbe dire ascoltare sulla porta sbagliata in silenzio. */
+    CK_PARSE(FMLX_CLI_USAGE, "fastmlx", "serve", "--port", "abc");
+    CK_PARSE(FMLX_CLI_USAGE, "fastmlx", "serve", "--port", "0");
+    CK_PARSE(FMLX_CLI_USAGE, "fastmlx", "serve", "--port", "65536");
+    CK_PARSE(FMLX_CLI_USAGE, "fastmlx", "serve", "--max-body", "0");
+    CK_PARSE(FMLX_CLI_USAGE, "fastmlx", "serve", "--dest", "/tmp/x");
+    CK_PARSE(FMLX_CLI_USAGE, "fastmlx", "serve", "org/modello");
+    /* E il contrario: una bandiera DEL SERVER data al verbo sbagliato. `run` sarebbe stato un
+     * esempio peggiore di `models`, perché `missing_piece("run")` nomina `run` alla lettera e
+     * l'asserzione sul messaggio passerebbe anche con argv accettato. */
+    CK_PARSE(FMLX_CLI_USAGE, "fastmlx", "models", "--once");
+    CK(HAS(msg, "--once"), "il rifiuto deve nominare la bandiera: %s", msg);
+    CK(HAS(msg, "models"), "e il verbo: %s", msg);
+
+    /* Il CONFINE della regola: `run` e `chat` non hanno ancora UNA superficie di opzioni, e
+     * «--port non è un'opzione di run» sarebbe un'affermazione sul futuro di un verbo che non è
+     * scritto. Il parse deve passare e lasciare al dispatch l'unica cosa vera oggi: manca il
+     * motore. (`models` invece le opzioni le HA, ed è per lui che la regola esiste.) */
+    CK_PARSE(FMLX_CLI_OK, "fastmlx", "run", "--port", "8000");
+    CK_PARSE(FMLX_CLI_OK, "fastmlx", "chat", "--once");
+
+    /* Una booleana NON prende valore, e la forma `--flag=x` ESISTE nel parser: `--once=0` sarebbe
+     * letto come "dato", con lo STESSO effetto di `--once=1`. Due semantiche con la stessa grafia
+     * è il tipo di banda che un utente mette in uno script e non scopre mai. */
+    CK_PARSE(FMLX_CLI_USAGE, "fastmlx", "serve", "--once=0");
+    CK_PARSE(FMLX_CLI_USAGE, "fastmlx", "pull", "o/r", "--quiet=1");
+    CK_PARSE(FMLX_CLI_USAGE, "fastmlx", "pull", "o/r", "--offline=");
+    CK_PARSE(FMLX_CLI_USAGE, "fastmlx", "pull", "o/r", "--repair=no");
+    CK(HAS(msg, "valore"), "il rifiuto deve dire COSA non va: %s", msg);
+    /* Il contrario, per non avere appena spostato il bug: la stessa bandiera SENZA `=` deve
+     * passare, o la regola avrebbe trasformato un caso legittimo in un errore. */
+    CK_PARSE(FMLX_CLI_OK, "fastmlx", "pull", "o/r", "--offline", "--repair", "--quiet");
+    CK(a.quiet && a.pull.fetch.offline && a.pull.fetch.repair, "booleani senza = persi per strada");
+
+    /* Il `--cache` vale per TUTTI i verbi che guardano il disco: darlo a `serve` e vedere il
+     * server leggere HF_HOME sarebbe il contrario della regola. */
+    CK_PARSE(FMLX_CLI_OK, "fastmlx", "serve", "--cache", "/tmp/due");
+    CK(a.serve.cache_root && !strcmp(a.serve.cache_root, "/tmp/due"),
+       "serve: --cache non arrivato al server");
+
+    /* L'unica uscita di `fmlx_serve_exec` provabile SENZA toccare una porta: un ambiente che non
+     * risolve. Dice che la CLI passa davvero le opzioni al server e non stampa un esito suo. */
+    {
+        FILE *out, *err;
+        char *ob = NULL, *eb = NULL;
+        size_t on = 0, en = 0;
+        FmlxCliArgs b;
+
+        memset(&b, 0, sizeof b);
+        snprintf(b.verb, sizeof b.verb, "serve");
+        b.serve.port = 0;
+        setenv("FASTMLX_PORT", "80x", 1);
+        out = open_memstream(&ob, &on);
+        err = open_memstream(&eb, &en);
+        CK_ST(fmlx_serve_exec(&b, out, err), FMLX_CLI_USAGE);
+        fclose(out);
+        fclose(err);
+        if (eb) eb[en] = '\0';
+        CK(HAS(eb, "FASTMLX_PORT"), "l'errore deve nominare la variabile: %s", eb ? eb : "(vuoto)");
+        CK(on == 0, "un `serve` che non parte non scrive su stdout (%zu byte)", on);
+        unsetenv("FASTMLX_PORT");
+        free(ob);
+        free(eb);
+    }
 }
 
 /* ---- models ---- */
@@ -466,7 +564,19 @@ static void case_aiuto(void) {
     {
         const char *tail = strstr(b, "in attesa del motore");
         CK(tail && strstr(tail, "models") == NULL, "`models` ancora tra i verbi non cablati");
+        /* Vale per `serve` come per `models`: lasciarlo nella lista dei verbi in attesa sarebbe
+         * l'aiuto che promette male il lavoro già fatto (e un `serve` che invece ASCOLTA). */
+        CK(tail && strstr(tail, "serve") == NULL, "`serve` ancora tra i verbi non cablati");
     }
+    CK(b && strstr(b, "  serve ") != NULL, "l'aiuto non nomina serve: %s", b ? b : "(vuoto)");
+    /* Le bandiere nuove devono essere leggibili: un `--port` che non è scritto nell'aiuto è una
+     * bandiera che esiste solo per chi ha letto il sorgente. */
+    CK(b && strstr(b, "--port") != NULL && strstr(b, "--max-body") != NULL &&
+           strstr(b, "--once") != NULL,
+       "l'aiuto non elenca le bandiere di serve");
+    /* E l'auth DEVE dire da dove arriva: una chiave in argv finirebbe nella cronologia della
+     * shell e nei processi altrui, la stessa ragione di HF_TOKEN. */
+    CK(b && strstr(b, "FASTMLX_API_KEY") != NULL, "l'aiuto non dice come si passa la chiave");
     CK(b && strstr(b, "HF_TOKEN") != NULL, "l'aiuto non dice come si passa il token");
     free(b);
 }
@@ -480,6 +590,16 @@ int main(int argc, char **argv) {
     unsetenv("HF_ENDPOINT");
     unsetenv("HF_HOME");
     unsetenv("HF_HUB_CACHE");
+    /* `serve` legge il suo ambiente come `pull` legge HF_HOME: lasciarlo quello di chi esegue
+     * renderebbe i risultati dipendenti dalla shell di chi li guarda. */
+    unsetenv("FASTMLX_HOST");
+    unsetenv("FASTMLX_PORT");
+    unsetenv("FASTMLX_API_KEY");
+    /* `serve` legge il suo ambiente come `pull` legge HF_HOME: lasciarlo quello di chi esegue
+     * renderebbe i risultati dipendenti dalla shell di chi li guarda. */
+    unsetenv("FASTMLX_HOST");
+    unsetenv("FASTMLX_PORT");
+    unsetenv("FASTMLX_API_KEY");
 
     /* Il work directory è OBBLIGATORIO (lo passa CMake): un test che scrivesse il suo cache finto
      * nella directory corrente finirebbe per farlo nella root del repo, che è il punto dove il
@@ -496,6 +616,7 @@ int main(int argc, char **argv) {
     case_bandiera_lunga();
     case_bandiere_rifiutate();
     case_motori_non_collegati();
+    case_serve_bandiere();
     case_models_tabella();
     case_models_quiet();
     case_models_senza_cache();

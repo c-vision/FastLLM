@@ -17,10 +17,12 @@ da Hugging Face). Piano completo: `AiWiki/01-Projects/FastMLX/Piani/(open) - Fas
 | `src/json/fmlx_json.c` + `fmlx_jsonw.c` — parser e writer JSON | **esiste, compilato, testato** (327 + 148 verifiche, **e** differenziale contro CPython su 122 record: 8 divergenze dure volute, 0 round-trip — `docs/json-contract.md`) |
 | `src/server/fmlx_http.c` — codec HTTP/1.1: framing richiesta, testata risposta, SSE | **esiste, compilato, testato** (127 verifiche byte-esatte) |
 | `src/server/fmlx_api*.c` — router + adapter OpenAI/Anthropic sopra il codec | **esiste, compilato, testato** (151 verifiche). Non c'è ancora un motore sotto: la generazione è attaccata al confine `FmlxApiNext`, che il test copre con un doppio scriptato |
+| `src/server/fmlx_serve_respond.c` + `fmlx_serve.c` — il server: `/v1/models`, `/health`, il 501 per ogni rotta che genera, e il loop TCP | **esiste, compilato, testato, provato su socket vero** (150 verifiche + uno smoke del binario con `curl` vero). Il motore non c'è e **non serve per provarlo** |
 | `src/lane_mlx/` — motore MLX estratto da GMBasic | non scritto. **D2 non blocca il "come"**: i prerequisiti per compilarlo sono già su questa macchina (verificato 2026-09-22: 28 header in `GMBasic/libs/mlx-deps/mlx-c-src/mlx/c/*.h`, più `libmlx.a` 31 MB e `libmlxc.a` 1,0 MB in `libs/mlx-deps/precompiled/darwin-arm64`). D2 decide solo **chi possiede** il motore |
-| `src/cli/fmlx_pull.c` + `fmlx_cli.c` — `fastmlx pull`, il dispatch e gli esiti | **esiste, compilato, testato, provato sul server vero** (48 + 129 verifiche; pull reale `sshleifer/tiny-gpt2`: 9/9 file, 9 blob il cui nome è il loro hash, snapshot riletto da `hf_probe`) |
-| `src/cli/fmlx_models.c` + `src/hf/fmlx_hf_catalog.c` — `fastmlx models` / `list` | **esiste, compilato, testato, provato sul cache vero di questa macchina** (103 + 129 verifiche; 23 repo letti in 0,01 s, 3.675.292.998 byte che coincidono con un conteggio di inode fatto a parte con `find`+`stat`) |
-| `src/cli/` — `run\|chat\|serve\|ps\|cp\|rm\|doctor` | **non collegati, e lo dicono**: `fmlx_cli_exec` ritorna `NOT_WIRED` nominando il pezzo che manca (motore / registro delle sessioni / chi scrive nel cache) ed esce 2. Il parser delle bandiere invece **esiste**, ed è provato per i 7 verbi rimasti |
+| `src/cli/fmlx_pull.c` + `fmlx_cli.c` — `fastmlx pull`, il dispatch e gli esiti | **esiste, compilato, testato, provato sul server vero** (48 + 156 verifiche; pull reale `sshleifer/tiny-gpt2`: 9/9 file, 9 blob il cui nome è il loro hash, snapshot riletto da `hf_probe`) |
+| `src/cli/fmlx_models.c` + `src/hf/fmlx_hf_catalog.c` — `fastmlx models` / `list` | **esiste, compilato, testato, provato sul cache vero di questa macchina** (103 + 156 verifiche; 23 repo letti in 0,01 s, 3.675.292.998 byte che coincidono con un conteggio di inode fatto a parte con `find`+`stat`) |
+| `src/cli/fmlx_serve.c` — `fastmlx serve` | **esiste, compilato, testato, provato**: risolve host/porta/chiave (flag > ambiente > default, piano §14) e passa tutto al loop. `--cache` vale anche qui: `pull`, `models` e `serve` guardano LO STESSO disco |
+| `src/cli/` — `run\|chat\|ps\|cp\|rm\|doctor` | **non collegati, e lo dicono**: `fmlx_cli_exec` ritorna `NOT_WIRED` nominando il pezzo che manca (motore / registro delle sessioni / chi scrive nel cache) ed esce 2. Il parser delle bandiere invece **esiste**, ed è provato per i 6 verbi rimasti — e una bandiera che il verbo non legge è un errore, non un'opzione ignorata |
 
 Qui sotto c'è solo ciò che compila davvero. Nessuna cartella vuota "perché il piano la prevede".
 L'enumerazione di ciò che MLX/caricatore loader GGUF sanno davvero fare, con i `file:riga` della
@@ -314,6 +316,83 @@ di 100 colonne), e il gate è un `grep`: `bad |=` deve restituire zero in `src/s
 `t->d`/`id`/`created` arrivano da `FmlxApiMeta` passati dall'alto — un adapter che leggesse
 l'orologio o un RNG renderebbe ogni test non deterministico.
 
+## La lane serve (`src/server/fmlx_serve*.c`) — un server che risponde DAVVERO, senza motore
+
+Il layer ③: socket in, byte out. **DUE file perché hanno due contratti**, ed è la ragione per cui il
+95% di questa lane è provabile in memoria: `fmlx_serve_respond.c` è **puro** (una richiesta già
+incorniciata entra, una risposta completa esce — zero socket, zero orologio, zero `malloc`),
+`fmlx_serve.c` è il **loop** (bind, accept, `recv`, keep-alive, segnali). Nella stessa finestra di
+file, l'unica parte provabile in-process avrebbe dipeso dalla build di quella che chiede una porta
+libera: un test di framing sarebbe diventato un test di rete.
+
+**Le risposte sono di tre specie, e la distinzione è tutta qui:**
+
+1. **quel che è vero** — `GET /v1/models` legge il catalogo dal disco (`fmlx_hf_catalog`, nessun
+   transport) e `GET /health` dice cosa sa fare;
+2. **quel che manca lo dice** — ogni rotta che genera (`chat/completions`, `completions`,
+   `responses`, `messages`, `models/load|unload|status`, `embeddings`, `metrics`) risponde **501**
+   con UNA frase sua e un `code` machine-readable per causa (`engine_not_wired`, …). Il piano
+   (§11.2) vieta il risultato che sembra quello che non è: un 200 con `content: ""` sarebbe il
+   peggiore esito possibile — coerente, vuoto, e falso;
+3. **quel che NON richiede il motore viene già validato oggi** — auth, incorniciatura, tetto del
+   corpo, JSON, `anthropic-version`. Un 400 che arriva oggi arriverà anche quando il motore ci
+   sarà: il comportamento del server non deve cambiare all'arrivo della lane ①.
+
+**`degraded` (200) contro `unavailable` (503)** è la scelta fra «sono limitato» e «sono rotto».
+`/health` è `degraded` quando fa le due cose che dichiara e non può generare — dire `ok` a chi
+chiede «qui si lavora?» sarebbe bugiardo per omissione, e 503 mentirebbe dall'altra parte. È
+`unavailable` quando **nemmeno il catalogo si legge**: il cache non c'è o `HF_HOME` punta nel posto
+sbagliato. I contatori (`repos_total`/`repos_listed`/`repos_refs_only`/…) arrivano dagli stessi
+campi che stampa `fastmlx models`, non da un secondo conteggio.
+
+**L'auth viene SOLO da `FASTMLX_API_KEY`**, e non è una bandiera per lo stesso motivo per cui
+`HF_TOKEN` non lo è: una chiave in argv finisce nello storico del terminale e in ogni script che la
+invoca. Vuota o assente = **nessuna auth**, dichiarata in `/health` (`"auth":"disabled"`), perché
+"ascolto su 127.0.0.1 senza chiave" è una scelta che l'operatore deve poter leggere. Il confronto è
+a tempo costante, il 401 arriva **prima** della rotta (dire «questa rotta esiste» a un non
+autorizzato è già un'informazione), e `/health` resta aperto: è la sonda del load balancer.
+
+**Due bug veri, trovati dal test e non dalla lettura.** (i) il 401 e il rifiuto del corpo grande
+dicevano in testata che la connessione restava aperta mentre il loop la **chiudeva**; (ii) la
+versione HTTP era sempre `HTTP/1.1`, anche con un client che aveva chiesto `HTTP/1.0`. Corretti in
+UN punto solo — `fmlx_serve_agree_head`, l'uscita unica — invece che sito per sito: due letture
+divergenti della stessa decisione (tenerla o chiuderla) sono precisamente il buco. `1.1 → 1.0` ha la
+stessa lunghezza quindi si scrive in posto; `Connection: close` sono 19 byte e si sposta il resto,
+**`Content-Length` non si tocca** perché conta il corpo, non la testata.
+
+**Mai keep-alive dopo un errore di incorniciatura** (regola anti-smuggling), e **sempre** consumato
+`head_len + Content-Length` prima di leggere la richiesta successiva: lasciare il residuo nella
+finestra non è un bug visibile, è un server che risponde in modo diverso a seconda di chi è arrivato
+prima. Il corpo promesso e mai arrivato, la testata oltre il cap, `Transfer-Encoding: chunked` (501,
+perché è «non lo implemento») e `chunked` insieme a `Content-Length` (400, perché è una divergenza
+fra noi e un proxy, e 501 mentirebbe sulla causa) sono quattro casi con quattro codici.
+
+**Un solo thread, una connessione alla volta: una scelta, non un limite ereditato.** Il decode
+serializzato del piano §15 rende inutile un accept concorrente finché non c'è il motore, e i
+contatori finta-paralleli sono peggio di un `busy` visibile. Il costo è detto: una `/v1/models` su un
+cache grande tiene gli altri in coda.
+
+**Provato su un socket vero**, non solo in memoria: un caso di `test_serve` fa `fork`, chiama il loop
+reale sulla loopback e rilegge i byte dall'altra parte, asserendo che il numero di byte del corpo
+coincide con `Content-Length` (è il numero, non la frase, che prova l'incorniciatura). E una volta
+fuori da `ctest`, il binario: `fastmlx serve --cache <fixture> --port 8733` + `curl` →
+`{"object":"list","data":[{"id":"org/demo","object":"model","created":…,"owned_by":"local"}]}`,
+501 su `POST /v1/chat/completions`, e due richieste sulla STESSA connessione keep-alive contate
+`#2` e `#3` nel log. `--once` esiste per questo: serve UNA richiesta e esce, così uno smoke non
+lascia un processo appeso.
+
+**Cosa NON è misurato qui**: il cammino dei segnali (`SIGINT`/`SIGTERM` → `g_stop` → il loop esce e
+`restore_handlers` rimette i precedenti) non è eseguito da nessun test — si può provare solo
+uccidendo un processo vero, e un test che ammazza processi è un test che si rompe da solo. Non è
+misurato il `bind` su una porta già occupata (sarebbe un fixture dipendente dallo stato della
+macchina). **`Expect: 100-continue` invece SÌ**, ed è il caso che ha nominato da sé la sua ragione
+d'essere: la prima versione mandava un corpo con `messages: []`, e il layer ② rispondeva 400 **prima**
+di arrivare al motore — il test passava sul via libera e falliva sull'esito, che è il modo giusto
+per fallire. Ora il caso prova tre cose in ordine: i 25 byte del via libera arrivano **prima** che il
+corpo sia scritto (l'ordine dei byte È la prova: senza, il client che rispetta il protocollo non
+manda niente e lo stallo sembra lentezza), il 501 che segue è lungo esattamente quanto il suo
+`Content-Length`, e un corpo da zero byte **non** ottiene un via libera.
+
 ## La lane CLI (`src/cli/fmlx_pull.c` + `fmlx_cli.c`) — il primo pezzo eseguibile
 
 `fastmlx` è il primo binario di questo repo che si può lanciare da terminale. Fa **una** cosa
@@ -348,8 +427,26 @@ prima di sapere se il nono esiste vorrebbe dire consegnare uno snapshot parziale
 bandiere; il primo produce `FmlxCliArgs`, il secondo mappa gli esiti su exit code (`OK`→0,
 `USAGE`→2, `FAILED`→1, `NOT_WIRED`→1). Il token **non è una bandiera**: si passa solo con
 `HF_TOKEN`, perché una `--token` finirebbe nello storico del terminale e in ogni script che la
-invoca. `--help` non è un errore e non vuole un verbo; un parse fallito azzera `FmlxCliArgs` (un
-verbo residuo verrebbe eseguito). I nomi long si ammettono sia staccati sia `--flag=val`.
+invoca — e per lo stesso motivo `FASTMLX_API_KEY` non ha la sua bandiera. `--help` non è un errore e
+non vuole un verbo; un parse fallito azzera `FmlxCliArgs` (un verbo residuo verrebbe eseguito). I
+nomi long si ammettono sia staccati sia `--flag=val`.
+
+**Le bandiere sono un INSIEME DI PAROLE, non un valore.** Ogni opzione ha un bit in una tabella
+unica, perché la domanda «questa bandiera è stata data?» non si può fare sul valore: `--stall-retries
+0` e `--stall-retries` non dato sono lo stesso numero (0). Da lì due regole che senza quel bit non
+esistono: **una bandiera che il verbo non legge è un errore** (`fastmlx serve --dest x` → «--dest non
+è un'opzione di serve», exit 2) — accettarla significherebbe eseguire un comando che sembra dire due
+cose e ne fa una, e chi legge l'output non ha modo di sapere quale delle due è saltata; e **una
+booleana non prende valore** (`--once=0`, `--quiet=1`, `--offline=` → rifiutati), perché `--once=0`
+avrebbe lo stesso effetto di `--once=1`: due semantiche con la stessa grafia. Le condivise —
+`--quiet` e `--cache` — non stanno in nessun insieme esclusivo: `--cache` alimenta `pull`, `models` e
+`serve` con un solo valore, perché i tre verbi guardano LO STESSO disco e una `--cache` ignorata da
+`serve` (col server che legge `HF_HOME`) sarebbe un'opzione che mente.
+
+**La prima regola vale solo fra i verbi che hanno una superficie di opzioni** (`pull`, `models/list`,
+`serve`). `fastmlx run --port 8000` NON deve sentire «--port non è un'opzione di run»: `run` non ha
+ancora opzioni, e dire quali non ha è un'affermazione sul futuro di un verbo che non è scritto. Il
+parse passa, e a parlare è il dispatch con l'unica cosa vera oggi: manca il motore (exit 1).
 
 **Misurato sul server vero** (fuori da `ctest`, come le altre tre sonde):
 `build/fastmlx pull sshleifer/tiny-gpt2 --cache <work> --dest <work>` → esito 0, 9/9 file, 10.9 s,
@@ -359,7 +456,7 @@ scriviamo è leggibile dal lettore con cui abbiamo verificato il cache di `huggi
 
 **Cosa NON è misurato qui**: la via di fallback `copy_stream` (hardlink impossibile) non è mai
 stata eseguita — il test gira su un singolo filesystem; la riga di avanzamento in-place (stile
-Ollama) non è implementata; i 7 verbi non collegati non hanno ancora un motore da nominare davvero,
+Ollama) non è implementata; i 6 verbi non collegati non hanno ancora un motore da nominare davvero,
 nominano il pezzo.
 
 ## `fastmlx models` / `list` — il catalogo locale (`src/hf/fmlx_hf_catalog.c` + `src/cli/fmlx_models.c`)
@@ -407,10 +504,13 @@ verbo, per esteso.
 ```sh
 cmake -S . -B build
 cmake --build build          # -Wall -Wextra -Werror
-ctest --test-dir build --output-on-failure   # 13 suite, nessuna tocca la rete
+ctest --test-dir build --output-on-failure   # 14 suite, nessuna tocca la rete (1,4 s)
 ./build/fmlx_gguf_inspect <file.gguf>   # testata, tipi, allineamento, coda di byte
 ./build/fastmlx pull <org>/<repo> [--revision R] [--dest D] [--cache C]   # lo snapshot nel cache
 ./build/fastmlx models [--cache C] [--quiet]   # cosa c'è già nel cache, senza rete (`list` = alias)
+./build/fastmlx serve [--host I] [--port N] [--cache C] [--max-body N] [--once]
+                                         # /v1/models + /health VERI, 501 su tutto il resto;
+                                         # l'auth è SOLO FASTMLX_API_KEY (vuota = nessuna)
 ./build/hf_probe --tree <org>/<repo> [<rev>]   # cache HF reale: locate + verifica, sola lettura
 HF_HUB_CACHE=work/probe-cache ./build/hf_fetch_probe <org>/<repo> [<rev>] [<file>] [<max byte>]
                                          # download VERO, in una cache di lavoro: mai la reale
