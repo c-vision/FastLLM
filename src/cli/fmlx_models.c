@@ -18,6 +18,20 @@
  *  - `--quiet` stampa SOLO gli id, una per riga: è la forma per `$(fastmlx models --quiet)`, e i
  *    numeri formattati non si parsano.
  *
+ * Il filtro posizionale (`models <x>`) segue tre forme, e nessuna è «sottostringa»:
+ *
+ *   `org/nome`   confronto **esatto** (case-insensitive) con l'`repo_id`;
+ *   `nome`       confronto **esatto** con la parte dopo l'ultimo `/` — può matchare più org, e la
+ *                tabella li mostra entrambi: è il filtro che dice «non è uno solo», non un messaggio;
+ *   `org/` + `*` tutti i repo di quell'org.
+ *
+ * Una `*` che non è l'ultimo carattere è **rifiutata** (`USAGE`), non interpretata: ammettere oggi
+ * una forma a metà e domani matchare qualcosa di diverso è il modo in cui un filtro diventa una
+ * bugia. E **zero match con un filtro è un FALLIMENTO**, non un elenco vuoto con exit 0: chi chiede
+ * `models mm/uno` ha chiesto una cosa specifica, e `grep` insegna che "non c'è" deve potersi
+ * distinguere da "ho guardato e va tutto bene" senza leggere lo stdout. Senza filtro, un cache vuoto
+ * resta un successo (è un altro fatto).
+ *
  * Le unità sono DECIMALI (1 kB = 1000 byte) perché è così che Hugging Face pubblica le dimensioni:
  * mescolare le due convenzioni nello stesso schermo è il modo per far sembrare un modello più piccolo
  * di quello che si è scaricati.
@@ -28,6 +42,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h> /* strcasecmp / strncasecmp: il filtro non distingue il maiuscolo, come gli
+                      * id HF nel cache (la directory è minuscola per regola della lane) */
 #include <time.h>
 
 #define MARKER_REFS_ONLY " [solo ref]"
@@ -79,6 +95,38 @@ static size_t refs_shown(const FmlxHfRepo *r) {
     return k;
 }
 
+/* Il filtro è BEN FORMATO? Una `*` è ammessa SOLO come ultimo carattere, e solo dopo `org/` con
+ * l'org non vuoto; una domanda su tutto il cache ha già una forma — nessun filtro. (Qui dentro non
+ * si può scrivere la sequenza `org/` + asterisco letterale: aprirebbe un commento nel commento, e
+ * `-Wcomment` la blocca — il che è il modo gentile in cui il compilatore avvisa che la forma è
+ * ambigua anche per un lettore di carne.) */
+static int filter_shape_ok(const char *f) {
+    const char *star = strchr(f, '*');
+    size_t len;
+
+    if (!star) return 1;
+    len = strlen(f);
+    if (star != f + len - 1) return 0;
+    if (len < 3 || f[len - 2] != '/' || f[len - 3] == '/') return 0;
+    return 1;
+}
+
+/* `nome` senza `/` si confronta con la parte dopo l'ultimo `/`; `org/nome` con l'id intero.
+ * `f == NULL` (nessun filtro) matcha tutto, e il check sta PRIMA di `strlen`: la prima versione
+ * leggeva `strlen(f)` sulla riga sopra e andava in segfault sul caso più comune — quello senza
+ * filtro. Lo ha trovato il test, non la lettura. */
+static int filter_match(const char *f, const char *id) {
+    const char *tail;
+    size_t len;
+
+    if (!f || !*f) return 1;
+    len = strlen(f);
+    if (f[len - 1] == '*') return strncasecmp(f, id, len - 1) == 0;
+    if (strchr(f, '/')) return strcasecmp(f, id) == 0;
+    tail = strrchr(id, '/');
+    return strcasecmp(f, tail ? tail + 1 : id) == 0;
+}
+
 static void print_row(const FmlxHfRepo *r, int64_t now, size_t wname, FILE *out) {
     char name[FMLX_HF_CATALOG_NAME_MAX + sizeof MARKER_REFS_ONLY + sizeof MARKER_AMBIGUOUS + 8];
     char dim[32], age[32], refcol[24];
@@ -96,9 +144,9 @@ static void print_row(const FmlxHfRepo *r, int64_t now, size_t wname, FILE *out)
 
 FmlxCliStatus fmlx_models_exec(const FmlxCliArgs *a, FILE *out, FILE *err) {
     FmlxHfRepo *v;
-    const char *given;
+    const char *given, *filt;
     char root[FMLX_HF_PATH_MAX] = "";
-    size_t i, n = 0, ignored = 0, wname = NAME_MIN_WIDTH;
+    size_t i, n = 0, ignored = 0, wname = NAME_MIN_WIDTH, kept = 0;
     int64_t total = 0;
     int any_refs_only = 0, any_ambiguous = 0;
     FmlxHfStatus s;
@@ -107,6 +155,16 @@ FmlxCliStatus fmlx_models_exec(const FmlxCliArgs *a, FILE *out, FILE *err) {
     if (!out) out = stdout;
     if (!err) err = stderr;
     given = (a->pull.fetch.cache_root && *a->pull.fetch.cache_root) ? a->pull.fetch.cache_root : NULL;
+    filt = a->repo[0] ? a->repo : NULL;
+    /* La forma si valuta PRIMA di leggere il disco: un filtro con la `*` in mezzo non è "nessun
+     * repo", è un filtro che nessuno può leggere, e dirlo dopo aver scansito il cache farebbe
+     * perdere anche il tempo. */
+    if (filt && !filter_shape_ok(filt)) {
+        fprintf(err,
+                "fastmlx models: filtro '%s' non ammesso (le forme sono org/nome, nome, org/*)\n",
+                filt);
+        return FMLX_CLI_USAGE;
+    }
 
     v = (FmlxHfRepo *)malloc(FMLX_HF_CATALOG_REPOS_MAX * sizeof *v);
     if (!v) {
@@ -133,13 +191,22 @@ FmlxCliStatus fmlx_models_exec(const FmlxCliArgs *a, FILE *out, FILE *err) {
     else (void)fmlx_hf_cache_root(root, sizeof root);
 
     if (a->quiet) { /* una riga per repo: niente da parsare */
-        for (i = 0; i < n; i++) fprintf(out, "%s\n", v[i].repo_id);
+        for (i = 0; i < n; i++) {
+            if (!filter_match(filt, v[i].repo_id)) continue;
+            fprintf(out, "%s\n", v[i].repo_id);
+            kept++;
+        }
+        if (filt && kept == 0)
+            fprintf(err, "fastmlx models: nessun repo nel cache che matcha '%s'\n", filt);
         free(v);
-        return FMLX_CLI_OK;
+        return (filt && kept == 0) ? FMLX_CLI_FAILED : FMLX_CLI_OK;
     }
 
     for (i = 0; i < n; i++) {
-        size_t len = strlen(v[i].repo_id);
+        size_t len;
+        if (!filter_match(filt, v[i].repo_id)) continue;
+        kept++;
+        len = strlen(v[i].repo_id);
         if (v[i].refs_only) {
             len += sizeof MARKER_REFS_ONLY - 1;
             any_refs_only = 1;
@@ -151,15 +218,32 @@ FmlxCliStatus fmlx_models_exec(const FmlxCliArgs *a, FILE *out, FILE *err) {
         if (len > wname) wname = len;
         total += v[i].bytes;
     }
+    /* Zero match CON un filtro: nessuna tabella, nessun totale, e un codice che lo dice. Stampare
+     * l'intestazione con sotto "(nessun repo)" farebbe sembrare completo un risposta che è un
+     * fallimento, ed è esattamente il caso che `grep` risolve con il suo exit 1. */
+    if (filt && kept == 0) {
+        fprintf(err, "fastmlx models: nessun repo nel cache che matcha '%s'\n", filt);
+        free(v);
+        return FMLX_CLI_FAILED;
+    }
     fprintf(out, "%-*s  %-7s %9s %5s %4s  %s\n", (int)wname, "NOME", "TIPO", "DIM", "BLOB", "REF",
             "MODIFICATO");
-    for (i = 0; i < n; i++) print_row(&v[i], (int64_t)time(NULL), wname, out);
+    for (i = 0; i < n; i++) {
+        if (!filter_match(filt, v[i].repo_id)) continue;
+        print_row(&v[i], (int64_t)time(NULL), wname, out);
+    }
     if (n == 0) fprintf(out, "(nessun repo)\n");
 
     {
         char t[32];
         fmt_bytes(total, t, sizeof t);
-        fprintf(out, "\n%zu repo, %s in %s", n, t, root[0] ? root : "(radice della lane hf)");
+        /* Il conteggio della riga finale è quello dei **match**, non quello del cache: dire "3 repo,
+         * 1.5 kB" sotto una tabella di una riga sola sarebbe il modo in cui un filtro si spaccia per
+         * l'elenco completo. E il filtro si NOMINA, perché "1 repo" senza dire 1 di cosa non è
+         * un'informazione. */
+        fprintf(out, "\n%zu repo%s, %s in %s", kept, filt ? " che matchano" : "", t,
+                root[0] ? root : "(radice della lane hf)");
+        if (filt) fprintf(out, "  [filtro '%s', %zu repo nel cache]", filt, n);
         /* I non-repo si NOMINANO: `version.txt` e `xet/` nella radice ci sono davvero, e un elenco
          * che tace su ciò che salta è il modo in cui "non ho trovato niente" diventa
          * "non c'è niente". */

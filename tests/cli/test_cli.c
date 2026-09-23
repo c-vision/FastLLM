@@ -363,7 +363,9 @@ static void put_bytes(const char *rel, size_t n) {
 
 /* Costruisce `<WORK>/cache` con i quattro casi che la tabella deve distinguere. Le dimensioni sono
  * CHOSEN per cadere su due unità diverse (kB e byte) e per avere un totale che si può controllare a
- * mente: 1000 + 500 + 3 = 1503 byte. */
+ * mente: 1000 + 500 + 3 = 1503 byte. `zz/uno` NON è un quarto caso della tabella: è il caso che il
+ * filtro lo scopre — un nome che esiste in DUE org, dove `models uno` deve rispondere due righe e
+ * non indovinarne una. */
 static void build_cache_fixture(void) {
     dir("cache/models--mm--uno/refs");
     put_bytes("cache/models--mm--uno/blobs/b1", 1000);
@@ -372,6 +374,8 @@ static void build_cache_fixture(void) {
     put_bytes("cache/models--mm--ref/refs/main", 40);
     dir("cache/datasets--mm--data");
     put_bytes("cache/datasets--mm--data/blobs/z", 3);
+    dir("cache/models--zz--uno/blobs");
+    put_bytes("cache/models--zz--uno/blobs/b1", 7);
     put_bytes("cache/version.txt", 2); /* un non-repo: si CONTA, non si tace */
 }
 
@@ -406,12 +410,20 @@ static void case_models_tabella(void) {
     /* L'argomento posizionale su un verbo che non lo usa è un errore, non una cosa ignorata. Si
      * asserisce ANCHE il nome del verbo: il primo giro sul cache reale ha stampato
      * `fastmlx: : non prende argomenti` (il messaggio leggeva `out->verb` DOPO l'azzzeramento di
-     * `fail`) e il solo frammento "non prende argomenti" lo stava a bere. */
-    CK_PARSE(FMLX_CLI_USAGE, "fastmlx", "models", "mm/uno");
+     * `fail`) e il solo frammento "non prende argomenti" lo stava a bere. `models` l'argomento lo
+     * USA (è il filtro), e il verbo che oggi non lo prende è `serve`. */
+    CK_PARSE(FMLX_CLI_USAGE, "fastmlx", "serve", "mm/uno");
     CK(strstr(msg, "non prende argomenti") != NULL, "msg=%s", msg);
-    CK(strncmp(msg, "models:", 7) == 0, "il verbo non è nominato per esteso: '%s'", msg);
-    CK_PARSE(FMLX_CLI_USAGE, "fastmlx", "list", "mm/uno");
-    CK(strncmp(msg, "list:", 5) == 0, "alias senza il suo nome: '%s'", msg);
+    CK(strncmp(msg, "serve:", 6) == 0, "il verbo non è nominato per esteso: '%s'", msg);
+    /* Due filtri non vogliono dire niente: il secondo è un errore, non un AND implicito. */
+    CK_PARSE(FMLX_CLI_USAGE, "fastmlx", "models", "mm/uno", "mm/ue");
+    CK(strstr(msg, "troppo argomenti posizionali") != NULL, "due filtri accettati: '%s'", msg);
+    /* Il filtro arriva DAVVERO all'exec: `a->repo` è lo stesso campo che legge `pull`, e un parse
+     * che lo riempie per un verbo e lo dimentica per l'altro si vede solo qui. */
+    CK_PARSE(FMLX_CLI_OK, "fastmlx", "models", "mm/uno");
+    CK(strcmp(a.repo, "mm/uno") == 0, "il filtro non arriva all'exec: '%s'", a.repo);
+    CK_PARSE(FMLX_CLI_OK, "fastmlx", "list", "uno");
+    CK(strcmp(a.repo, "uno") == 0, "l'alias perde il filtro: '%s'", a.repo);
 
     CK_PARSE(FMLX_CLI_OK, "fastmlx", "models", "--cache", at("cache"));
     CK_ST(fmlx_cli_exec_with(&a, &DEAD, out, err), FMLX_CLI_OK);
@@ -449,7 +461,7 @@ static void case_models_tabella(void) {
     }
     CK(outb && strstr(outb, "[solo ref] =") != NULL, "nessuna legenda del marker:\n%s",
        outb ? outb : "(vuoto)");
-    CK(outb && strstr(outb, "3 repo") != NULL, "riga finale col conteggio:\n%s", outb ? outb : "(vuoto)");
+    CK(outb && strstr(outb, "4 repo") != NULL, "riga finale col conteggio:\n%s", outb ? outb : "(vuoto)");
     CK(outb && strstr(outb, "1 entry che non sono un repo") != NULL,
        "i non-repo non si nominano:\n%s", outb ? outb : "(vuoto)");
     /* Il totale è 1503: se la tabella raddoppiasse qualcosa (come farebbe contando gli symlink) qui
@@ -480,11 +492,161 @@ static void case_models_quiet(void) {
     CK(strncmp(outb, "mm/data\n", 8) == 0, "la prima riga non e' un id: %s", outb ? outb : "(vuoto)");
     for (const char *p = outb; p && *p; p++)
         if (*p == '\n') lines++;
-    CK(lines == 3, "righe=%zu, attese 3 (una per repo)\n%s", lines, outb ? outb : "(vuoto)");
+    CK(lines == 4, "righe=%zu, attese 4 (una per repo)\n%s", lines, outb ? outb : "(vuoto)");
     /* `list` alias di `models`: stessa tabella, stesse colonne. */
     CK(en == 0, "l'alias ha scritto sull'errore: %s", errb ? errb : "(null)");
     free(outb);
     free(errb);
+}
+
+/* ---- models <filtro> ---- */
+
+typedef struct {
+    char *out, *err;
+    size_t on, en;
+} Cap;
+
+/* Un giro completo parse+exec con i buffer NUOVI: il secondo `open_memstream` sulla stessa variabile
+ * lascia lì il buffer precedente, e un `strstr` che legge la risposta vecchia è il modo in cui un
+ * test verde non dice più niente. `msg` esce compilato perché la forma del filtro (USAGE) si prova
+ * sul messaggio, non sul codice. */
+static FmlxCliStatus run_models(Cap *c, char *msg, int argc, char **av) {
+    FmlxCliArgs a;
+    FILE *o, *e;
+    FmlxCliStatus s;
+
+    c->out = NULL;
+    c->err = NULL;
+    c->on = c->en = 0;
+    msg[0] = '\0';
+    o = open_memstream(&c->out, &c->on);
+    e = open_memstream(&c->err, &c->en);
+    s = fmlx_cli_parse(argc, av, &a, msg, 256);
+    if (s == FMLX_CLI_OK) s = fmlx_cli_exec_with(&a, &DEAD, o, e);
+    fclose(o);
+    fclose(e);
+    if (c->out) c->out[c->on] = '\0';
+    if (c->err) c->err[c->en] = '\0';
+    return s;
+}
+
+static int count_rows(const Cap *c, const char *id) {
+    const char *p = c->out;
+    char line[1024];
+    int k = 0;
+
+    while (p && *p) {
+        const char *nl = strchr(p, '\n');
+        size_t len = nl ? (size_t)(nl - p) : strlen(p);
+        if (len && len < sizeof line) {
+            memcpy(line, p, len);
+            line[len] = '\0';
+            if (strncmp(line, id, strlen(id)) == 0) k++;
+        }
+        p = nl ? nl + 1 : NULL;
+    }
+    return k;
+}
+
+static void case_models_filtro(void) {
+    Cap c;
+    char msg[256];
+    char *cv;
+    char *ex[] = {"fastmlx", "models", "--cache", NULL, "mm/uno"};
+    char *bare[] = {"fastmlx", "models", "--cache", NULL, "uno"};
+    char *glob[] = {"fastmlx", "models", "--cache", NULL, "zz/*"};
+    char *up[] = {"fastmlx", "models", "--cache", NULL, "MM/UNO"};
+    char *none[] = {"fastmlx", "models", "--cache", NULL, "nope/nope"};
+    char *star[] = {"fastmlx", "models", "--cache", NULL, "or*x"};
+    char *q[] = {"fastmlx", "list", "--quiet", "--cache", NULL, "uno"};
+    char *qnone[] = {"fastmlx", "list", "--quiet", "--cache", NULL, "nope/nope"};
+
+    build_cache_fixture();
+    /* `at()` dà UN buffer statico: `cv` si cattura DOPO l'ultima chiamata della fixture, o punterebbe
+     * a "cache/models--mm--uno/refs" invece che a "cache" — e il test fallirebbe per una ragione che
+     * non c'entra niente con il filtro. */
+    cv = at("cache");
+    ex[3] = cv;
+    bare[3] = cv;
+    glob[3] = cv;
+    up[3] = cv;
+    none[3] = cv;
+    star[3] = cv;
+    q[4] = cv;
+    qnone[4] = cv;
+
+    /* `org/nome`: UNA riga, e il CONTEGGIO della riga finale è dei match (1), non del cache (4) —
+     * che è il numero che un occhio leggerebbe come "ho elencato tutto". Qui NON si asserisce nulla
+     * sui BYTE: `mm/uno` è 1503 B su 1510 B di cache, e la formattazione li rende identici ("1.5 kB")
+     * per entrambi, quindi un'asserzione su quella stringa sarebbe verde in ogni caso. Il totale che
+     * rispetta il filtro è provato più sotto, con `zz/` + `*` (7 byte contro 1.5 kB): è lì che la
+     * mutazione «il `total +=` ignora il filtro» diventa rossa, ed è rosso che l'ho verificato
+     * lanciandola. */
+    CK_ST(run_models(&c, msg, 5, ex), FMLX_CLI_OK);
+    CK(count_rows(&c, "mm/uno") == 1, "filtro esatto con piu' righe:\n%s", c.out ? c.out : "(vuoto)");
+    CK(count_rows(&c, "zz/uno") == 0, "il filtro esatto ha lasciato passare zz/uno:\n%s",
+       c.out ? c.out : "(vuoto)");
+    CK(HAS(c.out, "1 repo che matchano"), "la riga finale non dice che è un filtro:\n%s",
+       c.out ? c.out : "(vuoto)");
+    CK(HAS(c.out, "4 repo nel cache"), "il filtro non nomina il totale del cache:\n%s",
+       c.out ? c.out : "(vuoto)");
+    free(c.out);
+    free(c.err);
+
+    /* `nome` senza `/`: il caso per cui esiste la regola — due org con lo stesso nome. Il filtro
+     * NON ne sceglie una: le mostra tutte e due, che è l'unica risposta onesta. */
+    CK_ST(run_models(&c, msg, 5, bare), FMLX_CLI_OK);
+    CK(count_rows(&c, "mm/uno") == 1 && count_rows(&c, "zz/uno") == 1,
+       "il nome nudo non ha matchato entrambe le org:\n%s", c.out ? c.out : "(vuoto)");
+    CK(HAS(c.out, "2 repo che matchano"), "conteggio dei match assente:\n%s", c.out ? c.out : "(vuoto)");
+    free(c.out);
+    free(c.err);
+
+    CK_ST(run_models(&c, msg, 5, glob), FMLX_CLI_OK);
+    CK(count_rows(&c, "zz/uno") == 1 && count_rows(&c, "mm/uno") == 0, "org/* non filtra per org:\n%s",
+       c.out ? c.out : "(vuoto)");
+    CK(HAS(c.out, "7 byte in"), "il totale e' di tutto il cache, non dell'org:\n%s",
+       c.out ? c.out : "(vuoto)");
+    free(c.out);
+    free(c.err);
+
+    CK_ST(run_models(&c, msg, 5, up), FMLX_CLI_OK);
+    CK(count_rows(&c, "mm/uno") == 1, "MM/UNO non matcha mm/uno:\n%s", c.out ? c.out : "(vuoto)");
+    free(c.out);
+    free(c.err);
+
+    /* Zero match: USCITA 1 e stdout VUOTO. Un elenco con l'intestazione e exit 0 sarebbe il modo in
+     * cui "non c'è" somiglia a "ho finito di elencare". */
+    CK_ST(run_models(&c, msg, 5, none), FMLX_CLI_FAILED);
+    CK(c.on == 0, "zero match hanno stampato una tabella (%zu byte):\n%s", c.on, c.out ? c.out : "");
+    CK(HAS(c.err, "nope/nope"), "l'errore non nomina il filtro: %s", c.err ? c.err : "(vuoto)");
+    free(c.out);
+    free(c.err);
+
+    /* La forma illeggibile è un errore di chi digita (USAGE), non un "non c'è niente" (FAILED): i
+     * due casi chiedono due correzioni diverse. */
+    CK_ST(run_models(&c, msg, 5, star), FMLX_CLI_USAGE);
+    CK(HAS(c.err, "non ammesso"), "la forma rifiutata non lo dice: %s", c.err ? c.err : "(vuoto)");
+    CK(c.on == 0, "un filtro rifiutato ha stampato qualcosa:\n%s", c.out ? c.out : "(vuoto)");
+    free(c.out);
+    free(c.err);
+
+    CK_ST(run_models(&c, msg, 6, q), FMLX_CLI_OK);
+    CK(c.on && strcmp(c.out, "mm/uno\nzz/uno\n") == 0, "--quiet col filtro: '%s'",
+       c.out ? c.out : "(vuoto)");
+    free(c.out);
+    free(c.err);
+
+    /* LO STESSO zero match, ma dalla parte `--quiet`. Non è un doppione: il ramo silenzioso ha un
+     * `return` suo, prima della tabella, e la mutazione che rende "nessun match" un successo ne
+     * ha colpito uno solo dei due. Chi consuma `--quiet` è uno script, ed è esattamente chi legge
+     * il codice d'uscita invece dello schermo. */
+    CK_ST(run_models(&c, msg, 6, qnone), FMLX_CLI_FAILED);
+    CK(c.on == 0, "--quiet con zero match ha stampato id: '%s'", c.out ? c.out : "(vuoto)");
+    CK(HAS(c.err, "nope/nope"), "--quiet non nomina il filtro che non ha trovato niente: %s",
+       c.err ? c.err : "(vuoto)");
+    free(c.out);
+    free(c.err);
 }
 
 /* La radice che non esiste NON è "cache vuoto": due messaggi diversi, perché sono due consigli
@@ -595,11 +757,6 @@ int main(int argc, char **argv) {
     unsetenv("FASTMLX_HOST");
     unsetenv("FASTMLX_PORT");
     unsetenv("FASTMLX_API_KEY");
-    /* `serve` legge il suo ambiente come `pull` legge HF_HOME: lasciarlo quello di chi esegue
-     * renderebbe i risultati dipendenti dalla shell di chi li guarda. */
-    unsetenv("FASTMLX_HOST");
-    unsetenv("FASTMLX_PORT");
-    unsetenv("FASTMLX_API_KEY");
 
     /* Il work directory è OBBLIGATORIO (lo passa CMake): un test che scrivesse il suo cache finto
      * nella directory corrente finirebbe per farlo nella root del repo, che è il punto dove il
@@ -619,6 +776,7 @@ int main(int argc, char **argv) {
     case_serve_bandiere();
     case_models_tabella();
     case_models_quiet();
+    case_models_filtro();
     case_models_senza_cache();
     case_canali();
     case_aiuto();

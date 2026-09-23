@@ -40,7 +40,8 @@ void fmlx_cli_usage(FILE *out) {
             "uso: fastmlx <comando> [argomenti] [opzioni]\n"
             "\n"
             "  pull <repo>            scarica (o ritrova) TUTTO il repo nel cache HF\n"
-            "  models, list           cosa c'e' gia' nel cache, senza rete\n"
+            "  models, list [<filtro>] cosa c'e' gia' nel cache, senza rete; <filtro> = org/nome,\n"
+            "                         nome (l'ultima parte dell'id) o org/*\n"
             "  serve                  espone /v1/models e /health; ogni rotta che genera risponde 501\n"
             "\n"
             "per pull:\n"
@@ -58,6 +59,8 @@ void fmlx_cli_usage(FILE *out) {
             "  -h, --help             questo testo\n"
             "\n"
             "per models:\n"
+            "  <filtro>               uno solo, a posizione; zero match = uscita 1 (come grep):\n"
+            "                         «non c'e'» non puo' sembrare «va tutto bene»\n"
             "  --cache <dir>          radice del cache (default: quella di Hugging Face)\n"
             "  --quiet                solo gli id, uno per riga\n"
             "\n"
@@ -277,19 +280,15 @@ FmlxCliStatus fmlx_cli_parse(int argc, char **argv, FmlxCliArgs *out, char *msg,
     if (!verb_seen) return fail(out, msg, msg_len, "nessun comando");
     if (!strcmp(out->verb, "pull") && !out->repo[0])
         return fail(out, msg, msg_len, "pull: manca il repo (es. org/modello)");
-    /* `models` e `serve` non hanno un argomento: accettare `fastmlx models org/repo` e stampare
-     * TUTTI i repo, o `serve mlx-model` e ascoltare comunque, sarebbe una bandiera che mente, solo
-     * scritta senza trattini. Il filtro per repo è un lavoro del piano, non una cosa da fingere. */
-    if (repo_seen && (!strcmp(out->verb, "models") || !strcmp(out->verb, "list") ||
-                      !strcmp(out->verb, "serve"))) {
+    /* `serve` non ha un argomento posizionale: accettare `serve mlx-model` e ascoltare comunque
+     * sarebbe una bandiera che mente, solo scritta senza trattini. `models`/`list` LO hanno dal
+     * 2026-09-24 (il filtro per repo), e la regola che resta è la stessa: UNO solo, il secondo è un
+     * errore — due filtri non vogliono dire niente. */
+    if (repo_seen && !strcmp(out->verb, "serve")) {
         char v[16];
-        const char *why = !strcmp(out->verb, "serve") ? "le opzioni di serve sono bandiere"
-                                                      : "l'elenco è tutto il cache";
-        /* Copia PRIMA di `fail`, che azzera `out`: la prima versione del messaggio stampava
-         * `fastmlx: : non prende argomenti` — vuoto, e il test lo lasciava passare perché
-         * guardava solo il frammento finale. */
-        snprintf(v, sizeof v, "%s", out->verb);
-        return fail(out, msg, msg_len, "%s: non prende argomenti (%s)", v, why);
+        snprintf(v, sizeof v, "%s", out->verb); /* `fail` azzera `out`: vedi sopra */
+        return fail(out, msg, msg_len, "%s: non prende argomenti (le opzioni di serve sono bandiere)",
+                    v);
     }
     /* Una bandiera che IL VERBO NON LEGGE è un errore, non un'opzione ignorata: il motivo è lo
      * stesso per cui una bandiera sconosciuta lo è. `fastmlx serve --dest x` sembra un comando che
