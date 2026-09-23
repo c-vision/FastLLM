@@ -180,6 +180,45 @@ socket nudi senza TLS come `gmb_network.c`. Gli SHA per la verifica vengono da `
 (`CC_SHA1`/`CC_SHA256`, header nell'SDK): una nostra copia di SHA1 sarebbe l'unico modo di
 sbagliarla in silenzio.
 
+## La lane HTTP (`src/server/fmlx_http.c`)
+
+Il pezzo che tocca per primo i byte che arrivano da internet, e che sta **sotto** gli adapter. Qui
+il contratto non è "fare HTTP": è **non poter essere tratti in inganno** su dove finisce una
+richiesta e dove comincia la successiva — la classe di bug (request smuggling) in cui un parser
+permissivo e uno severo, messi in fila, non sono lo stesso server.
+
+**Ogni ambiguità di framing è un rifiuto con un codice proprio**, perché l'alternativa è
+indovinare: due `Content-Length` **diversi** (`CL_AMBIGUOUS`; due valori *uguali* è solo
+ridondanza e passa), `Transfer-Encoding` **insieme** a `Content-Length` (`TE_WITH_CL` — vince su
+`CHUNKED`, perché la presenza di entrambi è già di per sé il segnale, anche se il TE dice
+`chunked`), chunked **in richiesta** (`CHUNKED`), TE senza `chunked` (`BAD_TE`), POST/PUT/PATCH senza `Content-Length`
+(`NO_CONTENT_LENGTH` — non si indovina "0 byte"), obs-fold (`FOLDING`), `\r` non seguito da `\n`
+(`LONE_CR`). Un `\n` **sciolto** invece è accettato: la severità che serve sta sul corpo, non sui
+byte di fine riga. `NEED_MORE` **non** è un errore: è l'unico modo di dire "ho letto, non basta"
+senza far perdere i byte già letti — compreso il caso `\r` come ultimo byte, dove un `LONE_CR`
+buttrebbe via una richiesta perfetta a metà.
+
+**Zero allocazioni**: il parser non copia e non alloca; `FmlxHttpReq` è fatto di `FmlxSlice`
+(`{ptr, len}`, **non** NUL-terminati) che puntano nel buffer del chiamante, che deve restare
+valido e immutato. `fmlx_http_req_init` è obbligatorio: un struct non inizializzato non è un
+valore, è un `n_hdr` casuale che diventa una lettura fuori array.
+
+**Il writer risponde alla stessa domanda del writer JSON**: "un `Content-Length` che promette più
+byte di quelli inviati è una connessione appesa, non una risposta sbagliata". La validazione è
+**prima** di scrivere e, al fallimento, `w->len` torna al segno di partenza: nessun pezzo di
+testata lasciato indietro. (Il test l'ha scoperto: con la validazione dopo, un `Content-Type` con
+CRLF dentro lasciava 36 byte di testata a metà.) `Content-Length` è scritto da `body_len`, quindi
+non esiste una chiamata che possa scegliere un valore incoerente col corpo. Gli extra header sono
+una lista `"A: b\r\nC: d"` **senza** CRLF finale.
+
+`Connection: close` **vince sempre**, in qualunque posizione della lista: per un server chiudere è
+sempre sicuro, restare aperti su una connessione che il client voleva chiudere lascia il corpo
+successivo in coda sul socket. SSE: un `\n` dentro il payload diventa **più righe `data:`** — è
+l'errore SSE più comune e silenzioso, e lo gestisce il writer, non chi chiama. Il chunk copre
+l'evento intero e la proprietà verificata dal test è che il conteggio esadecimale dichiarato
+eguagli i byte realmente emessi, confrontato con la stessa scrittura **senza** chunking (il
+testimone indipendente).
+
 ## La lane API — router e adapter (`src/server/fmlx_api*.c`)
 
 Il pezzo che sta **sopra** il codec e **sotto** il motore, ed è il punto in cui i due dialetti
@@ -216,6 +255,14 @@ gli argomenti raccolti non validano.
 `n:2` è un 400 con `param:"n"`, non una risposta singola silenziosa; `max_tokens: 1.5` è un errore
 di tipo, non un troncamento. Due `max_tokens`/`max_completion_tokens` discordi: vince il più
 recente, l'altro finisce negli ignored.
+
+**`|` non sequenzia gli operandi, e qui l'ordine È il contratto.** La prima versione degli adapter
+accumulava gli esiti del writer così: `bad |= fmlx_jsonw_key(w, "id") | fmlx_jsonw_cstr(w, id);`.
+Il C garantisce che i due valori vengano prodotti, non **in quale ordine**: un compilatore può
+calcolare `id` prima di emettere la chiave, o un `arr_end` prima del suo `arr_begin`. La forma
+corretta è `if (A || B) return …;` — `||` sequenzia. L'accumulatore `bad` è stato rimosso del tutto
+(tutti i punti migrati con `tools/gmb_seq_unbad.py`, che ha anche la modalità `--wrap` per il limite
+di 100 colonne), e il gate è un `grep`: `bad |=` deve restituire zero in `src/server/`.
 
 **Zero allocazioni anche qui**, come nel codec: gli adapter scrivono nella memoria del chiamante e
 `t->d`/`id`/`created` arrivano da `FmlxApiMeta` passati dall'alto — un adapter che leggesse
@@ -284,6 +331,11 @@ con ggml, 0 incoerenze, 18 gap colmabili`):
 * **File ≤ ~1200 righe, uno per dominio** (il lettore GGUF è già oltre la soglia di attenzione:
   si spezza per area — tabella tipi / parse KV / parse tensor-info — appena cresce).
 * **Nessun test massivo** senza richiesta esplicita: si esegue la suite del componente toccato.
+* **Niente `|` per combinare effetti** — e niente `int` che diventa `FmlxApiErr` senza rileggere i
+  punti di chiamata. `A | B` non garantisce che `A` sia eseguito prima di `B`: dove l'ordine degli
+  effetti È il contratto (chiave prima del valore, `arr_begin` prima del suo `arr_end`) si usa
+  `||`/`&&`/`?:`/`,` o due statement. E `== 0` cambia significato con il tipo: 1=ok e 0=ok sono
+  compatibili col compilatore e incompatibili col mondo.
 * **Nessun nome di persona o azienda nei nomi dei file.**
 * Licenze e attribuzioni: vedi `LICENSES.md`. **Un'obbligazione esiste già oggi**: le codebook
   IQ2 sono dati ggml (MIT) copiati con `tools/gen_codebooks.py`, attribuiti nel file generato e
