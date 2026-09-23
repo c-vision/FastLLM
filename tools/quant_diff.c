@@ -1,4 +1,4 @@
-/* quant_diff.c — verifica DIFFERENZIALE del dequant di FastMLX contro TRE implementazioni
+/* quant_diff.c — verifica DIFFERENZIALE del dequant di FastMLX contro QUATTRO implementazioni
  * indipendenti, sui tensori REALI dei GGUF di questa
  * macchina. Nessun download, nessun modello in memoria: si dequantizza una finestra per
  * tipo e si confrontano i bit.
@@ -10,6 +10,9 @@
  *   B) GMBasic/native/gmb_moe_runtime/src/gmb_moe_ggml.c (gmb_moe_ggml_dequant_row)
  *   C) llama.cpp/ggml, la libreria già costruita su questa macchina: `dequantize_row_*` e
  *      `ggml_row_size`, raggiunti tramite tools/quant_diff_ggml.c
+ *   D) gguflib, il lettore che MLX 0.32 usa DAVVERO per i quantizzati che non sa impacchettare
+ *      (`mlx/io/gguf.cpp:11-40` → `gguf_tensor_to_f16`), raggiunto tramite
+ *      tools/quant_diff_gguflib.c — copre 6 tipi (`Q4_0 Q4_1 Q8_0 Q2_K Q4_K Q6_K`)
  * A e B sono due code diverse che girano su modelli veri: se divergono tra loro, la
  * divergenza è SEGNALATA (bug da aprire nel vault GMBasic), non assorbita. C è in più il
  * codice che i file GGUF li SCRIVE, quindi è autorità anche sui NUMERI di enum e sulle
@@ -20,10 +23,13 @@
  * dipendenza di build del progetto — vedi CMakeLists.txt):
  *   G=/Users/gaetano/Documents/Projects/GMBasic
  *   L=/Users/gaetano/llamacpp
+ *   U="$G/native/gmb_host_ai_mlx/build/_deps/gguflib-src"
  *   cc -Wall -Wextra -Werror -std=gnu17 -I include -I "$G/native/gmb_host_ai_mlx" \
- *      -I "$G/native/gmb_moe_runtime/include" -I "$G/native/gmb_moe_runtime/src" \
+ *      -I "$G/native/gmb_moe_runtime/include" -I "$G/native/gmb_moe_runtime/src" -I "$U" \
  *      -I "$L/ggml/src" -I "$L/ggml/include" \
- *      tools/quant_diff.c tools/quant_diff_ggml.c src/lane_gguf/fmlx_gguf.c \
+ *      tools/quant_diff.c tools/quant_diff_ggml.c tools/quant_diff_gguflib.c \
+ *      "$U/gguflib.c" "$U/fp16.c" \
+ *      src/lane_gguf/fmlx_gguf.c \
  *      src/lane_gguf/fmlx_quant.c src/lane_gguf/fmlx_quant_ext.c \
  *      src/lane_gguf/fmlx_quant_iq.c \
  *      "$G/native/gmb_moe_runtime/src/gmb_moe_ggml.c" \
@@ -53,6 +59,12 @@ int ggc_type_count(void);
 uint64_t ggc_row_bytes_any(int type, int64_t n);
 uint32_t ggc_f16_bits(uint16_t h);
 
+/* D: firme in tools/quant_diff_gguflib.c */
+int ggu_covers(int type);
+int ggu_dequant_row(int type, const uint8_t *bytes, int64_t n, float *dst);
+uint64_t ggu_row_bytes(int type, int64_t n);
+const char *ggu_type_name(int type);
+
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -60,7 +72,8 @@ uint32_t ggc_f16_bits(uint16_t h);
 
 #define SAMPLE_ELEMS 8192u
 
-static float mine[SAMPLE_ELEMS], refA[SAMPLE_ELEMS], refB[SAMPLE_ELEMS], refC[SAMPLE_ELEMS];
+static float mine[SAMPLE_ELEMS], refA[SAMPLE_ELEMS], refB[SAMPLE_ELEMS], refC[SAMPLE_ELEMS],
+             refD[SAMPLE_ELEMS];
 
 /* Ritorna 1 se il confronto è lecito (stessa forma dei bit). */
 static int cmp_bufs(const float *x, const float *y, uint64_t n, const char *what,
@@ -100,10 +113,13 @@ struct verdict {
 
 static void compare(int type, const uint8_t *bytes, uint64_t elems, const char *label,
                     int verbose, struct verdict *v) {
-    struct witness w[3];
+    struct witness w[4];
+    /* A, B e D sono SECONDARI: conta ciò che dicono solo quando C (l'autorità) è d'accordo con
+     * loro. L'indice 2 è C, ed è fuori da questo elenco per definizione. */
+    static const int sec[3] = { 0, 1, 3 };
     FmlxGgufStatus s;
-    int eq[3];
-    int i, j, n_ok = 0;
+    int eq[4];
+    int k, i, j, n_ok = 0;
 
     v->calls++;
     s = fmlx_ggml_dequant_row(type, bytes, elems, mine);
@@ -122,14 +138,17 @@ static void compare(int type, const uint8_t *bytes, uint64_t elems, const char *
     w[2].tag = "C (ggml)";
     w[2].ok = ggc_dequant_row(type, bytes, (int64_t)elems, refC);
     w[2].buf = refC;
+    w[3].tag = "D (gguflib)";
+    w[3].ok = ggu_dequant_row(type, bytes, (int64_t)elems, refD);
+    w[3].buf = refD;
 
-    for (i = 0; i < 3; i++) n_ok += w[i].ok != 0;
+    for (i = 0; i < 4; i++) n_ok += w[i].ok != 0;
     if (!n_ok) {
         printf("    %s tipo %d: NESSUNA implementazione di riferimento lo copre (gap "
                "dichiarato, non confrontabile)\n", label, type);
         return;
     }
-    for (i = 0; i < 3; i++) {
+    for (i = 0; i < 4; i++) {
         uint64_t first = 0;
         float maxdiff = 0;
         eq[i] = -1;
@@ -145,7 +164,8 @@ static void compare(int type, const uint8_t *bytes, uint64_t elems, const char *
     /* Classificazione: C è l'autorità (è il codice che i GGUF li SCRIVE). Se i ns. bit
      * coincidono con C e un testimone secondario dice altro, l'outlier è LUI. Se C non
      * copre il tipo, la divergenza resta nostra: non abbiamo modo di assolverci. */
-    for (i = 0; i < 2; i++) {
+    for (k = 0; k < 3; k++) {
+        i = sec[k];
         if (eq[i] != 0) continue;
         if (eq[2] == 1) v->ext++;
         else v->ours++;
@@ -153,8 +173,8 @@ static void compare(int type, const uint8_t *bytes, uint64_t elems, const char *
     if (eq[2] == 0) v->ours++;
     /* Testimone contro testimone: se due di loro divergono, il disaccordo NON è nostro da
      * assorbire — è un bug da aprire dove il codice vive. */
-    for (i = 0; i < 3; i++) {
-        for (j = i + 1; j < 3; j++) {
+    for (i = 0; i < 4; i++) {
+        for (j = i + 1; j < 4; j++) {
             uint64_t first = 0;
             float maxdiff = 0;
             if (!w[i].ok || !w[j].ok) continue;
@@ -260,9 +280,9 @@ static int coverage_audit(struct verdict *v) {
     static unsigned char bytes[SAMPLE_ELEMS * 4];
     uint64_t seed = 20260923u;
     size_t i;
-    int t, bad = 0, seen = 0, gaps = 0, forms = 0;
+    int t, bad = 0, seen = 0, gaps = 0, forms = 0, extbyte = 0;
 
-    printf("audit di copertura (bit + forma) contro i testimoni A, B, C\n");
+    printf("audit di copertura (bit + forma + byte) contro i testimoni A, B, C, D\n");
     for (i = 0; i < sizeof bytes; i++) {
         seed = seed * 1103515245u + 12345u;
         bytes[i] = (unsigned char)(seed >> 16);
@@ -300,11 +320,39 @@ static int coverage_audit(struct verdict *v) {
                    t, ty->name, need, n, gg);
             bad++;
         }
+        /* TERZA opinione sulla dimensione del blocco: la TAVOLA di gguflib, interrogata su OGNI
+         * voce e non solo sui sei tipi che quel lettore sa dequantizzare. È qui che passa il
+         * calcolo di `bsize` per ogni tensore (`gguflib.c:309-310`), quindi una voce sbagliata
+         * sposta il data section di tutto il file anche dove il dequant non esiste — ed è il
+         * difetto che nel vault GMBasic sta aperto come bug dei lettori divergenti.
+         * L'attribuzione segue l'autorità, non il conteggio: se ggml (C) dice come noi, l'outlier
+         * è LUI e il rosso non è nostro — un'incoerenza sempre ascritta a noi diventa, a forza di
+         * vederla, un verde bugiardo al contrario. */
+        if (n && cbv && (!ty || (uint64_t)cbv == ty->block_vals)) {
+            uint64_t gb = ggu_row_bytes(t, (int64_t)n);
+            uint64_t gba = gb ? ggc_row_bytes_any(t, (int64_t)n) : 0;
+            if (gba && gba != gb) {
+                if (!ty || !need || gba == need) {
+                    printf("    tipo %d (%s = %s): ggml %" PRIu64 " byte per %" PRIu64
+                           " elementi, gguflib ne dice %" PRIu64 "%s — chi legge così sposta la "
+                           "data section di TUTTI i tensori: bug da aprire dove gguflib vive\n", t,
+                           ggu_type_name(t), ty ? ty->name : "fuori dalla ns. tabella", gba,
+                           (uint64_t)n, gb, ty ? "" : " (noi non abbiamo un'opinione qui)");
+                    extbyte++;
+                } else {
+                    printf("    tipo %d (%s): noi %" PRIu64 " byte per %" PRIu64 " elementi, "
+                           "gguflib ne dice %" PRIu64 " e ggml %" PRIu64
+                           " — nessun accordo ci assolve\n", t, ty->name, need, (uint64_t)n, gb,
+                           gba);
+                    bad++;
+                }
+            }
+        }
     }
     for (t = 0; t <= FMLX_GGML_TYPE_MAX; t++) {
         const FmlxGgmlType *ty = fmlx_ggml_type(t);
         uint64_t n, need;
-        int aok, bok, cok, ours, witnesses;
+        int aok, bok, cok, dok, ours, witnesses;
         if (!ty || !ty->usable) continue;
         n = 2048u - (2048u % ty->block_vals);
         if (n == 0 || fmlx_ggml_type_bytes(t, n, &need) != FMLX_GGUF_OK || need > sizeof bytes) {
@@ -313,8 +361,9 @@ static int coverage_audit(struct verdict *v) {
         aok = gmb_ggml_dequant_row(t, bytes, (int64_t)n, refA) ? 1 : 0;
         bok = (gmb_moe_ggml_dequant_row((uint32_t)t, bytes, refB, (size_t)n) == 0) ? 1 : 0;
         cok = ggc_dequant_row(t, bytes, (int64_t)n, refC);
+        dok = ggu_dequant_row(t, bytes, (int64_t)n, refD);
         ours = (fmlx_ggml_dequant_row(t, bytes, n, mine) == FMLX_GGUF_OK) ? 1 : 0;
-        witnesses = aok + bok + cok;
+        witnesses = aok + bok + cok + dok;
         seen++;
         if (ours && !witnesses) {
             printf("    tipo %d (%s): NOI asseriamo di coprirlo e NESSUN testimone lo fa — "
@@ -328,14 +377,16 @@ static int coverage_audit(struct verdict *v) {
             bad++;
         }
         if (!ours && witnesses) {
-            printf("    tipo %d (%s): gap COLMABILE, %d testimone/i pronto/i (A=%d B=%d C=%d)\n", t,
-                   ty->name, witnesses, aok, bok, cok);
+            printf("    tipo %d (%s): gap COLMABILE, %d testimone/i pronto/i (A=%d B=%d C=%d D=%d)\n",
+                   t, ty->name, witnesses, aok, bok, cok, dok);
             gaps++;
         }
     }
     printf("    %d tipi confrontati sui bit, %d forme confrontate con ggml, %d incoerenze, "
-           "%d gap colmabili\n", seen, forms, bad, gaps);
+           "%d gap colmabili, %d byte in disaccordo tra testimoni (ggml con noi)\n", seen, forms,
+           bad, gaps, extbyte);
     v->ours += (uint64_t)bad; /* un'incoerenza di copertura è nostra, non di un testimone */
+    v->ext += (uint64_t)extbyte; /* e questa NO: l'outlier è gguflib, ggml dice come noi */
     return bad ? 1 : 0;
 }
 
@@ -640,7 +691,12 @@ int main(int argc, char **argv) {
         }
         argc = 1; /* nessun file: si passa direttamente al verdetto */
     }
-    for (i = 2; i < argc; i++) {
+    /* L'indice comincia da 1: `argv[1]` è il PRIMO file, non un modo. Un `i = 2` qui dentro
+     * saltava in silenzio il primo argomento — con UN file il gate non confrontava nessun tensore
+     * reale (e stampava solo il sintetico, sembrando verde), con N ne confrontava N−1. È il
+     * difetto di sempre: un verdetto che non ha provato niente ha esattamente l'aspetto di un
+     * verdetto che ha provato tutto. */
+    for (i = 1; i < argc; i++) {
         if (one(argv[i], &v) == 2) io = 1;
     }
     synthetic(&v);
@@ -659,8 +715,11 @@ int main(int argc, char **argv) {
     }
     if (v.ext) {
         printf("ESITO: nessun ns. bit divergente su %" PRIu64
-               " confronti, ma %" PRIu64 " disaccordi TRA TESTIMONI (A/B di GMBasic contro "
-               "ggml): bug da aprire nel vault GMBasic, non qui. Chiuso 3 = VERDE PER NOI.\n",
+               " confronti, ma %" PRIu64
+               " disaccordi TRA CODICI CHE VIVONO ALTROVE (oggi: i due dequant di GMBasic contro "
+               "ggml, e gguflib contro ggml sui bit o sulla dimensione di blocco). Chi siano, riga "
+               "per riga, è segnato con `!!` qui sopra: bug da aprire dove quel codice sta, non in "
+               "questo repo. Chiuso 3 = VERDE PER NOI.\n",
                v.calls, v.ext);
         return 3;
     }

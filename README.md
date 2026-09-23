@@ -10,7 +10,7 @@ da Hugging Face). Piano completo: `AiWiki/01-Projects/FastMLX/Piani/(open) - Fas
 | componente | stato |
 |---|---|
 | `src/lane_gguf/fmlx_gguf.c` — lettore GGUF di riferimento | **esiste, compilato, testato** (259 verifiche) |
-| `src/lane_gguf/fmlx_quant.c` + `fmlx_quant_ext.c` + `fmlx_quant_iq.c` — dequant ggml → F32 (31 tipi) | **esiste, compilato, testato** (510 verifiche + gate differenziale: 247 confronti, 0 ns. bit divergenti) |
+| `src/lane_gguf/fmlx_quant.c` + `fmlx_quant_ext.c` + `fmlx_quant_iq.c` — dequant ggml → F32 (31 tipi) | **esiste, compilato, testato** (510 verifiche + gate differenziale: 250 confronti, 0 ns. bit divergenti) |
 | `src/hf/fmlx_hf_cache.c` + `fmlx_hf_hash.c` — cache HF letto, senza rete | **esiste, compilato, testato** (131 verifiche + sonda sul cache reale) |
 | `src/hf/fmlx_hf_fetch.c` + `fmlx_hf_curl.c` — download, lock, resume, watchdog di stall, backend classico su repo xet | **esiste, compilato, testato** (199 verifiche senza rete + probe sul server vero + **`tools/hf_stall_probe.c`: il watchdog misurato per la prima volta su un server locale che si ferma a metà — 16 verifiche, e ha già trovato un difetto: lo stall tagliava come `ERR_HTTP`, cioè «non ritentare», e la ripresa non partiva mai**) |
 | `src/hf/fmlx_hf_manifest.c` — lista dei file di un repo (ciò che serve a `pull` per sapere COSA scaricare) | **esiste, compilato, testato** (51 verifiche senza rete + sonda sul server vero: `bert-base-uncased` 16 file, commit `86b5e09…`, 7 con `lfs`) |
@@ -618,19 +618,24 @@ del piano §8 più undici corruzioni distinte, ciascuna con il proprio codice at
 `tests/gguf/test_quant.c` prova invece i valori noti (IEEE half, blocchi costruiti a mano) e — la
 parte che conta — che **un rifiuto non lasci valori in `dst`**.
 
-Il **gate differenziale** non è un target CMake di proposito: confronta il dequant con tre
-implementazioni che non vivono in questo repo — due già in esercizio su GMBasic (A, B) e
-`ggml`/llama.cpp (C), che è anche l'autorità sui NUMERI di enum perché i file GGUF li scrive. Ha
-bisogno di quei sorgenti e della libreria già costruita su questa macchina. Si lancia così
-(7 GGUF reali di questa macchina + blocchi pseudo-casuali a seed fisso):
+Il **gate differenziale** non è un target CMake di proposito: confronta il dequant con quattro
+implementazioni che non vivono in questo repo — due già in esercizio su GMBasic (A, B),
+`ggml`/llama.cpp (C), che è anche l'autorità sui NUMERI di enum perché i file GGUF li scrive, e
+**gguflib (D)** — aggiunta perché è il SECONDO MOTORE NUMERICO che MLX userà davvero
+(`mlx/io/gguf.cpp:228-237` smista a `gguf_load_quantized` solo Q4_0/Q4_1/Q8_0; ogni altro
+quantizzato passa a `extract_tensor_data` → `gguf_tensor_to_f16` di gguflib). Ha bisogno di quei
+sorgenti e della libreria già costruita su questa macchina. Si lancia così (7 GGUF reali di questa
+macchina + blocchi pseudo-casuali a seed fisso):
 
 ```sh
 G=~/Documents/Projects/GMBasic
 L=~/llamacpp
+U="$G/native/gmb_host_ai_mlx/build/_deps/gguflib-src"
 cc -Wall -Wextra -Werror -std=gnu17 -I include -I src/lane_gguf -I "$G/native/gmb_host_ai_mlx" \
-   -I "$G/native/gmb_moe_runtime/include" -I "$G/native/gmb_moe_runtime/src" \
+   -I "$G/native/gmb_moe_runtime/include" -I "$G/native/gmb_moe_runtime/src" -I "$U" \
    -I "$L/ggml/src" -I "$L/ggml/include" \
-   tools/quant_diff.c tools/quant_diff_ggml.c src/lane_gguf/fmlx_gguf.c \
+   tools/quant_diff.c tools/quant_diff_ggml.c tools/quant_diff_gguflib.c \
+   "$U/gguflib.c" "$U/fp16.c" src/lane_gguf/fmlx_gguf.c \
    src/lane_gguf/fmlx_quant.c src/lane_gguf/fmlx_quant_ext.c \
    src/lane_gguf/fmlx_quant_iq.c \
    "$G/native/gmb_moe_runtime/src/gmb_moe_ggml.c" \
@@ -638,6 +643,12 @@ cc -Wall -Wextra -Werror -std=gnu17 -I include -I src/lane_gguf -I "$G/native/gm
 ./build/quant_diff ~/ai/Models/gguf/*.gguf ~/ds4/ds4flash.gguf
 ./build/quant_diff --synthetic   # blocchi pseudo-casuali + sweep griglie + ESAUSTIVO f16->f32
 ```
+
+`fp16.c` vicino a `gguflib.c` non è opzionale: `from_half`/`to_half` vivono lì e il linker lo
+chiede per nome. `tools/quant_diff_gguflib.c` è il nostro modulo (non codice di terze parti):
+contiene i `_Static_assert` che bloccano i numeri di enum di gguflib contro quelli di ggml — senza
+di quelli il gate interpellerebbe la LORO tavola dei blocchi con un indice LORO, e un'accusa
+costruita su indici non verificati è peggio del bug che vorrebbe aprire.
 
 Ogni invocazione esegue **tutto**: tensori dei file passati (se dati), blocco sintetico per ogni
 tipo coperto, `grid_sweep` (ogni indice di ogni codebook), `f16_exhaustive` (65536 pattern) e
@@ -648,24 +659,52 @@ tipo coperto, `grid_sweep` (ogni indice di ogni codebook), `f16_exhaustive` (655
 | `0` | nessun bit divergente su nessuno degli assi | nessuno |
 | `1` | **i ns.** float divergono da un testimone | questo repo |
 | `2` | almeno un file non si è aperto | **non è un verdetto sui bit**, mai letta come verde |
-| `3` | noi esatti, ma **due testimoni divergono tra loro** | il repo dove vivono i testimoni |
+| `3` | noi esatti, ma **due codici altrove divergono tra loro** | il repo dove vivono |
 
 Il `3` esiste per una ragione precisa: `tipo 1` (F16) è bit-esatto con ggml e DIVERSO da A e B per
 il solo payload degli NaN segnalati, e su quella riga il gate era **sempre rosso da tre sessioni** —
 un rosso permanente non è una prova, è un allarme che addestra a ignorarlo. La divergenza non è
 assorbita e non è zittita: è una voce aperta nel vault (`Bugs/(open) -
 GGUF-F16-Nan-Segnalandi-Non-Quietato.md`), e qui si distingue solo di chi è la colpa. Esito di oggi
-sui 7 GGUF locali: `nessun ns. bit divergente su 247 confronti, 4 disaccordi TRA TESTIMONI`.
+sui 7 GGUF locali: `nessun ns. bit divergente su 250 confronti, 23 disaccordi TRA CODICI CHE VIVONO
+ALTROVE`.
 
-Lo stesso eseguibile fa l'**audit** su due assi (`34 tipi confrontati sui bit, 42 forme confrontate
-con ggml, 0 incoerenze, 0 gap colmabili`):
+**E il gate stesso aveva un difetto, trovato misurando D**: il ciclo che percorre gli argomenti
+inizializzava `i = 2`, cioè **saltava il primo file**. Con un solo `.gguf` non veniva confrontato
+*nessun tensore reale* — si vedeva solo il blocco sintetico, e il verdetto aveva esattamente la
+faccia di un verdetto che ha provato tutto. È la ragione per cui il conteggio dei confronti è nella
+riga di esito (250, non un «tutti»): un numero che non cresce con gli argomenti è un numero che
+dice qualcosa.
+
+**Cosa ha trovato D, e perché non è nostro** (tutto misurato, `docs/mlx-quant-bridge.md` §5.2):
+(1) il dequant **Q4_K** di gguflib calcola le 8 scale e gli 8 minimi dei sotto-blocchi e poi usa
+sempre `scales[b]` anche per la seconda metà del gruppo da 64 — `scales[b+1]` non è mai letto:
+metà dei pesi di ogni super-blocco prende la scala del vicino. Sui tensori REALI la divergenza
+comincia dove il codice dice «qui serviva la scala dispari»: indice **32** su
+`token_embd.weight` di qwen2.5-omni Q4_K_M (max|diff| 0.0521) e su `blk.37.ffn_gate_exps.weight` di
+`~/ds4/ds4flash.gguf` (0.0716), indice 2080 — che è `32 mod 64` — su `token_embd.weight` di olmoe
+(0.0355); applicare le **due righe** di correzione a una COPIA rende il tipo 12 bit-exact contro A,
+B, C e D e fa calare i disaccordi da 11 a 7 nel `--synthetic`. (2) La **tavola** delle dimensioni di blocco
+ha tre voci fuori dal mondo — `q2_k` 82 (dove ggml, la tavola di DS4 e la ns. dicono 84), `iq1_s`
+110 (50), `iq4_nl` 50 (144) — e non è un dettaglio del dequant: `gguflib.c:309-310` calcola
+`bsize` di OGNI tensore da lì, quindi il data section si sposta per tutto ciò che segue. gguflib
+si contraddice da sola: il suo `gguf_q2_k_to_float` avanza di `16+64+4` = 84. Il gate le intercetta
+perché interpella la tavola **su ogni tipo**, non sui soli sei con un dequant accanto. Nessuna delle
+due è nostra: ggml dice come noi su entrambi i punti, quindi sono contate come ESTERNE (`exit 3`,
+mai un rosso nostro) e i bug sono aperti nel vault GMBasic, dove quel codice è vendorizzato.
+
+Lo stesso eseguibile fa l'**audit** su tre assi (`34 tipi confrontati sui bit, 42 forme confrontate
+con ggml, 0 incoerenze, 0 gap colmabili, 3 byte in disaccordo tra testimoni`):
 * **bit** — `is_covered` non può mai asserire una copertura che nessun secondo codice conferma;
   il caso inverso (un testimone copre e noi no) NON è un fallimento ma una **lista di gap
   colmabili**, cioè il lavoro che si può fare restando dentro la regola — ed è stata la lista dei
   tre lotti, ora vuota;
 * **forma** — elementi per blocco e byte per riga della ns. tabella contro `ggml_row_size` per
   **tutti e 42** i valori di enum. È l'asse che vale più dei bit per i tipi che nessun file
-  locale contiene: senza di quello, cinque tipi spostati di uno restavano invisibili.
+  locale contiene: senza di quello, cinque tipi spostati di uno restavano invisibili;
+* **byte di un lettore** — la stessa domanda fatta a gguflib, voce per voce, con attribuzione
+  segue-l'autorità: se ggml coincide con noi l'outlier è LUI e il numero finisce negli esterni.
+  Un'incoerenza sempre ascritta a noi, a forza di vederla, diventa un verde bugiardo al contrario.
 
 ## Regole che questo repo eredita
 

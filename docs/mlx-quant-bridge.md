@@ -26,12 +26,40 @@ avevo letto fino in fondo (la stessa trappola di
 `AiWiki/01-Projects/GMBasic/Hard-Lessons/Grep-Negativo-Dipendenza-Vendorizzata-Non-Prova-Assenza.md`:
 osservazione vera, *quindi* falso).
 
-**Il rischio vero, e non è il silenzio:** i tre k-quants che `load_gguf` **accetta**
-(`Q2_K · Q4_K · Q6_K`) passano dalla **dequantizzazione di gguflib**, che è un **secondo motore
-numerico** e di cui **non esiste una verifica di bit-esattezza contro ggml** in questo progetto. La
-nostra lane (`src/lane_gguf/fmlx_quant*.c`) è bit-esatta battuta contro le tabelle compilate nella
-dylib di ggml; gguflib no, mai confrontata. Prima di appoggiarci un carico di lavoro, va misurata —
-§5.4.
+**Il rischio vero, e non è il silenzio — era vero, ed è ora MISURATO:** i tre k-quants che
+`load_gguf` **accetta** (`Q2_K · Q4_K · Q6_K`) passano dalla **dequantizzazione di gguflib**, che è un
+**secondo motore numerico**. Da questa pagina è nata la quarta testa del gate differenziale
+(`tools/quant_diff_gguflib.c`, §5.2) e il verdetto è che **quel motore ha due difetti, entrambi non
+nostri**:
+
+* **Q4_K dequantizzato male in modo sistematico.** `gguf_q4_k_to_float`
+  (`gguflib.c:568`) calcola le 8 scale e gli 8 minimi dei sotto-blocchi, ma nel ciclo che estrae i
+  pesi usa sempre `scales[b]`/`mins[b]` per **entrambe** le metà del gruppo da 64 e non legge mai
+  `scales[b+1]`/`mins[b+1]`: **128 pesi su 256 di ogni super-blocco** prendono scala e minimo del
+  vicino. ggml fa l'opposto, e lo si vede in quattro righe (`ggml-quants.c:1483-1488`: `d1/m1` sui
+  nibble bassi, `d2/m2` su quelli alti). Sui tensori **reali** dei nostri GGUF la divergenza comincia
+  dove scatta il primo sotto-blocco dispari con scala diversa: **indice 32** su `token_embd.weight`
+  di qwen2.5-omni Q4_K_M (max|diff| **0.0521**) e su `blk.37.ffn_gate_exps.weight` di
+  `~/ds4/ds4flash.gguf` (**0.0716**), indice **2080** su `token_embd.weight` di olmoe q4_k_m
+  (**0.0355**). Ciò che i tre indici hanno in comune è `idx % 64 == 32`, cioè **l'inizio del
+  sotto-blocco dispari di un gruppo da 64**: è la firma che il meccanismo predice (dove le due scale
+  coincidono, o dove i nibble alti non la sentono, la riga non compare prima). Che per olmoe le
+  scale dispari dei primi 32 gruppi siano eguali alle pari **non è misurato qui**, è solo la
+  conseguenza possibile dell'indice; la prova del meccanismo resta quella delle due righe sulla
+  copia, che rende il tipo 12 bit-exact
+  contro A, B, C e D.
+* **Tre voci della tavola delle dimensioni di blocco sono sbagliate** (`gguflib.c:33-62`): `q2_k` 82
+  (dove ggml, la tavola di DS4 `~/ds4/gguf-tools/quants.c:48` e la ns. dicono **84**), `iq1_s` 110
+  (50), `iq4_nl` 50 (144 = 32 pesi × 18 byte). Non riguarda solo chi dequantizza:
+  `gguflib.c:309-310` calcola `bsize` di OGNI tensore da quei numeri, quindi il data section si
+  sposta per tutto ciò che segue nello stesso file. E la libreria **si contraddice da sola**: il suo
+  `gguf_q2_k_to_float` avanza di `16+64+4` = 84 (`gguflib.c:797`).
+
+Bug aperti dove il codice è vendorizzato: `AiWiki/01-Projects/GMBasic/Bugs/(open) -
+GGUF-Gguflib-Q4K-ScalaPerduta-e-TavolaBlocchi.md`. **DS4 non usa gguflib** (verificato: zero
+riferimenti a `gguflib.h` nell'albero, ha un proprio `gguf-tools/quants.c` *di sola scrittura* con la
+tavola giusta) — ma i suoi GGUF sono Q4_K/Q2_K nel nome del file, quindi qualunque percorso
+MLX+gguflib su di essi passa da quelle due funzioni.
 
 **Conseguenza per la lane ①:** i tipi che gguflib non conosce (tutti gli **IQ**, che sono il cuore di
 DS4) **non possono** entrare da `load_gguf`: lì la dequant la facciamo noi con i 31 tipi bit-esatti
@@ -86,11 +114,16 @@ bias esplicito (Q4_1, `:68`).
 1. **`load_gguf` non è il percorso per gli IQ** (e per `Q3_K`, `Q5_K`, `Q2_S…Q8_K`, `F64`): lì
    gguflib dice `EINVAL` e MLX lancia. Per i tre tipi impaccati (`Q4_0/Q4_1/Q8_0`) è invece **il**
    percorso, perché produce esattamente i `uint32` + scale/bias che `quantized_matmul` vuole.
-2. **`Q2_K · Q4_K · Q6_K` sono una scelta da misurare, non da decidere oggi**: entrano, ma dalla
-   numerica di gguflib. Il test è economico e sta nel repo già pronto: costruire blocchi casuali,
-   battere `gguf_q*_to_float` di gguflib contro `fmlx_ggml_dequant_row` (nostro, bit-esatto) e contro
-   ggml (`tools/quant_diff_ggml.c`) — **tre** opinioni, e se gguflib diverge il verdetto dice di chi
-   è la colpa.
+2. **`Q2_K · Q4_K · Q6_K` NON si prendono da gguflib, e ora c'è il perché misurato**: entrano dal
+   `load_gguf`, ma dalla numerica di gguflib, che su Q4_K sbaglia metà dei pesi di ogni super-blocco
+   (§1). Il test che lo ha trovato è **dentro il repo** ed è diventato la quarta testa del gate:
+   `tools/quant_diff_gguflib.c` batte `gguf_q*_to_float` contro `fmlx_ggml_dequant_row` (nostro,
+   bit-esatto) e contro ggml, **quattro** opinioni, con l'attribuzione che segue l'autorità (se ggml
+   coincide con noi l'outlier è l'altro e il rosso non è nostro). La tavola dei byte è interpellata
+   **su tutti i tipi**, non sui soli sei con un dequant accanto: è `bsize` di ogni tensore che ne
+   dipende. Regola operativa per la lane ①: **i passi di blocco si leggono dalla ns. tabella, mai da
+   una tavola di lettori** — e se un giorno dovessimo camminiare il data section con la loro
+   arithmetic, il gate va rilanciato (comandi in fondo).
 3. **Mai il default di `group_size`**: lo passiamo noi, e il valore viene dal **tipo ggml** (32 per
    Q4_0/Q4_1/Q8_0, non 64).
 4. **Per i tipi k-quants e IQ la conversione è dequant → `f16`**, non ri-pack: costa banda di memoria
@@ -111,5 +144,13 @@ sed -n '955,984p' ../native/gmb_host_ai_mlx/build/_deps/gguflib-src/gguflib.c   
 sed -n '13,30p;105,125p' mlx-src/mlx/io/gguf_quants.cpp
 sed -n '108,124p;4519,4545p' mlx-src/mlx/ops.cpp # l'invariante e i default per modalità
 grep -rn frame_size mlx-src/mlx | head          # → niente (0.32)
+# le due righe del §1, viste sul posto (non ricordate):
+sed -n '620,650p' ../native/gmb_host_ai_mlx/build/_deps/gguflib-src/gguflib.c   # scales[b] e basta
+sed -n '1483,1488p' /Users/gaetano/llamacpp/ggml/src/ggml-quants.c              # d1/m1 e d2/m2
+sed -n '33,62p;309,310p;795,798p' ../native/gmb_host_ai_mlx/build/_deps/gguflib-src/gguflib.c
+sed -n '40,60p' /Users/gaetano/ds4/gguf-tools/quants.c   # la TERZA tavola: q2_k 84, iq1_s 50
+grep -rn "gguflib.h" /Users/gaetano/ds4 | head -3        # → niente: DS4 non lo usa
 cd ../../../FastMLX && ctest                    # la nostra dequant bit-esatta (31 tipi)
+# e il gate a QUATTRO teste (build completa nel README §gate differenziale):
+build/quant_diff --synthetic ~/ai/Models/gguf/*.gguf ~/ds4/ds4flash.gguf | tail -6
 ```
