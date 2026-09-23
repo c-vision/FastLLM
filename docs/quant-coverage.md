@@ -86,6 +86,15 @@ Il gate li confronta tutti (`tools/quant_diff_ggml.c`). Esito del 2026-09-23, do
 bit-diversi e **4 disaccordi fra testimoni** (A e B contro ggml sul payload degli NaN in tipo 1:
 voce aperta nel vault GMBasic, `Bugs/(open) - GGUF-F16-Nan-Segnalandi-Non-Quietato.md`).
 
+**Esito del 2026-09-24, dopo il testimone D — e il numero qui sopra è quello di IERI, non di oggi.**
+Agganciata gguflib come quarta opinione (`tools/quant_diff_gguflib.c`), e corretto un difetto del
+gate stesso (`main()` partiva da `argv[2]` e **saltava il primo file**: con un solo `.gguf` non
+confrontava nessun tensore reale), i totali rimisurati sono **250 confronti** sui sette GGUF locali
+(231 sul solo `--synthetic`), **0 nostri** bit-diversi, **23 disaccordi fra codici che vivono
+altrove** (11 nel solo sintetico): i soliti 4 sull'NaN più quelli di gguflib sui bit e sulla
+dimensione di blocco. Il perché l'ultima classe non sia nostra, con l'indice del primo peso
+divergente su tre tensori reali, è in `docs/mlx-quant-bridge.md` §1 e §5.2.
+
 * i **31** tipi coperti sono bit-exact anche contro C — non solo contro A e B — sui tensori reali
   dei 7 GGUF, su blocchi pseudo-casuali a seed fisso e, per le codebook, su **OGNI indice**;
 * gli 18 tipi che nel lotto precedente erano "secondo codice pronto, nostra riga assente" sono
