@@ -53,6 +53,9 @@ const char *fmlx_serve_status_str(FmlxServeSt s) {
     case FMLX_SERVE_OK: return "ok";
     case FMLX_SERVE_BUF_SMALL: return "buffer di risposta troppo piccolo";
     case FMLX_SERVE_BAD_ARG: return "argomento non valido";
+    case FMLX_SERVE_ADDR_IN_USE: return "porta già in uso";
+    case FMLX_SERVE_NO_PERM: return "permesso negato per ascoltare su quella porta";
+    case FMLX_SERVE_BIND_FAILED: return "bind/listen rifiutato";
     }
     return "?"; /* irraggiungibile: nessuno `default`, così -Wextra obbliga a nominare ogni esito */
 }

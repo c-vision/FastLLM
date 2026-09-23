@@ -17,7 +17,7 @@ da Hugging Face). Piano completo: `AiWiki/01-Projects/FastMLX/Piani/(open) - Fas
 | `src/json/fmlx_json.c` + `fmlx_jsonw.c` — parser e writer JSON | **esiste, compilato, testato** (327 + 148 verifiche, **e** differenziale contro CPython su 122 record: 8 divergenze dure volute, 0 round-trip — `docs/json-contract.md`) |
 | `src/server/fmlx_http.c` — codec HTTP/1.1: framing richiesta, testata risposta, SSE | **esiste, compilato, testato** (127 verifiche byte-esatte) |
 | `src/server/fmlx_api*.c` — router + adapter OpenAI/Anthropic sopra il codec | **esiste, compilato, testato** (151 verifiche). Non c'è ancora un motore sotto: la generazione è attaccata al confine `FmlxApiNext`, che il test copre con un doppio scriptato |
-| `src/server/fmlx_serve_respond.c` + `fmlx_serve.c` — il server: `/v1/models`, `/health`, il 501 per ogni rotta che genera, e il loop TCP | **esiste, compilato, testato, provato su socket vero** (150 verifiche + uno smoke del binario con `curl` vero). Il motore non c'è e **non serve per provarlo** |
+| `src/server/fmlx_serve_respond.c` + `fmlx_serve.c` — il server: `/v1/models`, `/health`, il 501 per ogni rotta che genera, e il loop TCP | **esiste, compilato, testato, provato su socket vero** (161 verifiche: framing, `bind` rifiutato e arresto su segnale + uno smoke del binario con `curl` vero). Il motore non c'è e **non serve per provarlo** |
 | `src/lane_mlx/` — motore MLX estratto da GMBasic | non scritto. **D2 non blocca il "come"**: i prerequisiti per compilarlo sono già su questa macchina (verificato 2026-09-22: 28 header in `GMBasic/libs/mlx-deps/mlx-c-src/mlx/c/*.h`, più `libmlx.a` 31 MB e `libmlxc.a` 1,0 MB in `libs/mlx-deps/precompiled/darwin-arm64`). D2 decide solo **chi possiede** il motore |
 | `src/cli/fmlx_pull.c` + `fmlx_cli.c` — `fastmlx pull`, il dispatch e gli esiti | **esiste, compilato, testato, provato sul server vero** (48 + 156 verifiche; pull reale `sshleifer/tiny-gpt2`: 9/9 file, 9 blob il cui nome è il loro hash, snapshot riletto da `hf_probe`) |
 | `src/cli/fmlx_models.c` + `src/hf/fmlx_hf_catalog.c` — `fastmlx models` / `list` | **esiste, compilato, testato, provato sul cache vero di questa macchina** (103 + 156 verifiche; 23 repo letti in 0,01 s, 3.675.292.998 byte che coincidono con un conteggio di inode fatto a parte con `find`+`stat`) |
@@ -403,11 +403,33 @@ fuori da `ctest`, il binario: `fastmlx serve --cache <fixture> --port 8733` + `c
 `#2` e `#3` nel log. `--once` esiste per questo: serve UNA richiesta e esce, così uno smoke non
 lascia un processo appeso.
 
-**Cosa NON è misurato qui**: il cammino dei segnali (`SIGINT`/`SIGTERM` → `g_stop` → il loop esce e
-`restore_handlers` rimette i precedenti) non è eseguito da nessun test — si può provare solo
-uccidendo un processo vero, e un test che ammazza processi è un test che si rompe da solo. Non è
-misurato il `bind` su una porta già occupata (sarebbe un fixture dipendente dallo stato della
-macchina). **`Expect: 100-continue` invece SÌ**, ed è il caso che ha nominato da sé la sua ragione
+**Il `bind` rifiutato e il segnale che ferma il loop: erano gli ultimi due cammini dichiarati non
+misurati, e ora girano in `ctest`.**
+- *Porta occupata* e *porta vietata* sono due esiti **distinti** (`FMLX_SERVE_ADDR_IN_USE`,
+  `FMLX_SERVE_NO_PERM`) e non più `BAD_ARG`: «argomento non valido» mandava l'operatore a rileggere i
+  flag quando il flag era giusto e la porta era già di un altro processo. L'`errno` si copia **prima**
+  della `close`, perché una `close` che fallisce lo sovrascrive e il messaggio accusa il bind
+  dell'errore di un'altra chiamata. Che la porta 1 da non-root dia `EACCES` è **misurato** su questa
+  macchina, non indovinato; se chi esegue è root il caso lo **dice** («nota: … non è provabile qui»)
+  invece di sparire dal conteggio in silenzio.
+- *I segnali* si provano nel figlio con `stop == NULL`, che è l'unico cammino in cui
+  `install_handlers` gira davvero: una richiesta servita (`/health` → 200), poi `SIGTERM` e poi
+  `SIGINT`, e si asserisce che il processo **esce 0** — cioè che il loop ha finito di pulirsi — e che
+  **non** è morto di segnale. Il figlio tiene la porta e scrive la log su una pipe: la riga
+  «in ascolto» è ciò che il padre aspetta, con un tempo contato.
+
+**Tre controlli negativi, uno per asserzione nuova** (mutazioni costruite su una copia del file fuori
+dal tree, mai nel sorgente): declassare i dinieghi a `BAD_ARG` → 4 fallimenti, e nel messaggio il
+diniego vero c'è già (`Address already in use`, `Permission denied`); mettere `SIG_DFL` al posto
+dell'handler → «il processo è stato UCISO dal segnale 15»; aggiungere `SA_RESTART` → ed è il controllo
+che vale di più, perché un `accept` che riparte sembra innocuo («il flag lo vedo al giro dopo») e
+invece il giro dopo non arriva mai: `Ctrl-C` non ferma il server. Terzo controllo = terza ragione per
+cui l'attesa è limitata e nomina cosa ha atteso.
+
+**Cosa NON è misurato qui**: il ripristino degli handler *precedenti* (`saved_int`/`saved_term`) non
+ha modo di essere osservato — sta nel processo che sta per uscire; e il `SIGPIPE` ignorato dipenderebbe
+da un client che chiude nel preciso istante in cui il server scrive, cioè da una corsa, non da un
+fixture. **`Expect: 100-continue` invece SÌ**, ed è il caso che ha nominato da sé la sua ragione
 d'essere: la prima versione mandava un corpo con `messages: []`, e il layer ② rispondeva 400 **prima**
 di arrivare al motore — il test passava sul via libera e falliva sull'esito, che è il modo giusto
 per fallire. Ora il caso prova tre cose in ordine: i 25 byte del via libera arrivano **prima** che il

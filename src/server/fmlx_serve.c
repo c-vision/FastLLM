@@ -313,6 +313,7 @@ FmlxServeSt fmlx_serve(const FmlxServeOpts *o, FmlxServeBuf *sbuf, FILE *log,
     Conn cn;
     volatile sig_atomic_t *want_stop;
     unsigned req_no = 0;
+    int bind_errno = 0; /* l'ultimo diniego di socket/bind/listen, copiato PRIMA della close */
 
     if (lport < 1 || lport > 65535) return FMLX_SERVE_BAD_ARG;
     if (served) *served = 0;
@@ -350,20 +351,39 @@ FmlxServeSt fmlx_serve(const FmlxServeOpts *o, FmlxServeBuf *sbuf, FILE *log,
         return FMLX_SERVE_BAD_ARG;
     }
     for (p = ai; p; p = p->ai_next) {
+        int e;
         ls = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
-        if (ls < 0) continue;
+        if (ls < 0) {
+            if (bind_errno != EADDRINUSE) bind_errno = errno;
+            continue;
+        }
         setsockopt(ls, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
         if (bind(ls, p->ai_addr, p->ai_addrlen) == 0 && listen(ls, FMLX_SERVE_LISTEN_BACKLOG) == 0)
             break;
+        /* `errno` SI COPIA QUI, prima della `close`: una `close` che fallisce lo sovrascrive, e il
+         * messaggio che ne viene fuori accusa il bind per l'errore di un'altra chiamata. */
+        e = errno;
+        if (bind_errno != EADDRINUSE) bind_errno = e;
         close(ls);
         ls = -1;
     }
     freeaddrinfo(ai);
     if (ls < 0) {
-        logf(log, "non riesco ad ascoltare su %s:%d: %s", host, lport, strerror(errno));
+        FmlxServeSt why = FMLX_SERVE_BIND_FAILED;
+        /* Tre dinieghi, tre da-fare diversi. «Argomento non valido» mandava l'operatore a
+         * rileggere i flag quando i flag erano giusti e la porta era di un altro processo. */
+        if (bind_errno == EADDRINUSE) why = FMLX_SERVE_ADDR_IN_USE;
+        else if (bind_errno == EACCES) why = FMLX_SERVE_NO_PERM;
+        logf(log, "non riesco ad ascoltare su %s:%d: %s%s", host, lport,
+             bind_errno ? strerror(bind_errno) : "nessun indirizzo tentato",
+             why == FMLX_SERVE_ADDR_IN_USE
+                 ? " — la porta è già presa: `--port` diversa, o ferma chi ci ascolta"
+                 : why == FMLX_SERVE_NO_PERM
+                       ? " — le porte sotto 1024 vogliono i privilegi (root)"
+                         : "");
         free(cn.buf);
         if (use_owned) fmlx_serve_buf_free(sbuf);
-        return FMLX_SERVE_BAD_ARG;
+        return why;
     }
 
     want_stop = stop ? stop : &g_stop;

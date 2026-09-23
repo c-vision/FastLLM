@@ -18,13 +18,20 @@
  * pipelining, `Connection: close`, il via libera di `Expect: 100-continue`) non si prova in memoria,
  * e un giro su 127.0.0.1 con `max_conns` è il modo di dire che ciò che arriva è lungo ESATTAMENTE
  * quanto la testata promette.
+ *
+ * L'ultimo gruppo è ciò che decide il SO e non la nostra logica: un `bind` rifiutato (porta occupata,
+ * porta sotto i 1024) e il segnale che ferma il loop. Sono gli unici cammini in cui un esito sbagliato
+ * non si vede nelle risposte — si vede in un server che non parte accusando l'operatore, o in uno che
+ * muore di `SIGTERM` senza pulirsi.
  */
 #include "fmlx/fmlx_serve.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <ftw.h>
 #include <netinet/in.h>
+#include <signal.h> /* `kill`, `SIGKILL`, `sig_atomic_t`: il figlio li usa quanto il padre */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -778,6 +785,239 @@ static void case_continue_100(void) {
 
 /* ============================================================================ */
 
+/* ---- ciò che decide il SO: il bind rifiutato, e il segnale che ferma il loop ----
+ *
+ * Questi due percorsi non si possono provare in memoria: finché il `serve` del test aveva sempre
+ * dato una propria `stop`, `install_handlers` non era mai girato, e finché la porta era sempre
+ * libera il ramo dei dinieghi non era mai stato preso. Sono anche gli unici due punti in cui il
+ * server può UCCIDERSI (il segnale non catturato) o ACCUSARE IL CORRETTO (un `BAD_ARG` per una
+ * porta scivolata sotto un altro processo). */
+
+/* Il figlio che logga su una pipe: «in ascolto» è l'UNICO segnale onesto che il bind è riuscito e
+ * il loop è entrato. La pipe e non un file: si legge non-blocking e si vede la FINE (EOF) quando il
+ * figlio muore — un file vuoto non distingue «non ha ancora parlato» da «è morto in silenzio». */
+static pid_t serve_child_logged(int port, unsigned max_conns, int *logfd) {
+    int fds[2];
+    pid_t pid;
+
+    *logfd = -1;
+    if (pipe(fds) != 0) {
+        CK(0, "pipe: %s", strerror(errno));
+        return -1;
+    }
+    fflush(stdout);
+    pid = fork();
+    if (pid < 0) {
+        CK(0, "fork: %s", strerror(errno));
+        close(fds[0]);
+        close(fds[1]);
+        return -1;
+    }
+    if (pid == 0) {
+        FmlxServeOpts o = opts_default();
+        FILE *lf;
+
+        close(fds[0]);
+        lf = fdopen(fds[1], "w");
+        o.host = "127.0.0.1";
+        o.port = port;
+        o.max_conns = max_conns;
+        /* `stop == NULL`: è il cammino del binario `fastmlx serve`, e l'unico in cui gli handler
+         * si installano DAVVERO. Se `fdopen` fallisce la log viene NULL e il padre non legge nulla:
+         * il caso fallisce dicendo il vero, invece che passare per un niente. */
+        _exit(fmlx_serve(&o, NULL, lf, NULL, NULL) == FMLX_SERVE_OK ? 0 : 1);
+    }
+    close(fds[1]);
+    *logfd = fds[0];
+    {
+        int fl = fcntl(fds[0], F_GETFL, 0);
+        if (fl >= 0) fcntl(fds[0], F_SETFL, fl | O_NONBLOCK);
+    }
+    return pid;
+}
+
+/* Legge la pipe finché trova `needle`, o fino alla fine del tempo dato (10 s: la prima iterazione
+ * del loop di un server locale si conta in millisecondi). Il tempo è CONTATO di proposito: un
+ * `read` blocking su un server che non parte non è un test che fallisce, è una suite appesa. */
+static int wait_log_line(int fd, const char *needle, char *buf, size_t cap) {
+    size_t have = 0;
+    int tries;
+
+    buf[0] = '\0';
+    for (tries = 0; tries < 400; tries++) {
+        struct timespec ts = {0, 25 * 1000 * 1000};
+        ssize_t n;
+        if (have + 1 < cap) {
+            n = read(fd, buf + have, cap - 1 - have);
+            if (n > 0) {
+                have += (size_t)n;
+                buf[have] = '\0';
+            } else if (n == 0) {
+                return 0; /* il figlio è morto: EOF, non «ancora niente» */
+            }
+        }
+        if (strstr(buf, needle)) return 1;
+        nanosleep(&ts, NULL);
+    }
+    return 0;
+}
+
+/* Una chiamata in-processo a `fmlx_serve` che NON può appendersi: gli si passa `stop` GIÀ alzato,
+ * così se il bind riuscisse il loop esce al primo giro. Il codice che si asserisce nasce tutto
+ * dalla bind/listen, che sta PRIMA del loop: questa scelta non copre nulla di ciò che stiamo
+ * provando, toglie solo il rischio di un test che non finisce mai. */
+static FmlxServeSt serve_once_now(FmlxServeOpts *o, char **log_out, size_t *log_len) {
+    volatile sig_atomic_t stop = 1;
+    FmlxServeSt st;
+    FILE *lf;
+
+    *log_out = NULL;
+    *log_len = 0;
+    lf = open_memstream(log_out, log_len);
+    st = fmlx_serve(o, NULL, lf, &stop, NULL);
+    fclose(lf); /* è QUI che `*log_out` prende il contenuto: prima è indefinito */
+    return st;
+}
+
+/* La stessa porta di un ascoltatore vivo: è il caso più frequente di server che non parte (un
+ * `fastmlx serve` già aperto in un altro terminale) e fino a ieri usciva come `BAD_ARG`, che
+ * manda l'operatore a rileggere i flag quando i flag erano giusti. */
+static void case_addr_in_use(void) {
+    int port = 8700 + (int)(getpid() % 300), logfd = -1, w = 0;
+    size_t lgn = 0;
+    char line[1024], *lg;
+    FmlxServeOpts o = opts_default();
+    FmlxServeSt st;
+    pid_t pid;
+
+    pid = serve_child_logged(port, 0, &logfd);
+    if (pid < 0) return;
+    if (!wait_log_line(logfd, "in ascolto", line, sizeof line)) {
+        CK(0, "il figlio non dichiara di ascoltare su %d (log: '%s')", port, line);
+        close(logfd);
+        kill(pid, SIGKILL);
+        waitpid(pid, &w, 0);
+        return;
+    }
+    close(logfd);
+
+    o.host = "127.0.0.1";
+    o.port = port;
+    st = serve_once_now(&o, &lg, &lgn);
+    CK(st == FMLX_SERVE_ADDR_IN_USE, "porta occupata: atteso ADDR_IN_USE, arrivato '%s'",
+       fmlx_serve_status_str(st));
+    /* Qui la FRASE è il prodotto, non un ornamento: la distinzione fra i tre codici esiste perché
+     * l'operatore legga un da-farsi diverso («cambia porta» non è «dammi i privilegi»). È l'unico
+     * punto del file dove si asserisce su una stringa umana, ed è per questo che si nomina il pezzo
+     * che cambia comportamento e non la punteggiatura. */
+    CK(HAS(lg, "già presa"), "il log non dice il da-farsi: %s", lg);
+    CK(HAS(lg, "Address") || HAS(lg, "EADDRINUSE"),
+       "il log non cita il diniego del SO: %s", lg);
+    free(lg);
+    kill(pid, SIGKILL);
+    waitpid(pid, &w, 0);
+}
+
+/* Porta 1: sotto i 1024 non si ascolta senza privilegi. Il numero è MISURATO su questa macchina
+ * (`bind(:80)` → `errno 13 Permission denied`), non indovinato. Se chi esegue è root il caso NON È
+ * PROVABILE, e lo si DICE: un'asserzione saltata in silenzio è peggio di una riga in più. */
+static void case_no_perm(void) {
+    size_t lgn = 0;
+    char *lg;
+    FmlxServeOpts o = opts_default();
+    FmlxServeSt st;
+
+    if (geteuid() == 0) {
+        printf("  nota: stiamo girando come root: il diniego EACCES non è provabile qui\n");
+        return;
+    }
+    o.host = "127.0.0.1";
+    o.port = 1;
+    st = serve_once_now(&o, &lg, &lgn);
+    if (st == FMLX_SERVE_ADDR_IN_USE) {
+        printf("  nota: sulla porta 1 c'è già qualcuno: EACCES non è distinguibile (log: %s)\n",
+               lg ? lg : "");
+        free(lg);
+        return;
+    }
+    CK(st == FMLX_SERVE_NO_PERM, "porta 1 da non-root: atteso NO_PERM, arrivato '%s'",
+       fmlx_serve_status_str(st));
+    CK(HAS(lg, "1024"), "il log non dice il limite delle porte privilegiate: %s", lg);
+    free(lg);
+}
+
+/* Il segnale che ferma il loop. Due asserzioni DISTINTE, e l'ordine conta: se il processo è morto
+ * DI segnale, `WEXITSTATUS` non vuol dire niente e il solo controllarlo darebbe un verde bugiardo
+ * (un handler assente lascia morire il figlio con il default, e il default non è «esce 0»). */
+static void case_signal_exit(int sig, const char *name, int port) {
+    static const char req[] =
+        "GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+    char line[1024], got[2048];
+    int logfd = -1, w = 0, fd, tries = 0, reaped = 0;
+    pid_t pid;
+
+    pid = serve_child_logged(port, 0, &logfd);
+    if (pid < 0) return;
+    if (!wait_log_line(logfd, "in ascolto", line, sizeof line)) {
+        CK(0, "%s: il figlio non ascolta su %d (log: '%s')", name, port, line);
+        close(logfd);
+        kill(pid, SIGKILL);
+        waitpid(pid, &w, 0);
+        return;
+    }
+    close(logfd);
+
+    /* Una richiesta VERA e servita prima di sparare il segnale: «ho chiuso perché me l'hai
+     * chiesto» ha un senso solo se il server era vivo e rispondeva. Questo consuma una richiesta,
+     * e per questo qui `max_conns` è 0 — con un contingente il figlio sarebbe uscito da sé e
+     * l'exit code 0 non sarebbe più una prova del segnale. */
+    fd = connect_child(port);
+    if (fd < 0) {
+        CK(0, "%s: il server non accetta su 127.0.0.1:%d", name, port);
+        kill(pid, SIGKILL);
+        waitpid(pid, &w, 0);
+        return;
+    }
+    if (write(fd, req, sizeof req - 1) != (ssize_t)(sizeof req - 1)) CK(0, "%s: invio", name);
+    read_all(fd, got, sizeof got);
+    close(fd);
+    CK(strncmp(got, "HTTP/1.1 200", 12) == 0, "%s: prima del segnale non rispondeva: %s", name,
+       got);
+
+    if (kill(pid, sig) != 0) CK(0, "%s: kill: %s", name, strerror(errno));
+    while (tries++ < 400) {
+        struct timespec ts = {0, 25 * 1000 * 1000};
+        int r = waitpid(pid, &w, WNOHANG);
+        if (r == pid) {
+            reaped = 1;
+            break;
+        }
+        if (r < 0 && errno != EINTR) {
+            CK(0, "%s: waitpid: %s", name, strerror(errno));
+            return;
+        }
+        nanosleep(&ts, NULL);
+    }
+    if (!reaped) {
+        CK(0, "%s: il loop non si è fermato entro 10 s: `accept` non torna EINTR?", name);
+        kill(pid, SIGKILL);
+        waitpid(pid, &w, 0);
+        return;
+    }
+    CK(!WIFSIGNALED(w), "%s: il processo è stato UCISO dal segnale %d: l'handler non gira", name,
+       WIFSIGNALED(w) ? WTERMSIG(w) : 0);
+    CK(WIFEXITED(w) && WEXITSTATUS(w) == 0,
+       "%s: atteso lo stato 0 (il loop ha finito di pulirsi), arrivato %d", name, WEXITSTATUS(w));
+}
+
+static void case_stop_signal(void) {
+    int base = (int)(getpid() % 200);
+    case_signal_exit(SIGTERM, "SIGTERM", 8900 + base);
+    case_signal_exit(SIGINT, "SIGINT", 9200 + base);
+}
+
+/* ============================================================================ */
+
 int main(int argc, char **argv) {
     if (argc < 2) {
         printf("uso: %s <directory-di-lavoro>\n", argv[0]);
@@ -799,6 +1039,9 @@ int main(int argc, char **argv) {
     case_env();
     case_round_trip();
     case_continue_100();
+    case_addr_in_use();
+    case_no_perm();
+    case_stop_signal();
 
     wipe(ROOT);
     printf("test_serve: %d verifiche, %d fallite\n", checks, failures);

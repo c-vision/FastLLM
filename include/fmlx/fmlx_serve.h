@@ -91,7 +91,16 @@ void fmlx_serve_buf_free(FmlxServeBuf *b);
 typedef enum {
     FMLX_SERVE_OK = 0,
     FMLX_SERVE_BUF_SMALL = 1, /* il buffer della risposta non bastava: NON è una risposta a metà */
-    FMLX_SERVE_BAD_ARG = 2    /* uso scorretto dell'API (NULL, port fuori range) */
+    FMLX_SERVE_BAD_ARG = 2, /* uso scorretto dell'API (NULL, porta fuori range, host che non si
+                             * risolve): la correzione sta in chi chiama */
+    /* I tre che seguono è il SO che rifiuta un `bind`, non l'uso scorretto. Prima stavano tutti
+     * in BAD_ARG, che è una diagnosi SPOSTATA: dice a chi ha lanciato `fastmlx serve` di aver
+     * passato un argomento sbagliato quando l'argomento era giusto e la porta era occupata.
+     * Un codice per causa, perché il da-fare è diverso: cambiare porta, o alzare i privilegi, o
+     * accorgersi che l'interfaccia nominata da `--host` su questa macchina non c'è. */
+    FMLX_SERVE_ADDR_IN_USE = 3, /* EADDRINUSE: qualcun altro ascolta già su quella porta */
+    FMLX_SERVE_NO_PERM = 4,     /* EACCES: porta < 1024 senza privilegi (o sandbox) */
+    FMLX_SERVE_BIND_FAILED = 5  /* ogni altro diniego di bind/listen: `errno` è nel log */
 } FmlxServeSt;
 
 const char *fmlx_serve_status_str(FmlxServeSt s);
@@ -162,9 +171,11 @@ FmlxServeSt fmlx_serve_agree_head(int http10, FmlxServeBuf *buf, size_t *out_len
  * `stop` non-NULL: il loop la guarda fra una connessione e l'altra (e durante un `accept`
  * interrotto) e ritorna FMLX_SERVE_OK. NULL: il loop installa e rimuove i propri handler di
  * SIGINT/SIGTERM, così chi chiama da `main` non deve sapere niente dei segnali.
- * Ritorna BAD_ARG sugli argomenti che non possono funzionare (indirizzo che non si risolve, porta
- * fuori range, bind impossibile: `errno` e il log dicono perché), e BUF_SMALL se è la memoria a
- * essere negata. Due codici diversi perché sono due diagnostiche opposte per chi legge.
+ * Ritorna BAD_ARG sugli argomenti che non possono funzionare PRIMA di toccare il network stack
+ * (porta fuori range, host che `getaddrinfo` non risolve), e BUF_SMALL se è la memoria a essere
+ * negata. Un `bind` rifiutato NON è BAD_ARG: esce ADDR_IN_USE / NO_PERM / BIND_FAILED secondo
+ * `errno`, perché quelle tre righe si correggono in tre modi diversi e un unico "argomento non
+ * valido" mandava l'operatore a rileggere i flag invece di guardarsi la porta.
  *
  * Un solo thread, una connessione alla volta: è UNA scelta, non un limite ereditato — il
  * decode serializzato del piano §15 rende inutile un accept concorrente finché non c'è il
