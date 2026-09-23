@@ -46,32 +46,9 @@ void fmlx_hf_normalize_etag(const char *raw, char *out, size_t out_len) {
     out[len] = '\0';
 }
 
-/* Perché è pubblica: vedi il commento della dichiarazione in `fmlx/fmlx_hf.h`. */
-int fmlx_hf_mkdir_p(const char *path) {
-    char buf[FMLX_HF_PATH_MAX];
-    snprintf(buf, sizeof buf, "%s", path);
-    for (char *c = buf + 1; *c; c++) {
-        if (*c != '/') continue;
-        *c = '\0';
-        if (mkdir(buf, 0777) != 0 && errno != EEXIST) return -1;
-        *c = '/';
-    }
-    return mkdir(buf, 0777) == 0 || errno == EEXIST ? 0 : -1;
-}
-
-/* SOLO il genitore. Il nome dice esattamente ciò che fa: `fmlx_hf_mkdir_p(dirname(path))`. Chi deve
- * scrivere IN una directory (blobs/, il repo stesso) deve chiamare fmlx_hf_mkdir_p su QUELLA
- * directory: confondere i due è il bug che ha reso impossibile il primo download. */
-int fmlx_hf_ensure_parent(const char *path) {
-    char dir[FMLX_HF_PATH_MAX];
-    const char *slash = strrchr(path, '/');
-    if (!slash) return 0;
-    size_t n = (size_t)(slash - path);
-    if (n == 0 || n >= sizeof dir) return -1;
-    memcpy(dir, path, n);
-    dir[n] = '\0';
-    return fmlx_hf_mkdir_p(dir);
-}
+/* `fmlx_hf_mkdir_p` e `fmlx_hf_ensure_parent` vivevano qui: sono regole di path senza rete, e ora
+ * stanno in `fmlx_hf_cache.c` insieme a `fmlx_hf_pjoin` — così un test che non tocca la rete può
+ * costruirsi un cache finto senza linkarsi libcurl. Questa lane le chiama comunque, da header. */
 
 static void sleep_ms(int ms) {
     struct timeval tv;

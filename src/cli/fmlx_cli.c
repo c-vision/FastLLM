@@ -7,9 +7,9 @@
  *     `--max-bytes` che non limita, e chi guarda il risultato non ha modo di saperlo. (È lo stesso
  *     principio con cui il §11.2 del piano tratta i campi ignoti di una richiesta API.)
  *  2. I verbi che chiedono il motore rispondono `FMLX_CLI_NOT_WIRED` con il PERCHÉ, e il perché è
- *     diverso verbo da verbo: `run`/`chat`/`serve` aspettano la libreria del motore, `models`/`ps`
- *     aspettano il registro delle sessioni, `rm`/`cp` aspettano chi scrive nel cache. Dire tutti
- *     "non implementato" farebbe perdere all'utente l'informazione che gli serve.
+ *     diverso verbo da verbo: `run`/`chat`/`serve` aspettano la libreria del motore, `ps` aspetta il
+ *     registro delle sessioni, `rm`/`cp` aspettano chi scrive nel cache. Dire tutti "non
+ *     implementato" farebbe perdere all'utente l'informazione che gli serve.
  *
  * Il `main` sta in fastmlx_main.c: qui non c'è nessun simbolo che impedisca a un test di chiamare
  * `fmlx_cli_run` con un transport finto e due FILE* catturati in memoria.
@@ -40,6 +40,7 @@ void fmlx_cli_usage(FILE *out) {
             "uso: fastmlx <comando> [argomenti] [opzioni]\n"
             "\n"
             "  pull <repo>            scarica (o ritrova) TUTTO il repo nel cache HF\n"
+            "  models, list           cosa c'e' gia' nel cache, senza rete\n"
             "\n"
             "per pull:\n"
             "  --revision <ref>       ramo o commit (default: main)\n"
@@ -54,8 +55,12 @@ void fmlx_cli_usage(FILE *out) {
             "  --quiet              niente righe di progresso\n"
             "  -h, --help             questo testo\n"
             "\n"
+            "per models:\n"
+            "  --cache <dir>          radice del cache (default: quella di Hugging Face)\n"
+            "  --quiet                solo gli id, uno per riga\n"
+            "\n"
             "in attesa del motore (rispondono un errore esplicito, mai un risultato finto):\n"
-            "  run, chat, serve, models, list, ps, cp, rm, doctor\n"
+            "  run, chat, serve, ps, cp, rm, doctor\n"
             "\n"
             "il token si passa SOLO con la variabile d'ambiente HF_TOKEN.\n");
 }
@@ -65,8 +70,6 @@ void fmlx_cli_usage(FILE *out) {
 static const char *missing_piece(const char *verb) {
     if (!strcmp(verb, "run") || !strcmp(verb, "chat") || !strcmp(verb, "serve"))
         return "la libreria del motore (mlxengine) non è ancora collegata: i token non si generano";
-    if (!strcmp(verb, "models") || !strcmp(verb, "list"))
-        return "manca chi legge il cache e stampa i modelli con il loro ramo (lanes/hf sa già farlo)";
     if (!strcmp(verb, "ps")) return "manca il registro delle sessioni, che non esiste fuori dal motore";
     if (!strcmp(verb, "cp") || !strcmp(verb, "rm"))
         return "manca chi scrive/cancella nel cache al di fuori del percorso di download";
@@ -198,6 +201,17 @@ FmlxCliStatus fmlx_cli_parse(int argc, char **argv, FmlxCliArgs *out, char *msg,
     if (!verb_seen) return fail(out, msg, msg_len, "nessun comando");
     if (!strcmp(out->verb, "pull") && !out->repo[0])
         return fail(out, msg, msg_len, "pull: manca il repo (es. org/modello)");
+    /* `models` non ha un argomento: accettare `fastmlx models org/repo` e stampare TUTTI i repo
+     * sarebbe una bandiera che mente, solo scritta senza trattini. Il filtro per repo è un lavoro
+     * del piano, non una cosa da fingere. */
+    if (repo_seen && (!strcmp(out->verb, "models") || !strcmp(out->verb, "list"))) {
+        char v[16];
+        /* Copia PRIMA di `fail`, che azzera `out`: la prima versione del messaggio stampava
+         * `fastmlx: : non prende argomenti` — vuoto, e il test lo lasciava passare perché
+         * guardava solo il frammento finale. */
+        snprintf(v, sizeof v, "%s", out->verb);
+        return fail(out, msg, msg_len, "%s: non prende argomenti (l'elenco è tutto il cache)", v);
+    }
     return FMLX_CLI_OK;
 }
 
@@ -215,6 +229,11 @@ FmlxCliStatus fmlx_cli_exec_with(const FmlxCliArgs *a, const FmlxHfTransport *t,
         fmlx_cli_usage(err ? err : stderr);
         return FMLX_CLI_USAGE;
     }
+    if (!strcmp(a->verb, "models") || !strcmp(a->verb, "list"))
+        /* Non passa dal transport: `t` qui non è nemmeno guardato, perché l'elenco viene dal disco.
+         * È il motivo per cui il verboso `case_motori_non_collegati` di test_cli.c NON lo copre:
+         * un verbo che non tocca la rete non si prova con un transport finto. */
+        return fmlx_models_exec(a, out, err);
     if (strcmp(a->verb, "pull")) {
         fprintf(err ? err : stderr,
                 "fastmlx %s: %s\n", a->verb, missing_piece(a->verb));

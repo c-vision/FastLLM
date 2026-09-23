@@ -30,13 +30,23 @@ add_executable(fmlx_gguf_inspect tools/gguf_inspect.c)
 target_link_libraries(fmlx_gguf_inspect PRIVATE fmlx_gguf)
 
 # --- lane_hf: cache Hugging Face letto senza rete (il download non ha ancora codice) ---------
-add_library(fmlx_hf STATIC src/hf/fmlx_hf_cache.c src/hf/fmlx_hf_hash.c)
+# `fmlx_hf_catalog.c` sta QUI e non nella lane download perché non tocca la rete e non scrive:
+# guarda cosa c'è sul disco. Le sue regole di conteggio vengono dal cache REALE di questa
+# macchina (34 directory, due radici), non dall'idea di come dovrebbe essere.
+add_library(fmlx_hf STATIC src/hf/fmlx_hf_cache.c src/hf/fmlx_hf_hash.c src/hf/fmlx_hf_catalog.c)
 target_include_directories(fmlx_hf PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
                                   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/hf)
 
 add_executable(test_hf_cache tests/hf/test_hf_cache.c)
 target_link_libraries(test_hf_cache PRIVATE fmlx_hf)
 add_test(NAME hf_cache COMMAND test_hf_cache ${CMAKE_CURRENT_BINARY_DIR}/work)
+
+# Il catalogo locale: fixture costruite su disco (nessun transport da falsificare) e, in fondo, il
+# cache REALE della macchina. Il file si passa il work directory: scrive e legge con lo stesso
+# helper, così "radice sbagliata" non può passare per disallineamento di path.
+add_executable(test_hf_catalog tests/hf/test_hf_catalog.c)
+target_link_libraries(test_hf_catalog PRIVATE fmlx_hf)
+add_test(NAME hf_catalog COMMAND test_hf_catalog ${CMAKE_CURRENT_BINARY_DIR}/work-catalog)
 
 # Guarda il cache HF reale (sola lettura, nessuna rete): il controllo sul mondo vero.
 add_executable(hf_probe tools/hf_probe.c)
@@ -138,10 +148,11 @@ target_link_libraries(test_api PRIVATE fmlx_api)
 add_test(NAME api COMMAND test_api)
 
 # --- lane_cli: il binario `fastmlx` (piano §10.3, §13) --------------------------------------
-# Due file, non uno: `pull` è una lane con un report e delle regole sui path, l'argv è un'altra
-# cosa che cambia con motivi diversi (una bandiera nuova contro un ordine di download). Il `main`
-# sta da solo perché è l'unica parte NON provabile in-process.
-add_library(fmlx_cli STATIC src/cli/fmlx_pull.c src/cli/fmlx_cli.c)
+# Un file per verbo, non uno: `pull` è una lane con un report e delle regole sui path, `models` è
+# una tabella letta da disco, l'argv è una terza cosa che cambia con motivi diversi (una bandiera
+# nuova contro un ordine di download). Il `main` sta da solo perché è l'unica parte NON provabile
+# in-process.
+add_library(fmlx_cli STATIC src/cli/fmlx_pull.c src/cli/fmlx_models.c src/cli/fmlx_cli.c)
 target_include_directories(fmlx_cli PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(fmlx_cli PUBLIC fmlx_hf_fetch)
 
@@ -153,7 +164,9 @@ add_executable(test_pull tests/cli/test_pull.c)
 target_link_libraries(test_pull PRIVATE fmlx_cli)
 add_test(NAME pull COMMAND test_pull ${CMAKE_CURRENT_BINARY_DIR}/work-cli-pull)
 
-# L'argv e il dispatch: canali, bandiere rifiutate, verbi non ancora cablati.
+# L'argv, il dispatch e la tabella di `models`: canali, bandiere rifiutate, verbi non ancora cablati.
+# Il work directory serve solo a `models`, che legge un cache VERO costruito dal test (non c'è una
+# rete da falsificare, qui: o si scrive su disco, o non si prova).
 add_executable(test_cli tests/cli/test_cli.c)
 target_link_libraries(test_cli PRIVATE fmlx_cli)
-add_test(NAME cli COMMAND test_cli)
+add_test(NAME cli COMMAND test_cli ${CMAKE_CURRENT_BINARY_DIR}/work-cli)

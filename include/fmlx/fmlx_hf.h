@@ -86,7 +86,14 @@ typedef enum {
      * ERR_SIZE, che parla di byte ricevuti contro byte dichiarati — qui la promessa del server è
      * mantenuta, è il NOSTRO tetto sulla quantità che dice "no". Codice distinto perché il chiamante
      * fa una cosa diversa: un `pull` con un filtro, non una ritentativa. */
-    FMLX_HF_ERR_TOO_MANY = 26
+    FMLX_HF_ERR_TOO_MANY = 26,
+    /* 27: la RADICE del cache non esiste (o non è una directory). Non è ERR_NO_HOME, che è "non so
+     * nemmeno dove cercarla", e non è ERR_NO_REPO, che è "l'ho cercata e quel repo non c'è": qui il
+     * path è derivato e corretto, è il disco che non lo ha. La distinzione serve al `doctor`, perché
+     * "HF_HOME punta nel posto sbagliato" e "non hai ancora scaricato niente" sono due consigli
+     * diversi — e un `models` che stampasse l'elenco vuoto per la seconda ragione quando vale la
+     * prima sarebbe il risultato silenzioso che il piano vieta. */
+    FMLX_HF_ERR_NO_CACHE = 27
 } FmlxHfStatus;
 
 const char *fmlx_hf_status_str(FmlxHfStatus s);
@@ -187,6 +194,54 @@ FmlxHfStatus fmlx_hf_locate(const char *cache_root, const char *repo_id, const c
 /* Verifica i byte contro ciò che il nome promette. FMLX_HF_ERR_NOT_VERIFIABLE se il nome
  * non promette nulla (entry file-regolare o nome non-hex): NON è un successo. */
 FmlxHfStatus fmlx_hf_verify(const FmlxHfRef *ref, int64_t *bytes_hashed);
+
+/* ---- catalogo locale: cosa c'è già sul disco (piano §10.2, i verbi `models`/`list`) ---- */
+
+/* I tre limiti sono NUMERI, non ipotesi: `NAME_MAX` su APFS è 255 (un componente di path non può
+ * superarli), e una *revisione* è al più 40 hex — 64 sta largo a un `refs/pr/12` lungo. Il terzo
+ * (8 ref) è una scelta, e per questo `n_refs` resta il numero VERO: se ce n'erano 11, la lista ne
+ * mostra 8 e `n_refs` dice 11. Truncare in silenzio sarebbe il risultato silenzioso che il piano
+ * vieta; qui la truncation è un campo, non un'omissione. */
+#define FMLX_HF_CATALOG_NAME_MAX 256
+#define FMLX_HF_CATALOG_REF_MAX 64
+#define FMLX_HF_CATALOG_REFS_MAX 8
+#define FMLX_HF_CATALOG_REPOS_MAX 256
+
+typedef struct {
+    /* Ricostruito dal nome della directory con la regola di huggingface_hub
+     * (`_cache_manager.py:742-744`, copia 1.31.0): il prefisso fino al primo "--" è il TIPO, il
+     * resto è l'id con ogni "--" trasformato in "/". La regola è PERDENTE per costruzione — un
+     * repo il cui nome contiene "--" arriva a un id con un "/" in più — e `ambiguous_name` è
+     * lì per dirlo, non per nasconderlo: è ciò che rende il dubbio visibile invece che silenzioso. */
+    char repo_id[FMLX_HF_CATALOG_NAME_MAX];
+    char dirname[FMLX_HF_CATALOG_NAME_MAX]; /* com'è scritta su disco: mai ricostruire a caso */
+    char kind[8];              /* "model" | "dataset" | "space" */
+    char refs[FMLX_HF_CATALOG_REFS_MAX][FMLX_HF_CATALOG_REF_MAX]; /* i NOMI in refs/, non i commit */
+    size_t n_refs;             /* il numero VERO di ref, anche se `refs[]` non li contiene tutti */
+    size_t n_blobs;            /* file DISTINCT (inode) in blobs/: due hardlink = uno */
+    int64_t bytes;             /* somma dei byte di quei blob: l'INGOMBRO, non la somma degli symlink */
+    int64_t mtime;             /* il più recente fra i blob; 0 se non c'è nessun blob */
+    int refs_only;             /* 1 = ha `refs/` ma zero blob: un puntatore, non un modello */
+    int ambiguous_name;        /* 1 = più di un "--" dopo il tipo: l'id potrebbe non essere quello vero */
+} FmlxHfRepo;
+
+/* Elenca i repo del cache. `cache_root == NULL` = `fmlx_hf_cache_root()`. Ordine per `repo_id`:
+ * readdir non è deterministico e un test che dipende dall'ordine del filesystem è un test che
+ * fallisce su un altro disco. `*n_out` è scritto SEMPRE, anche sull'errore.
+ * `FMLX_HF_ERR_TOO_MANY` se i repo sono più di `cap`: `*n_out` dice Quanti, così il chiamante può
+ * ingrandire l'array invece di stampare un elenco monco.
+ * Cosa NON è un repo: qualunque entry che non sia una directory con un prefisso di tipo noto — le
+ * directory `xet/`, i file `version.txt`, `CACHEDIR.TAG`. Vengono ignorate, e `n_ignored_out`
+ * (opzionale) le conta: "il cache ha 23 repo e 2 cose che non riconosco" è una frase diversa da
+ * "il cache ha 23 repo". */
+FmlxHfStatus fmlx_hf_catalog(const char *cache_root, FmlxHfRepo *out, size_t cap, size_t *n_out,
+                             size_t *n_ignored_out);
+
+/* Un solo repo, per il `doctor` e per chi deve confermare un id dopo un `pull`. Stesse regole di
+ * conteggio. `FMLX_HF_ERR_NO_REPO` se la directory non c'è: un repo che NON abbiamo non è un repo da
+ * zero byte, e i due casi devono arrivare al chiamante distinti (l'uno è "scaricalo", l'altro è "è
+ * rotto"). */
+FmlxHfStatus fmlx_hf_catalog_repo(const char *cache_root, const char *repo_id, FmlxHfRepo *out);
 
 /* Messaggio dell'ultimo fallimento di questa lane (NULL se nessuno). Posseduto dal caller?
  * No: valida fino alla prossima chiamata di questa lane. */

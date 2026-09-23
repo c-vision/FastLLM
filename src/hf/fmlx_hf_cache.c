@@ -67,6 +67,7 @@ const char *fmlx_hf_status_str(FmlxHfStatus s) {
         case FMLX_HF_ERR_NO_SIZE: return "il server non ha dichiarato una lunghezza";
         case FMLX_HF_ERR_STALL: return "lo stream si e' fermato: nessun byte per il tempo limite";
         case FMLX_HF_ERR_TOO_MANY: return "la risposta chiede piu' di quanto questo limite tiene";
+        case FMLX_HF_ERR_NO_CACHE: return "la radice del cache non esiste";
     }
     return "codice sconosciuto";
 }
@@ -78,6 +79,39 @@ FmlxHfStatus fmlx_hf_pjoin(char *out, size_t n, const char *a, const char *b) {
         return fmlx_hf_fail(FMLX_HF_ERR_BUF_SMALL, "path '%s/%s' non sta in %zu byte", a, b, n);
     }
     return FMLX_HF_OK;
+}
+
+/* ---- creare directory ----
+ * Stanno qui e non nella lane download perché non c'entrano nulla con la rete: sono la STESSA
+ * famiglia di regole di `fmlx_hf_pjoin`, e la prova è chi le chiama — `fmlx_hf_fetch.c` (che le ha
+ * viste nascere), il `pull` della CLI (che costruisce il `--dest`) e i test che si preparano un
+ * cache finto. Stare nella lane "nessuna rete" è ciò che permette a un test di catalogo di creare
+ * directory senza linkarci dentro libcurl. */
+int fmlx_hf_mkdir_p(const char *path) {
+    char buf[FMLX_HF_PATH_MAX];
+    if (!path || !*path) return -1;
+    snprintf(buf, sizeof buf, "%s", path);
+    for (char *c = buf + 1; *c; c++) {
+        if (*c != '/') continue;
+        *c = '\0';
+        if (mkdir(buf, 0777) != 0 && errno != EEXIST) return -1;
+        *c = '/';
+    }
+    return mkdir(buf, 0777) == 0 || errno == EEXIST ? 0 : -1;
+}
+
+/* SOLO il genitore. Il nome dice esattamente ciò che fa: `fmlx_hf_mkdir_p(dirname(path))`. Chi deve
+ * scrivere IN una directory (blobs/, il repo stesso) deve chiamare fmlx_hf_mkdir_p su QUELLA
+ * directory: confondere i due è il bug che ha reso impossibile il primo download. */
+int fmlx_hf_ensure_parent(const char *path) {
+    char dir[FMLX_HF_PATH_MAX];
+    const char *slash = strrchr(path, '/');
+    if (!slash) return 0;
+    size_t n = (size_t)(slash - path);
+    if (n == 0 || n >= sizeof dir) return -1;
+    memcpy(dir, path, n);
+    dir[n] = '\0';
+    return fmlx_hf_mkdir_p(dir);
 }
 
 /* ---- validazione ---- */

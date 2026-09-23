@@ -83,6 +83,15 @@ typedef struct {
     int want_help; /* -h/--help: NON è un errore, e l'uscita è 0 */
 } FmlxCliArgs;
 
+/* ---- models / list ---- */
+
+/* Elenca ciò che il cache contiene già, SENZA rete: non prende un transport perché la lane che
+ * legge il disco un transport non ce l'ha (`fmlx_hf_catalog`). `a->pull.fetch.cache_root` è la
+ * radice data con `--cache`, NULL = la regola d'ambiente della lane hf.
+ * Con `a->quiet` una riga per repo (id e basta): la forma per i parse di una shell.
+ * `out`/`err` separate come per il `pull`: l'elenco è dato, i problemi no. */
+FmlxCliStatus fmlx_models_exec(const FmlxCliArgs *a, FILE *out, FILE *err);
+
 /* Azzera SEMPRE `out`, anche quando fallisce: un args mezzo riempito in mano al dispatch è il modo
  * migliore per eseguire il verbo sbagliato. `msg` riceve la ragione (può essere NULL). */
 FmlxCliStatus fmlx_cli_parse(int argc, char **argv, FmlxCliArgs *out, char *msg, size_t msg_len);

@@ -18,8 +18,9 @@ da Hugging Face). Piano completo: `AiWiki/01-Projects/FastMLX/Piani/(open) - Fas
 | `src/server/fmlx_http.c` — codec HTTP/1.1: framing richiesta, testata risposta, SSE | **esiste, compilato, testato** (127 verifiche byte-esatte) |
 | `src/server/fmlx_api*.c` — router + adapter OpenAI/Anthropic sopra il codec | **esiste, compilato, testato** (151 verifiche). Non c'è ancora un motore sotto: la generazione è attaccata al confine `FmlxApiNext`, che il test copre con un doppio scriptato |
 | `src/lane_mlx/` — motore MLX estratto da GMBasic | non scritto. **D2 non blocca il "come"**: i prerequisiti per compilarlo sono già su questa macchina (verificato 2026-09-22: 28 header in `GMBasic/libs/mlx-deps/mlx-c-src/mlx/c/*.h`, più `libmlx.a` 31 MB e `libmlxc.a` 1,0 MB in `libs/mlx-deps/precompiled/darwin-arm64`). D2 decide solo **chi possiede** il motore |
-| `src/cli/fmlx_pull.c` + `fmlx_cli.c` — `fastmlx pull`, il dispatch e gli esiti | **esiste, compilato, testato, provato sul server vero** (48 + 96 verifiche; pull reale `sshleifer/tiny-gpt2`: 9/9 file, 9 blob il cui nome è il loro hash, snapshot riletto da `hf_probe`) |
-| `src/cli/` — `run\|chat\|serve\|models\|list\|ps\|cp\|rm\|doctor` | **non collegati, e lo dicono**: `fmlx_cli_exec` ritorna `NOT_WIRED` nominando il pezzo che manca (motore / catalogo locale / motore + HTTP in ascolto) ed esce 1. Il parser delle bandiere invece **esiste**, ed è provato per i 9 verbi |
+| `src/cli/fmlx_pull.c` + `fmlx_cli.c` — `fastmlx pull`, il dispatch e gli esiti | **esiste, compilato, testato, provato sul server vero** (48 + 129 verifiche; pull reale `sshleifer/tiny-gpt2`: 9/9 file, 9 blob il cui nome è il loro hash, snapshot riletto da `hf_probe`) |
+| `src/cli/fmlx_models.c` + `src/hf/fmlx_hf_catalog.c` — `fastmlx models` / `list` | **esiste, compilato, testato, provato sul cache vero di questa macchina** (103 + 129 verifiche; 23 repo letti in 0,01 s, 3.675.292.998 byte che coincidono con un conteggio di inode fatto a parte con `find`+`stat`) |
+| `src/cli/` — `run\|chat\|serve\|ps\|cp\|rm\|doctor` | **non collegati, e lo dicono**: `fmlx_cli_exec` ritorna `NOT_WIRED` nominando il pezzo che manca (motore / registro delle sessioni / chi scrive nel cache) ed esce 2. Il parser delle bandiere invece **esiste**, ed è provato per i 7 verbi rimasti |
 
 Qui sotto c'è solo ciò che compila davvero. Nessuna cartella vuota "perché il piano la prevede".
 L'enumerazione di ciò che MLX/caricatore loader GGUF sanno davvero fare, con i `file:riga` della
@@ -87,8 +88,9 @@ solo dei 256×64 + 128×8 bit. Licenza MIT ggml: vedi `LICENSES.md`.
 
 ## La lane HF (cache) oggi
 
-`include/fmlx/fmlx_hf.h` + `src/hf/fmlx_hf_cache.c` + `src/hf/fmlx_hf_hash.c`: legge il cache di
-Hugging Face **senza toccare la rete**. Ogni regola è misurata da una fonte, non ricordata:
+`include/fmlx/fmlx_hf.h` + `src/hf/fmlx_hf_cache.c` + `fmlx_hf_hash.c` + `fmlx_hf_catalog.c`: legge
+il cache di Hugging Face **senza toccare la rete**. Ogni regola è misurata da una fonte, non
+ricordata:
 
 - **radice**: `HF_HUB_CACHE` → legacy `HUGGINGFACE_HUB_CACHE` → `HF_HOME/hub` →
   `XDG_CACHE_HOME/huggingface/hub` → `~/.cache/huggingface/hub`, con `expanduser` prima di
@@ -199,10 +201,13 @@ sbagliarla in silenzio.
 (`{endpoint}/api/models/{repo}[/revision/{quote(rev)}]?blobs=true`, la rotta esatta di
 `hf_api.py:2648-2657`) e restituisce `sha` + la lista di `siblings[].{rfilename,size,blobId,lfs}`.
 Perché un file suo: il download parla di UN file e scrive nel cache, il manifesto parla di TUTTI i
-file e nel cache **non ci mette nulla** (huggingface_hub non scrive i manifesti — e infatti
-`offline` qui è un RIFIUTO, non "lista dal cache"). `tests/hf/test_hf_manifest.c` (19 casi, 51
-verifiche) gira senza rete su un transport finto e prova anche che `meta`/`get` non vengono mai
-chiamati.
+file e **la nostra lane nel cache non ci mette nulla**. Qui c'è una correzione misurata:
+`huggingface_hub` 1.31.0 **una lista la scrive**, `trees/<commit>.json` (`_tree_cache.py:19-31`; su
+questa macchina esiste davvero, in `models--bert-base-uncased/trees/`) — ma è **chiavata sul commit**,
+e la richiesta arriva per **revisione**: rispondere a «dov'è `main` adesso» con l'albero di un commit
+vorrebbe dire servire un'idea vecchia di una spanna. Da cui la regola, che resta: `offline` qui è un
+**RIFIUTO**, non "lista dal cache". `tests/hf/test_hf_manifest.c` (19 casi, 51 verifiche) gira senza
+rete su un transport finto e prova anche che `meta`/`get` non vengono mai chiamati.
 
 Le due decisioni che sembrano pignole e sono il motivo per cui il file esiste:
 
@@ -354,17 +359,58 @@ scriviamo è leggibile dal lettore con cui abbiamo verificato il cache di `huggi
 
 **Cosa NON è misurato qui**: la via di fallback `copy_stream` (hardlink impossibile) non è mai
 stata eseguita — il test gira su un singolo filesystem; la riga di avanzamento in-place (stile
-Ollama) non è implementata; i 9 verbi non collegati non hanno ancora un motore da nominare davvero,
+Ollama) non è implementata; i 7 verbi non collegati non hanno ancora un motore da nominare davvero,
 nominano il pezzo.
+
+## `fastmlx models` / `list` — il catalogo locale (`src/hf/fmlx_hf_catalog.c` + `src/cli/fmlx_models.c`)
+
+Secondo verbo vivo, e primo che **non tocca la rete**: legge il cache così com'è. Non prende un
+`FmlxHfTransport` nemmeno per finta, perché la lane che legge il disco un transport non ce l'ha.
+
+**L'ingombro è dei blob, non degli symlink.** Uno snapshot è un fascio di link a
+`../../blobs/<nome>`: sommare anche quelli raddoppierebbe ogni modello, e chi ha 40 GB liberi si
+fida di quel numero. Si contano gli **inode distinti** di `blobs/` (due hardlink allo stesso blob
+sono un blob), un solo livello di ricorsione perché i blob sono piatti — e ciò che fosse annidato
+NON è un nostro blob. Misurato: la colonna `DIM` della tabella e un
+`find models--*/blobs -type f | xargs stat -f "%z %i" | sort -u -k2` indipendente coincidono a
+**3.675.292.998 byte** su 23 repo.
+
+**Tre cose che solo il cache vero di questa macchina potevano dire**, e che sono diventate campi
+della struttura (non note a piè di pagina):
+
+1. `models--mlx-community--Mixtral-8x22B-4bit` e altri 12 repo hanno **solo `refs/`**: nessun blob.
+   Sono `refs_only`, stampati con `[solo ref]` e una legenda — "occupa 0 byte" e "non ce l'hai" sono
+   due consigli diversi, e la riga deve dire quale dei due;
+2. `models--bert-base-uncased` ha una `trees/` (huggingface_hub ≥ 1.31, `_tree_cache.py:19-31`) e
+   directory **reali** dentro lo snapshot (`coreml/`): `trees/` non è un blob, e il ricorsivo dove
+   serve (i ref `refs/pr/N`, che HF scrive come sottodirectory) non è paranoia;
+3. la radice contiene `version.txt`, `CACHEDIR.TAG` e a volte `xet/`: **non sono repo**, e "non è un
+   repo" si **conta** (`n_ignored_out`) e si stampa, perché un elenco che tace su ciò che salta è il
+   modo in cui "non ho trovato niente" diventa "non c'è niente".
+
+`fmlx_hf_catalog` distingue anche tre errori che sembrano uno: la radice non esiste
+(`ERR_NO_CACHE` — è `HF_HOME` che punta nel posto sbagliato, non un cache vuoto), il cache esiste ed
+è vuoto (`OK`, `n = 0`), l'array del chiamante è troppo piccolo (`ERR_TOO_MANY` **con il numero
+vero**). La ricostruzione `directory → repo id` è la copia della regola di `huggingface_hub`
+(`utils/_cache_manager.py:742-744`: tipo prima del primo `--`, poi ogni `--` → `/`), che è **perdente
+per costruzione**: `ambiguous_name` è la parola che lo dice invece del silenzio.
+
+**Due difetti trovati solo girando sul campo**, non sul fixture: la prima `parse_dirname` produceva
+`org/-due` al posto di `org/due` (dopo aver scritto `/` per la coppia copiava anche il secondo `-`)
+e il messaggio di rifiuto dell'argomento posizionale stampava `fastmlx: :` con il verbo **vuoto**
+(`fail()` azzera `FmlxCliArgs` prima che il `%s` legga `out->verb`). Il secondo è passato inosservato
+al test perché l'asserzione guardava solo il frammento finale: ora si asserisce anche il nome del
+verbo, per esteso.
 
 ## Build e test
 
 ```sh
 cmake -S . -B build
 cmake --build build          # -Wall -Wextra -Werror
-ctest --test-dir build --output-on-failure   # 12 suite, nessuna tocca la rete
+ctest --test-dir build --output-on-failure   # 13 suite, nessuna tocca la rete
 ./build/fmlx_gguf_inspect <file.gguf>   # testata, tipi, allineamento, coda di byte
 ./build/fastmlx pull <org>/<repo> [--revision R] [--dest D] [--cache C]   # lo snapshot nel cache
+./build/fastmlx models [--cache C] [--quiet]   # cosa c'è già nel cache, senza rete (`list` = alias)
 ./build/hf_probe --tree <org>/<repo> [<rev>]   # cache HF reale: locate + verifica, sola lettura
 HF_HUB_CACHE=work/probe-cache ./build/hf_fetch_probe <org>/<repo> [<rev>] [<file>] [<max byte>]
                                          # download VERO, in una cache di lavoro: mai la reale

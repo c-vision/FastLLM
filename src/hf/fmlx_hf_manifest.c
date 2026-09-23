@@ -121,8 +121,14 @@ FmlxHfStatus fmlx_hf_manifest_with(const char *repo_id, const char *revision,
         return fmlx_hf_fail(FMLX_HF_ERR_IO, "il transport non sa fare una GET a memoria: il "
                                             "manifesto non e' disponibile");
     if (!repo_id || !*repo_id) return fmlx_hf_fail(FMLX_HF_ERR_REPO_ID, "repo id vuoto");
-    /* Non esiste un manifesto nel cache (huggingface_hub non lo scrive): offline qui vuol dire
-     * RIFIUTARE, mai "lista vuota", che sarebbe il repo senza file. */
+    /* Offline qui è un RIFIUTO, mai "lista vuota" (che sarebbe il repo senza file). La ragione
+     * NON è che il cache altrui non abbia una lista: `huggingface_hub` 1.31.0 scrive
+     * `trees/<commit>.json` (`_tree_cache.py:19-31`, misura su disco in
+     * `~/ai/hf-cache/hub/models--bert-base-uncased/trees/`). La ragione è che QUEL FILE È CHIAVATO
+     * SUL COMMIT, e la richiesta arriva per REVISIONE: leggere l'albero di un commit per rispondere
+     * a "dov'è main adesso" significherebbe servire un'idea vecchia di una spanna. La nostra lane
+     * non scrive e non legge `trees/`: di quel formato esiste una sola lettura, quella di chi
+     * l'ha scritto. */
     if (d.offline || fmlx_hf_offline())
         return fmlx_hf_fail(FMLX_HF_ERR_OFFLINE, "manifesto di %s: serve la rete e l'ambiente la "
                                                  "vieta", repo_id);
@@ -157,9 +163,11 @@ FmlxHfStatus fmlx_hf_manifest_with(const char *repo_id, const char *revision,
     if (s != FMLX_HF_OK) {
         if (s == FMLX_HF_ERR_NOT_ON_REMOTE) {
             /* 404 su una richiesta di MANIFESTO: per un FILE vuol dire "scrivi il marker .no_exist",
-             * ma qui il marker non esiste (huggingface_hub non lo scrive per l'API, e misurato sul
-             * server: `.../revision/refs%2Fpr%2F1?blobs=true` risponde 404 e basta). Stesso codice
-             * — `pull` non deve ritentare — messaggio che non promette una cosa mai fatta. */
+             * ma qui il marker non esiste: `.no_exist` è scritto SOLO dal percorso di download del
+             * singolo file (`file_download.py:1556`, copia 1.31.0), mai dalla chiamata di metadati —
+             * e misurato sul server: `.../revision/refs%2Fpr%2F1?blobs=true` risponde 404 e basta.
+             * Stesso codice — `pull` non deve ritentare — messaggio che non promette una cosa mai
+             * fatta. */
             s = fmlx_hf_fail(FMLX_HF_ERR_NOT_ON_REMOTE,
                              "manifesto di %s@%s: il server non conosce questo repo o questa "
                              "revisione (HTTP 404, nessun marker scritto: i manifesti non stanno "
