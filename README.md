@@ -12,7 +12,7 @@ da Hugging Face). Piano completo: `AiWiki/01-Projects/FastMLX/Piani/(open) - Fas
 | `src/lane_gguf/fmlx_gguf.c` — lettore GGUF di riferimento | **esiste, compilato, testato** (259 verifiche) |
 | `src/lane_gguf/fmlx_quant.c` — dequant ggml → F32 (13 tipi) | **esiste, compilato, testato** (461 verifiche + gate differenziale) |
 | `src/hf/fmlx_hf_cache.c` + `fmlx_hf_hash.c` — cache HF letto, senza rete | **esiste, compilato, testato** (131 verifiche + sonda sul cache reale) |
-| `src/hf/fmlx_hf_fetch.c` + `fmlx_hf_curl.c` — download, lock, resume, watchdog di stall, verifica | **esiste, compilato, testato** (189 verifiche senza rete + probe sul server vero; il watchdog su rete reale NON è ancora misurato) |
+| `src/hf/fmlx_hf_fetch.c` + `fmlx_hf_curl.c` — download, lock, resume, watchdog di stall, backend classico su repo xet | **esiste, compilato, testato** (199 verifiche senza rete + probe sul server vero; il watchdog su rete reale NON è ancora misurato) |
 | `src/json/fmlx_json.c` + `fmlx_jsonw.c` — parser e writer JSON | **esiste, compilato, testato** (327 + 148 verifiche, **e** differenziale contro CPython su 122 record: 8 divergenze dure volute, 0 round-trip — `docs/json-contract.md`) |
 | `src/server/fmlx_http.c` — codec HTTP/1.1: framing richiesta, testata risposta, SSE | **esiste, compilato, testato** (127 verifiche byte-esatte) |
 | `src/server/fmlx_api*.c` — router + adapter OpenAI/Anthropic sopra il codec | **esiste, compilato, testato** (151 verifiche, **9/9** suite `ctest`). Non c'è ancora un motore sotto: la generazione è attaccata al confine `FmlxApiNext`, che il test copre con un doppio scriptato |
@@ -109,13 +109,16 @@ Hugging Face **senza toccare la rete**. Ogni regola è misurata da una fonte, no
   usabili ma `fmlx_hf_verify` risponde `ERR_NOT_VERIFIABLE`, **non** "ok": il nome non promette
   nulla, e un falso positivo qui è un file corrotto accettato.
 
-Cosa **non** fa ancora: nessun protocollo xet (esiste nel cache come staging, l'ho misurato ma non
-l'ho implementato), nessuna API `delete`/`upload`.
+Cosa **non** fa ancora: nessun protocollo xet — il che è una scelta, non un buco: quando il server
+annuncia `X-Xet-Hash` i byte arrivano comunque dal backend classico HTTP e **lo si dice su stderr una
+volta sola per processo** (piano §12.4). Resta non provata dal fake la lettura di quell'header nel
+transport curl: il fake setta `FmlxHfMeta.xet_announced` a mano, quindi la riga di `hdr_cb` che la
+produce si vede solo sul server reale. Nessuna API `delete`/`upload`.
 
 ## Lane download (`src/hf/fmlx_hf_fetch.c` + `fmlx_hf_curl.c`) — esiste, compilato, provato
 
 La logica di cache e il trasporto sono due file separati perché la prima si prova **senza rete**:
-`tests/hf/test_hf_fetch.c` usa un transport finto (23 casi, 189 verifiche) e scopre i bug di
+`tests/hf/test_hf_fetch.c` usa un transport finto (24 casi, 199 verifiche) e scopre i bug di
 DOVE-finiscono-i-byte, che sono gli unici che corrompono un cache condiviso.
 
 Lo **stream fermo** è l'unico fallimento che si ritenta: la soglia (`FmlxHfFetchOpts.stall_timeout_s`,

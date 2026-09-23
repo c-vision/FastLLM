@@ -176,6 +176,10 @@ static size_t hdr_cb(char *buf, size_t size, size_t nitems, void *ud) {
         copy_field(c->size, sizeof c->size, val, vlen);
     else if (hdr_is(buf, nlen, "Location"))
         copy_field(c->loc, sizeof c->loc, val, vlen);
+    else if (hdr_is(buf, nlen, "X-Xet-Hash") && c->meta)
+        /* Solo un SEGNO: il protocollo Xet non è implementato e non si segue. Si dichiara sopra,
+         * non qui, perché la HEAD e la GET passano di qui e il log deve essere uno. */
+        c->meta->xet_announced = 1;
     return len;
 }
 

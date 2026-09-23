@@ -636,6 +636,58 @@ static void case_nostall_not_retried(void) {
     CK(f.get_calls == 1, "GET %d volte su un errore non-stall, attendevo 1", f.get_calls);
 }
 
+/* Xet annunciato dal server: il download resta quello classico E l'avviso c'è, UNA volta.
+ * Il caso vale due assert diverse: (a) la lane non cambia comportamento — un `X-Xet-Hash` non è
+ * un errore e non devia nulla; (b) la scelta del backend NON è silenziosa. Senza (b) il log si
+ * poteva anche non scrivere, e "sto scaricando da un servitore diverso" restava nascosto. */
+static void case_xet_classical_backend(void) {
+    fresh("xet");
+    Fake f, g;
+    FmlxHfFetchOpts o, o2;
+    char b[FMLX_HF_PATH_MAX], logp[FMLX_HF_PATH_MAX], cap[8192];
+    int saved, fd, n = 0;
+    char *p;
+    ssize_t got;
+
+    fake_init(&f, COMMIT_NEW, W1_GIT, (int64_t)sizeof W1 - 1, W1);
+    f.reply.xet_announced = 1;
+    opts_for(&o);
+    /* stderr si cattura e si RESTITUISCE subito: un test che lascia la stampa dirottata avvelena
+     * tutti i casi dopo il proprio. */
+    snprintf(logp, sizeof logp, "%s/fetch-xet.stderr", BASE);
+    fflush(stderr);
+    saved = dup(STDERR_FILENO);
+    CK(saved >= 0, "dup stderr: %s", strerror(errno));
+    if (saved < 0) return;
+    CK(freopen(logp, "w", stderr) != NULL, "freopen %s: %s", logp, strerror(errno));
+    CK_ST(fmlx_hf_download_with(REPO, "main", "model.bin", &o, &FAKE_VT, NULL), FMLX_HF_OK);
+    /* Il secondo file è un ALTRO percorso con gli STESSI byte: entra davvero fino alla HEAD (la
+     * entry non c'è) ma il blob esiste già, quindi non fa GET. Senza questa seconda chiamata
+     * `n == 1` passerebbe anche con un avviso stampato a ogni giro. */
+    fake_init(&g, COMMIT_NEW, W1_GIT, (int64_t)sizeof W1 - 1, W1);
+    g.reply.xet_announced = 1;
+    opts_for(&o2);
+    CK_ST(fmlx_hf_download_with(REPO, "main", "config.json", &o2, &FAKE_VT, NULL), FMLX_HF_OK);
+    fflush(stderr);
+    dup2(saved, STDERR_FILENO);
+    close(saved);
+
+    fd = open(logp, O_RDONLY);
+    CK(fd >= 0, "open %s", logp);
+    got = fd >= 0 ? read(fd, cap, sizeof cap - 1) : -1;
+    if (fd >= 0) close(fd);
+    if (got < 0) got = 0;
+    cap[got] = '\0';
+    for (p = cap; (p = strstr(p, "backend classico")) != NULL; p++) n++;
+    CK(n == 1, "avviso sul backend classico stampato %d volte su DUE download, attendevo 1", n);
+    pblob(b, sizeof b, W1_GIT);
+    CK(same_bytes(b, W1, sizeof W1 - 1), "un xet annunciato ha cambiato il byte che arrivano");
+    CK(f.meta_calls == 1 && g.meta_calls == 1, "meta f=%d g=%d, attendevo 1 e 1: senza la seconda "
+                                              "HEAD l'avviso unico non era messo alla prova",
+       f.meta_calls, g.meta_calls);
+    CK(f.get_calls == 1, "GET %d volte sul file nuovo, attendevo 1", f.get_calls);
+}
+
 /* Un altro processo tiene il lock: ERR_LOCKED, e nessun file nostro. */
 static void case_lock_held(void) {
     fresh("locked");
@@ -1004,6 +1056,7 @@ int main(int argc, char **argv) {
     case_stall_resumes();
     case_stall_exhausted();
     case_nostall_not_retried();
+    case_xet_classical_backend();
     case_lock_held();
     case_regular_entry_untouched();
     case_repair();

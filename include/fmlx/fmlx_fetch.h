@@ -56,6 +56,10 @@ typedef struct {
     int64_t size;      /* dichiarato; -1 se il server non l'ha detto => FMLX_HF_ERR_NO_SIZE */
     int status;        /* codice HTTP osservato */
     int not_found;     /* 404/405 => il marker .no_exist va scritto */
+    /* Il server ha annunciato `X-Xet-Hash`, cioè che i byte stanno su Xet. Il backend classico è
+     * una SCELTA di questa lane (il protocollo Xet non è implementato, piano §12.4), ma NON deve
+     * essere silenziosa: chi scarica ha diritto di sapere che la strada percorsa è l'altra. */
+    int xet_announced;
 } FmlxHfMeta;
 
 typedef struct FmlxHfFetchOpts FmlxHfFetchOpts;

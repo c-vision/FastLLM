@@ -271,6 +271,21 @@ static FmlxHfStatus fetch_one(const char *repo_id, const char *revision, const c
     /* 4) cosa dice il server. Una HEAD sola: metadati e lunghezza, mai byte. */
     s = t->meta(t->ctx, url, token, &meta);
     if (s != FMLX_HF_OK) return s;
+    /* Xet: il server può annunciare `X-Xet-Hash` (huggingface_hub lo legge in utils/_xet.py:47-63
+     * e, SE hf_xet è installato, ci MANDA il download: file_download.py:1735 con
+     * `is_xet_available()` di utils/_runtime.py:155-159, che è esattamente ciò che
+     * HF_HUB_DISABLE_XET spegne — la stessa guardia che il fork Python paga col commit a47fb67c).
+     * Qui il protocollo Xet non esiste e il backend classico è la scelta del piano §12.4, MA non è
+     * un ripiegamento silenzioso: è una differenza di banda e di servidori che chi guarda il log ha
+     * diritto di vedere. Una volta per processo, perché i file di un repo xet sono decine. */
+    if (meta.xet_announced) {
+        static int xet_said;
+        if (!xet_said) {
+            xet_said = 1;
+            fprintf(stderr, "[fetch] Xet annunciato dal server: i byte arrivano dal backend "
+                            "classico HTTP (il protocollo xet non e' implementato)\n");
+        }
+    }
     /* Il commit dove finiscono i byte è quello che il server ha detto per QUESTO URL, non quello
      * che il cache pensa del ramo: un refs/main fermo a ieri descriverebbe come "ieri" dei byte di
      * oggi. huggingface_hub fa allo stesso modo (`commit_hash = metadata.commit_hash`,
