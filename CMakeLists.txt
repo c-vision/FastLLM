@@ -48,7 +48,8 @@ target_link_libraries(hf_probe PRIVATE fmlx_hf)
 # vedi l'intestazione di src/hf/fmlx_hf_curl.c e la nota in LICENSES.md.
 find_package(CURL REQUIRED)
 
-add_library(fmlx_hf_fetch STATIC src/hf/fmlx_hf_fetch.c src/hf/fmlx_hf_curl.c)
+add_library(fmlx_hf_fetch STATIC src/hf/fmlx_hf_fetch.c src/hf/fmlx_hf_curl.c
+                                        src/hf/fmlx_hf_manifest.c)
 target_include_directories(fmlx_hf_fetch PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
                                         PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/hf)
 target_link_libraries(fmlx_hf_fetch PUBLIC fmlx_hf PRIVATE CURL::libcurl)
@@ -57,15 +58,29 @@ add_executable(test_hf_fetch tests/hf/test_hf_fetch.c)
 target_link_libraries(test_hf_fetch PRIVATE fmlx_hf_fetch)
 add_test(NAME hf_fetch COMMAND test_hf_fetch ${CMAKE_CURRENT_BINARY_DIR}/work)
 
+# Il manifesto non tocca il disco: nessun work directory da passare, nessun cache da pulire.
+add_executable(test_hf_manifest tests/hf/test_hf_manifest.c)
+target_link_libraries(test_hf_manifest PRIVATE fmlx_hf_fetch)
+add_test(NAME hf_manifest COMMAND test_hf_manifest)
+
 # Sonda di rete VERA, non un test: due righe di README spiegano perché non sta in ctest.
 add_executable(hf_fetch_probe tools/hf_fetch_probe.c)
 target_link_libraries(hf_fetch_probe PRIVATE fmlx_hf_fetch)
+
+# Anche questa è una sonda, non un test: una richiesta di metadati al server vero, zero byte di
+# modello. Serve a provare la FORMA della risposta (che il test offline non può provare).
+add_executable(hf_manifest_probe tools/hf_manifest_probe.c)
+target_link_libraries(hf_manifest_probe PRIVATE fmlx_hf_fetch)
 
 # --- lane_json: il codec che tocca ogni byte in entrata e in uscita dalle API -------------
 # Due file separati perché parser e writer hanno contratti diversi: il parser RIFIUTA con
 # un codice per causa e un offset, il writer NON DEVE MAI produrre output a metà.
 add_library(fmlx_json STATIC src/json/fmlx_json.c src/json/fmlx_jsonw.c)
 target_include_directories(fmlx_json PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+# Il manifesto è JSON: la lane download dipende dal codec, e il codec non dipende da nessuno.
+# (Qui e non nel blocco `fmlx_hf_fetch` sopra: un target si può linkare solo DOVE esiste.)
+target_link_libraries(fmlx_hf_fetch PUBLIC fmlx_json)
 
 add_executable(test_json tests/json/test_json.c)
 target_link_libraries(test_json PRIVATE fmlx_json)

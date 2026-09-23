@@ -28,7 +28,8 @@ static const char *kind_name(FmlxHfHashKind k) {
     return "?";
 }
 
-int main(int argc, char **argv) {    const char *repo = argc > 1 ? argv[1] : "google-bert/bert-base-uncased";
+int main(int argc, char **argv) {
+    const char *repo = argc > 1 ? argv[1] : "google-bert/bert-base-uncased";
     const char *rev = argc > 2 ? argv[2] : "main";
     const char *rel = argc > 3 ? argv[3] : "config.json";
     int64_t max_bytes = argc > 4 ? strtoll(argv[4], NULL, 10) : 4 * 1024 * 1024;

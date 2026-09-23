@@ -317,7 +317,9 @@ static void fake_configure(void *ctx, const FmlxHfFetchOpts *opts) {
     f->saw_stall_retries = opts ? opts->stall_retries : -1;
 }
 
-static const FmlxHfTransport FAKE_VT = {NULL, fake_meta, fake_get, fake_configure};
+/* `get_buf` è NULL: questa lane scarica FILE su fd, il manifesto ha il suo test. Metterla NULL non
+ * è un campo dimenticato — è il caso che `fmlx_hf_manifest_with` deve rifiutare con ERR_IO. */
+static const FmlxHfTransport FAKE_VT = {NULL, fake_meta, fake_get, fake_configure, NULL};
 
 static void opts_for(FmlxHfFetchOpts *o) {
     memset(o, 0, sizeof *o);

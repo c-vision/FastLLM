@@ -34,6 +34,12 @@ int fmlx_hf_name_is_safe(const char *name);
 FmlxHfStatus fmlx_hf_url_with(const char *endpoint, const char *repo_id, const char *revision,
                               const char *relpath, int use_resolve, char *out, size_t out_len);
 
+/* `quote()` di Python, la STESSA usata per gli URL di download. Il manifesto dei file (piano
+ * §12.1) codifica la revisione con questa e non con una copia: due implementazioni di `quote`
+ * divergono proprio sul caso raro (un ramo con `%` o `/` dentro), e lì un cache condiviso smette
+ * di essere riconoscibile. 0 = scritto, -1 = non sta in `out`. */
+int fmlx_hf_pct_encode(const char *s, const char *safe, char *out, size_t out_len);
+
 /* Messaggio d'errore + codice: unico modo per concludere una funzione di questa lane. */
 FmlxHfStatus fmlx_hf_fail(FmlxHfStatus s, const char *fmt, ...);
 

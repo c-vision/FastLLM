@@ -80,7 +80,13 @@ typedef enum {
      * `.incomplete` resta. È l'unica classe di fallimento che conviene RITENTARE con lo stesso
      * `Range` (la replica del `--stall-timeout`/`--stall-retries` di rapid-mlx); le altre si
      * ritentano solo a scaldare il server. */
-    FMLX_HF_ERR_STALL = 25
+    FMLX_HF_ERR_STALL = 25,
+    /* 26: una risposta LEGITTIMA che però chiede più di quanto abbiamo deciso di tenere. La usa il
+     * manifesto (§12.1): `siblings` con più del massimo di voci che questa lane accetta. NON è
+     * ERR_SIZE, che parla di byte ricevuti contro byte dichiarati — qui la promessa del server è
+     * mantenuta, è il NOSTRO tetto sulla quantità che dice "no". Codice distinto perché il chiamante
+     * fa una cosa diversa: un `pull` con un filtro, non una ritentativa. */
+    FMLX_HF_ERR_TOO_MANY = 26
 } FmlxHfStatus;
 
 const char *fmlx_hf_status_str(FmlxHfStatus s);

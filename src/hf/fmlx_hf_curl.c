@@ -74,6 +74,11 @@ typedef struct {
     int fd;
     int64_t from, written, limit;
     int range_reset;
+    /* GET a MEMORIA (il manifesto): `buf`/`cap` validi solo con il mutex tenuto e solo mentre
+     * gira curl_get_buf. `mem_full` distingue il nostro "non ci sta" dall'errore di rete. */
+    char *buf;
+    size_t cap, written_mem;
+    int mem_full;
     /* Watchdog dello stream, in secondi SENZA un byte (0 => default 60). Viene da
      * `configure`/`FmlxHfFetchOpts.stall_timeout_s`, NON da una scelta di qui: la soglia è della
      * CLI (`--stall-timeout`), e un transport che se la sceglie da solo rende vuota l'opzione. */
@@ -91,6 +96,11 @@ static void meta_reset(FmlxHfMeta *m) {
     m->size = -1;
     m->status = 0;
     m->not_found = 0;
+    /* Si azzera anch'esso: `hop_reset` chiama questa a OGNI risposta della catena, quindi ciò che
+     * resta scritto è ciò che ha detto l'ULTIMA — la stessa di cui usiamo gli X-Linked-*.
+     * Lasciarlo acceso significherebbe attribuire al server un annuncio che forse ha fatto un
+     * altro hop (una cache intermedia) e non chi ha risposto davvero. */
+    m->xet_announced = 0;
 }
 
 static void hop_reset(Ctx *c) {
@@ -213,6 +223,22 @@ static size_t body_cb(char *ptr, size_t size, size_t nitems, void *ud) {
     return len;
 }
 
+/* Il corpo di una richiesta di METADATI (il manifesto) va in memoria, non su un fd. La guardia è la
+ * stessa di body_cb — oltre `cap` la callback restituisce 0 e curl tronca — ma qui il troncamento
+ * NON è un risultato: un JSON metà sarebbe un elenco metà, e chi scarica prenderebbe per intero una
+ * frazione del repo. Si risponde ERR_BUF_SMALL, che è il codice con cui si risale. */
+static size_t mem_cb(char *ptr, size_t size, size_t nitems, void *ud) {
+    Ctx *c = (Ctx *)ud;
+    size_t len = size * nitems;
+    if (c->written_mem + len > c->cap) {
+        c->mem_full = 1;
+        return 0;
+    }
+    memcpy(c->buf + c->written_mem, ptr, len);
+    c->written_mem += len;
+    return len;
+}
+
 /* "https://host/path" → 1. Tutto il resto (comprese le forme senza schema) è RELATIVO, e i
  * redirect relativi sono esattamente il caso che HF gestisce a mano. */
 static int url_is_absolute(const char *u) {
@@ -327,8 +353,7 @@ static int64_t parse_length(const char *v) {
     return (int64_t)n;
 }
 
-static FmlxHfStatus curl_meta(void *ctx_, const char *url, const char *token, FmlxHfMeta *out) {
-    Ctx *c = (Ctx *)ctx_;
+static FmlxHfStatus curl_meta(void *ctx_, const char *url, const char *token, FmlxHfMeta *out) {    Ctx *c = (Ctx *)ctx_;
     struct curl_slist *list = NULL;
     char next[CURL_HDR_LINE];
     FmlxHfStatus s;
@@ -471,6 +496,58 @@ out:
     return s;
 }
 
+static FmlxHfStatus curl_get_buf(void *ctx_, const char *url, const char *token, char *buf,
+                                 size_t cap, size_t *written) {
+    Ctx *c = (Ctx *)ctx_;
+    struct curl_slist *list = NULL;
+    FmlxHfStatus s;
+    CURLcode rc;
+    long code = 0;
+
+    *written = 0;
+    pthread_mutex_lock(&c->mu);
+    c->meta = NULL;
+    c->buf = buf;
+    c->cap = cap;
+    c->written_mem = 0;
+    c->mem_full = 0;
+
+    s = setup(c, url, token, 1, NULL, &list);
+    if (s != FMLX_HF_OK) goto out;
+    curl_easy_setopt(c->h, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(c->h, CURLOPT_MAXREDIRS, 10L);
+    curl_easy_setopt(c->h, CURLOPT_WRITEFUNCTION, mem_cb);
+    curl_easy_setopt(c->h, CURLOPT_WRITEDATA, c);
+
+    rc = curl_easy_perform(c->h);
+    curl_easy_getinfo(c->h, CURLINFO_RESPONSE_CODE, &code);
+    *written = c->written_mem;
+    if (rc == CURLE_WRITE_ERROR && c->mem_full) {
+        s = fmlx_hf_fail(FMLX_HF_ERR_BUF_SMALL, "GET %s: il corpo non sta in %zu byte", url, cap);
+    } else if (rc == CURLE_ABORTED_BY_CALLBACK && c->stalled) {
+        /* Anche una richiesta di metadati può fermarsi a metà: è lo stesso watchdog, e il
+         * manifestante non ha ripartibile (nessun Range sull'API), quindi risale come stall e
+         * l'ERRORE è distintivo — non un elenco vuoto. */
+        s = fmlx_hf_fail(FMLX_HF_ERR_STALL, "GET %s: nessun byte per %d secondi", url,
+                         c->stall_timeout_s);
+    } else if (rc != CURLE_OK) {
+        s = fmlx_hf_fail(FMLX_HF_ERR_HTTP, "GET %s: %s", url, curl_easy_strerror(rc));
+    } else if (code == 404 || code == 405) {
+        s = fmlx_hf_fail(FMLX_HF_ERR_NOT_ON_REMOTE, "GET %s: HTTP %ld", url, code);
+    } else if (code < 200 || code >= 300) {
+        s = fmlx_hf_fail(FMLX_HF_ERR_HTTP, "GET %s: HTTP %ld", url, code);
+    } else {
+        s = FMLX_HF_OK;
+    }
+
+out:
+    c->buf = NULL;
+    c->meta = NULL;
+    if (list) curl_slist_free_all(list);
+    pthread_mutex_unlock(&c->mu);
+    return s;
+}
+
 /* ---- il transport, come oggetto statico ---- */
 
 /* Il watchdog deve sapere QUANTO aspettare, e non è il transport che lo decide: è
@@ -502,7 +579,8 @@ static void ctx_init(void) {
 
 /* Un solo oggetto, a livello di file: un compound literal in un blocco ha durata AUTOMATICA,
  * quindi `&(...)` dentro la funzione restituirebbe un puntatore a stack morto. */
-static const FmlxHfTransport g_transport = {&g_ctx, curl_meta, curl_get, curl_configure};
+static const FmlxHfTransport g_transport = {&g_ctx, curl_meta, curl_get, curl_configure,
+                                            curl_get_buf};
 
 const FmlxHfTransport *fmlx_hf_transport_curl(void) {
     pthread_once(&g_once, ctx_init);

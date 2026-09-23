@@ -66,6 +66,7 @@ const char *fmlx_hf_status_str(FmlxHfStatus s) {
         case FMLX_HF_ERR_BAD_ETAG: return "l'etag del server non e' un nome di file accettabile";
         case FMLX_HF_ERR_NO_SIZE: return "il server non ha dichiarato una lunghezza";
         case FMLX_HF_ERR_STALL: return "lo stream si e' fermato: nessun byte per il tempo limite";
+        case FMLX_HF_ERR_TOO_MANY: return "la risposta chiede piu' di quanto questo limite tiene";
     }
     return "codice sconosciuto";
 }
@@ -367,8 +368,10 @@ FmlxHfStatus fmlx_hf_url(const char *repo_id, const char *revision, const char *
  * `safe="/"`). Unreserved = [A-Za-z0-9._~-] più i caratteri di `safe`; tutto il resto — UTF-8
  * compreso, byte per byte — diventa %XX. Non è un dettaglio estetico: "model_é.bin" chiesto crudo
  * non è la stessa richiesta che fa huggingface_hub, e due client sullo stesso cache devono
- * chiedere la STESSA cosa al server. */
-static int pct_encode(const char *s, const char *safe, char *out, size_t out_len) {
+ * chiedere la STESSA cosa al server. Non è statica: anche il manifesto dei file (piano §12.1)
+ * codifica la revisione, e due copie di `quote()` divergerebbero proprio sul ramo che contiene
+ * una `/` o una `%`. */
+int fmlx_hf_pct_encode(const char *s, const char *safe, char *out, size_t out_len) {
     static const char keep[] = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._~-";
     size_t o = 0;
     for (const unsigned char *c = (const unsigned char *)s; *c; c++) {
@@ -410,9 +413,9 @@ FmlxHfStatus fmlx_hf_url_with(const char *endpoint, const char *repo_id, const c
     }
     if (!revision || !*revision) return fmlx_hf_fail(FMLX_HF_ERR_REVISION, "revisione vuota");
     char rev[FMLX_HF_PATH_MAX * 3], rel[FMLX_HF_PATH_MAX * 3];
-    if (pct_encode(revision, "", rev, sizeof rev) != 0)
+    if (fmlx_hf_pct_encode(revision, "", rev, sizeof rev) != 0)
         return fmlx_hf_fail(FMLX_HF_ERR_BUF_SMALL, "revisione codificata non sta in buffer");
-    if (use_resolve && pct_encode(relpath, "/", rel, sizeof rel) != 0)
+    if (use_resolve && fmlx_hf_pct_encode(relpath, "/", rel, sizeof rel) != 0)
         return fmlx_hf_fail(FMLX_HF_ERR_BUF_SMALL, "path codificato non sta in buffer");
     int k;
     if (use_resolve)

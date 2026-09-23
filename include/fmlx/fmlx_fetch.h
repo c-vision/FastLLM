@@ -91,10 +91,18 @@ typedef struct {
                         int fd, int64_t *written);
     /* NULL ammessa (il transport finto dei test non ne ha bisogno). Chiamata UNA volta prima del
      * primo `get`, con le opzioni effettive della chiamata: il watchdog dello stream NON può avere
-     * una soglia cablata nel transport, perché è `--stall-timeout` della CLI la decisione. Portare
-     * le opzioni qui dentro invece che aggiungere un parametro per capo tiene il sigillo a tre
-     * funzioni (meta/get/configure) anche quando il piano §12.5 ci aggiunge il resto. */
+     * una soglia cablata nel transport, perché è `--stall-timeout` della CLI la decisione. Tenere
+     * le opzioni qui dentro, invece che aggiungere un parametro per capo, lascia il sigillo in una
+     * forma sola anche quando il piano §12.5 ci aggiunge il resto. */
     void (*configure)(void *ctx, const FmlxHfFetchOpts *opts);
+    /* GET SENSZA Range e SENZA fd: il corpo va in `buf` (capacità `cap`), e `*written` dice i byte
+     * scritti. Serve al manifesto (§12.1): è una risposta JSON piccola che si DEVE leggere tutta, e
+     * portarla su `get` significherebbe o riassumere i byte su un fd (un file temporaneo per una
+     * richiesta di metadati) o far finta che un corpo in memoria sia uno stream. Se il corpo non sta
+     * in `cap` il transport DEVE rispondere FMLX_HF_ERR_BUF_SMALL, mai troncare in silenzio.
+     * NULL = transport che non la sa fare: il manifesto risponde ERR_IO, non un elenco monco. */
+    FmlxHfStatus (*get_buf)(void *ctx, const char *url, const char *token, char *buf, size_t cap,
+                            size_t *written);
 } FmlxHfTransport;
 
 struct FmlxHfFetchOpts {
@@ -135,6 +143,41 @@ FmlxHfStatus fmlx_hf_download(const char *repo_id, const char *revision, const c
 FmlxHfStatus fmlx_hf_download_with(const char *repo_id, const char *revision, const char *relpath,
                                    const FmlxHfFetchOpts *opts, const FmlxHfTransport *t,
                                    FmlxHfRef *out);
+
+/* --- il manifesto dei file (piano §12.1) ----------------------------------------------------
+ * `GET {endpoint}/api/models/{repo}[/revision/{rev}]?blobs=true` — l'URL esatto è misurato su
+ * huggingface_hub `hf_api.py:2648-2657` (`revision` va NEL PATH, con `quote()`, e `blobs=true` è
+ * la forma Python di `params`), e i campi letti sono `sha` + `siblings[].{rfilename,size,blobId,lfs}`
+ * (`hf_api.py:896-906`). È ciò che `snapshot_download` usa per decidere COSA scaricare
+ * (`_snapshot_download.py:259`).
+ * `files` è mallocato qui e liberato SOLO da fmlx_hf_manifest_free. */
+typedef struct {
+    char path[FMLX_HF_PATH_MAX]; /* com'è nel repo, non codificato */
+    /* `blobId` della risposta: è il GIT BLOB ID (SHA1 a 40 hex), MA NON È il nome del blob nel
+     * cache per i file LFS — misurato sul server: `model.safetensors` ha `blobId` a 40 hex e
+     * `X-Linked-ETag` = sha256 a 64 hex, che è il nome con cui il download lane lo scrive. Per un
+     * file NON-LFS le due cose coincidono (misurato: `config.json` = `45a2321a7ecf…` da entrambe
+     * le parti). Da qui il nome: porta l'identificatore del REPO, non quello del cache. `pull` deve
+     * chiedere il nome al download lane (che legge l'etag), MAI dedurlo da qui.
+     * Vuoto se il server tace (`blobId` è `.get()`, non obbligatorio). 65 byte = 40 hex misurati,
+     * con il margine per uno sha256: `copy_str` RIFIUTA un valore che non sta, non lo tronca. */
+    char git_blob_id[65];
+    int64_t size;                /* dichiarato; -1 se il server non l'ha detto */
+    int is_lfs;                  /* 1 = la risposta ha un oggetto `lfs` per questo file */
+} FmlxHfFile;
+
+typedef struct {
+    char commit[64];   /* `sha` della risposta: è il commit in cui si scrive lo snapshot */
+    FmlxHfFile *files;
+    size_t n;
+} FmlxHfManifest;
+
+FmlxHfStatus fmlx_hf_manifest(const char *repo_id, const char *revision,
+                              const FmlxHfFetchOpts *opts, FmlxHfManifest *out);
+FmlxHfStatus fmlx_hf_manifest_with(const char *repo_id, const char *revision,
+                                   const FmlxHfFetchOpts *opts, const FmlxHfTransport *t,
+                                   FmlxHfManifest *out);
+void fmlx_hf_manifest_free(FmlxHfManifest *m);
 
 /* Normalizzazione dell'etag esattamente come huggingface_hub (lstrip("W/") + strip('"')):
  * esportata perché è una decisione su un NAME, e i test la provano da sola. */

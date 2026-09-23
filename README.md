@@ -13,9 +13,10 @@ da Hugging Face). Piano completo: `AiWiki/01-Projects/FastMLX/Piani/(open) - Fas
 | `src/lane_gguf/fmlx_quant.c` — dequant ggml → F32 (13 tipi) | **esiste, compilato, testato** (461 verifiche + gate differenziale) |
 | `src/hf/fmlx_hf_cache.c` + `fmlx_hf_hash.c` — cache HF letto, senza rete | **esiste, compilato, testato** (131 verifiche + sonda sul cache reale) |
 | `src/hf/fmlx_hf_fetch.c` + `fmlx_hf_curl.c` — download, lock, resume, watchdog di stall, backend classico su repo xet | **esiste, compilato, testato** (199 verifiche senza rete + probe sul server vero; il watchdog su rete reale NON è ancora misurato) |
+| `src/hf/fmlx_hf_manifest.c` — lista dei file di un repo (ciò che serve a `pull` per sapere COSA scaricare) | **esiste, compilato, testato** (51 verifiche senza rete + sonda sul server vero: `bert-base-uncased` 16 file, commit `86b5e09…`, 7 con `lfs`) |
 | `src/json/fmlx_json.c` + `fmlx_jsonw.c` — parser e writer JSON | **esiste, compilato, testato** (327 + 148 verifiche, **e** differenziale contro CPython su 122 record: 8 divergenze dure volute, 0 round-trip — `docs/json-contract.md`) |
 | `src/server/fmlx_http.c` — codec HTTP/1.1: framing richiesta, testata risposta, SSE | **esiste, compilato, testato** (127 verifiche byte-esatte) |
-| `src/server/fmlx_api*.c` — router + adapter OpenAI/Anthropic sopra il codec | **esiste, compilato, testato** (151 verifiche, **9/9** suite `ctest`). Non c'è ancora un motore sotto: la generazione è attaccata al confine `FmlxApiNext`, che il test copre con un doppio scriptato |
+| `src/server/fmlx_api*.c` — router + adapter OpenAI/Anthropic sopra il codec | **esiste, compilato, testato** (151 verifiche, **10/10** suite `ctest`). Non c'è ancora un motore sotto: la generazione è attaccata al confine `FmlxApiNext`, che il test copre con un doppio scriptato |
 | `src/lane_mlx/` — motore MLX estratto da GMBasic | non scritto. **D2 non blocca il "come"**: i prerequisiti per compilarlo sono già su questa macchina (verificato 2026-09-22: 28 header in `GMBasic/libs/mlx-deps/mlx-c-src/mlx/c/*.h`, più `libmlx.a` 31 MB e `libmlxc.a` 1,0 MB in `libs/mlx-deps/precompiled/darwin-arm64`). D2 decide solo **chi possiede** il motore |
 | `src/cli/` (stile Ollama: `run\|chat\|serve\|pull\|ps\|models`) | non scritto. Il livello HTTP che deve servire **sì** |
 
@@ -191,6 +192,34 @@ socket nudi senza TLS come `gmb_network.c`. Gli SHA per la verifica vengono da `
 (`CC_SHA1`/`CC_SHA256`, header nell'SDK): una nostra copia di SHA1 sarebbe l'unico modo di
 sbagliarla in silenzio.
 
+## Manifesto dei file (`src/hf/fmlx_hf_manifest.c`) — la prerequisita di `pull`
+
+`fmlx_hf_manifest(repo, revision, opts, &out)` chiede **una** GET di metadati
+(`{endpoint}/api/models/{repo}[/revision/{quote(rev)}]?blobs=true`, la rotta esatta di
+`hf_api.py:2648-2657`) e restituisce `sha` + la lista di `siblings[].{rfilename,size,blobId,lfs}`.
+Perché un file suo: il download parla di UN file e scrive nel cache, il manifesto parla di TUTTI i
+file e nel cache **non ci mette nulla** (huggingface_hub non scrive i manifesti — e infatti
+`offline` qui è un RIFIUTO, non "lista dal cache"). `tests/hf/test_hf_manifest.c` (19 casi, 51
+verifiche) gira senza rete su un transport finto e prova anche che `meta`/`get` non vengono mai
+chiamati.
+
+Le due decisioni che sembrano pignole e sono il motivo per cui il file esiste:
+
+- **un `siblings` vuoto è un ERRORE, non un repo da zero file** (`ERR_HTTP`): è ciò che
+  `_snapshot_download.py:259-264` dichiara inaffidabile, e un `pull` che non scarica "niente"
+  sembra un successo;
+- **un `rfilename` ostile non si salta, si rifiuta tutto** (`ERR_NAME`): `../`, path assoluti,
+  nomi oltre `FMLX_HF_PATH_MAX`. Saltare un file di un repo che si sta scaricando intero è il
+  risultato silenzioso che il piano vieta.
+
+**Misurato sul server vero** (`build/hf_manifest_probe`, fuori da `ctest`): `bert-base-uncased` →
+commit `86b5e093…`, 16 file, 7 con `lfs`, `blobId` **40 hex in tutti e 16 i casi**;
+`mlx-community/Meta-Llama-3.1-8B-Instruct-4bit` → 8 file. Da lì una trappola smontata prima di
+caderci: il `blobId` del manifesto è il **git blob id**, ma un file LFS nel cache si chiama con lo
+**sha256** preso dall'etag (misurato sugli stessi repo: `X-Linked-ETag` a 64 hex su
+`model.safetensors`, e `config.json` non-LFS dove le due cose coincidono). Il campo si chiama
+quindi `git_blob_id`, e `pull` deve chiedere il NOME al download lane — mai dedurlo dal manifesto.
+
 ## La lane HTTP (`src/server/fmlx_http.c`)
 
 Il pezzo che tocca per primo i byte che arrivano da internet, e che sta **sotto** gli adapter. Qui
@@ -284,18 +313,22 @@ l'orologio o un RNG renderebbe ogni test non deterministico.
 ```sh
 cmake -S . -B build
 cmake --build build          # -Wall -Wextra -Werror
-ctest --test-dir build --output-on-failure   # 9 suite, nessuna tocca la rete
+ctest --test-dir build --output-on-failure   # 10 suite, nessuna tocca la rete
 ./build/fmlx_gguf_inspect <file.gguf>   # testata, tipi, allineamento, coda di byte
 ./build/hf_probe --tree <org>/<repo> [<rev>]   # cache HF reale: locate + verifica, sola lettura
 HF_HUB_CACHE=work/probe-cache ./build/hf_fetch_probe <org>/<repo> [<rev>] [<file>] [<max byte>]
                                          # download VERO, in una cache di lavoro: mai la reale
+./build/hf_manifest_probe <org>/<repo> [<rev>]
+                                         # UNA richiesta di metadati: lista i file, zero byte di modello
 ```
 
-`hf_probe` è l'unico contatto con i dati reali ed è **in fuori da `ctest` di proposito**: la suite
-devve girare su una macchina senza cache e senza rete. La sua ragione di esistere è che un parser
-testato solo su fixture sintetiche può essere coerente con se stesso e sbagliato col mondo — è
-esattamente ciò che è successo alla tabella dei tipi (vedi sopra), e il cache reale di questa
-macchina ha due radici diverse (`HF_HOME` e `~/.cache`) che il probe distingue da solo.
+Tre sonde toccano il mondo reale, e stanno **fuori da `ctest` di proposito**: la suite deve girare
+su una macchina senza cache e senza rete. `hf_probe` legge il cache HF di questa macchina (sola
+lettura), `hf_fetch_probe` scarica, `hf_manifest_probe` chiede al server la lista dei file. La loro
+ragione di esistere è che un parser testato solo su fixture sintetiche può essere coerente con se
+stesso e sbagliato col mondo — è esattamente ciò che è successo alla tabella dei tipi (vedi sopra),
+e il cache reale di questa macchina ha due radici diverse (`HF_HOME` e `~/.cache`) che il probe
+distingue da solo.
 
 La suite (`tests/gguf/test_gguf.c`) **non scarica nulla**: i file validi si scrivono col writer
 di fixture del progetto stesso, i file malati si costruiscono byte per byte. Copre i casi (a)–(g)
