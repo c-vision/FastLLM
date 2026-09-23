@@ -3,6 +3,14 @@
  * questa macchina (vedi --check); se una copia diverge, lo script rifiuta
  * di scrivere. Provenienza: tabelle codebook ggml (licenza MIT, vedi
  * LICENSES.md) quali sono in ds4.c e nei duplicati del vault GMBasic.
+ *
+ * Asimmetria da conoscere, perché cambia come si legge questo file:
+ * iq2xxs_grid/ksigns hanno DUE AUTORI distinti (ds4 e la linea ggml di
+ * GMBasic) che dicono gli stessi valori; kvalues_iq4nl ha invece DUE
+ * VERSIONI di ggml, che esclude la deriva di versione ma non un errore di
+ * conception. A kvalues_fp4 questo non è bastato: i suoi 16 valori sono
+ * anche derivati qui dai bit E2M1 della specifica OCP MX, che è l'unico
+ * testimone che non è la copia di qualcuno.
  */
 #ifndef FMLX_IQ2_TABLES_H
 #define FMLX_IQ2_TABLES_H
@@ -97,6 +105,18 @@ static const uint64_t fmlx_iq2xxs_grid[256] = {
     0x2b19190819081908, 0x2b19191919190819, 0x2b192b082b080819, 0x2b192b19082b0808,
     0x2b2b08080808082b, 0x2b2b080819190808, 0x2b2b08082b081919, 0x2b2b081908082b19,
     0x2b2b082b08080808, 0x2b2b190808192b08, 0x2b2b2b0819190808, 0x2b2b2b1908081908
+};
+
+/* kvalues_fp4: 16 voci (confermata da ggml_main, ggml_vendored) */
+static const int8_t fmlx_kvalues_fp4[16] = {
+        0,     1,     2,     3,     4,     6,     8,    12,
+        0,    -1,    -2,    -3,    -4,    -6,    -8,   -12
+};
+
+/* kvalues_iq4nl: 16 voci (confermata da ggml_main, ggml_vendored) */
+static const int8_t fmlx_kvalues_iq4nl[16] = {
+     -127,  -104,   -83,   -65,   -49,   -35,   -22,   -10,
+        1,    13,    25,    38,    53,    69,    89,   113
 };
 
 #endif /* FMLX_IQ2_TABLES_H */

@@ -24,7 +24,8 @@
  *      -I "$G/native/gmb_moe_runtime/include" -I "$G/native/gmb_moe_runtime/src" \
  *      -I "$L/ggml/src" -I "$L/ggml/include" \
  *      tools/quant_diff.c tools/quant_diff_ggml.c src/lane_gguf/fmlx_gguf.c \
- *      src/lane_gguf/fmlx_quant.c "$G/native/gmb_moe_runtime/src/gmb_moe_ggml.c" \
+ *      src/lane_gguf/fmlx_quant.c src/lane_gguf/fmlx_quant_ext.c \
+ *      "$G/native/gmb_moe_runtime/src/gmb_moe_ggml.c" \
  *      -L "$L/build/bin" -lggml-base -Wl,-rpath,"$L/build/bin" -o build/quant_diff
  * Uso: build/quant_diff <file.gguf> [...]      oppure   build/quant_diff --synthetic
  *      exit 0 = nessun bit divergente, 1 = anche UN solo bit diverge,
@@ -42,6 +43,7 @@ int ggc_dequant_row(int type, const uint8_t *bytes, int64_t n, float *dst);
 uint64_t ggc_row_bytes(int type, int64_t n);
 int ggc_type_count(void);
 uint64_t ggc_row_bytes_any(int type, int64_t n);
+uint32_t ggc_f16_bits(uint16_t h);
 
 #include <inttypes.h>
 #include <stdio.h>
@@ -187,28 +189,29 @@ static int one(const char *path) {
  * dati veri — basta che le due implementazioni leggano gli STESSI byte. Byte pseudo-casuali
  * con seed fisso = deterministico; per gli IQ questo esplora anche gli indici di griglia. */
 static int synthetic(void) {
-    static const int types[] = { 0, 1, 2, 8, 10, 12, 13, 14, 16, 24, 25, 26, 30 };
     unsigned char bytes[SAMPLE_ELEMS * 4];
     uint64_t bad = 0, seed = 20260922u;
     size_t i;
+    int t;
     printf("synthetic (blocchi pseudo-casuali, seed %" PRIu32 ")\n", (uint32_t)seed);
     for (i = 0; i < sizeof bytes; i++) {
         seed = seed * 1103515245u + 12345u;
         bytes[i] = (unsigned char)(seed >> 16);
     }
-    for (i = 0; i < sizeof types / sizeof *types; i++) {
-        const FmlxGgmlType *ty = fmlx_ggml_type(types[(int)i]);
+    /* La lista dei tipi ERA un `static const int types[]` mantenuto a mano, e ha già
+     * morso: aggiungendo IQ4_NL/IQ4_XS/MXFP4/NVFP4 alla tabella e alla copertura, questo
+     * giro li ha saltati in silenzio — l'ASSE 2 (forma, derivato dalla tabella) li contava
+     * e l'asse 1 (bit) no. Un elenco di verità scritto a mano accanto alla tabella che
+     * dovrebbe sostituirsi è un SECONDO posto dove divergere: ora si itera la tabella. */
+    for (t = 0; t <= FMLX_GGML_TYPE_MAX; t++) {
+        const FmlxGgmlType *ty = fmlx_ggml_type(t);
         uint64_t bs, elems;
-        if (!ty) {
-            printf("    tipo %d: assente dalla tabella, il test è sbagliato PRIMA dei dati\n",
-                   types[(int)i]);
-            bad++;
-            continue;
-        }
+        if (!ty || !ty->usable) continue;
+        if (!fmlx_ggml_type_is_covered(t)) continue;   /* non coperto: niente da confrontare */
         bs = ty->block_vals;
         elems = SAMPLE_ELEMS - (SAMPLE_ELEMS % bs);
-        if (!ty->usable || elems == 0) continue;
-        compare(types[(int)i], bytes, elems, "synthetic", &bad);
+        if (elems == 0) continue;
+        compare(t, bytes, elems, "synthetic", &bad);
     }
     return bad ? 1 : 0;
 }
@@ -305,6 +308,33 @@ static int coverage_audit(void) {
     return bad ? 1 : 0;
 }
 
+/* Il convertitore f16->f32 è USATO DA OGNI dequant (ogni `d` è un half), e i test sui blocchi
+ * lo coprono solo per i pattern che capitano. Qui si girano TUTTI I 65536 pattern e si
+ * confrontano i BIT del risultato con quelli di ggml: un convertitore che diverge sugli NaN
+ * darebbe risultati "nan vs nan" ovunque e in nessun posto — esattamente il tipo di difetto
+ * che un soffitto verde non vede. */
+static int f16_exhaustive(void) {
+    uint32_t h, bad = 0;
+    int shown = 0;
+    for (h = 0; h < 65536u; h++) {
+        uint16_t s = (uint16_t)h;
+        uint32_t mine_bits, gg_bits;
+        float f = fmlx_ggml_f16_to_f32(s);
+        memcpy(&mine_bits, &f, 4);
+        gg_bits = ggc_f16_bits(s);
+        if (mine_bits != gg_bits) {
+            bad++;
+            if (shown < 6) {
+                printf("    f16 0x%04x: nostri 0x%08x, ggml 0x%08x\n", s, mine_bits, gg_bits);
+                shown++;
+            }
+        }
+    }
+    printf("f16->f32 esaustivo: 65536 pattern, %u bit-diversi%s\n", bad,
+           bad ? " (mostrati i primi 6)" : "");
+    return bad ? 1 : 0;
+}
+
 int main(int argc, char **argv) {
     int i, div = 0, io = 0;
     if (argc < 2) {
@@ -324,6 +354,7 @@ int main(int argc, char **argv) {
         else div |= r;
     }
     div |= synthetic();
+    div |= f16_exhaustive();
     div |= coverage_audit();
     if (io) {
         printf("ESITO: almeno un file NON è stato aperto — nessun verdetto sui bit "

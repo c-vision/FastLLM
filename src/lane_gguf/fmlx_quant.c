@@ -7,15 +7,10 @@
  * possibile resta NOT_COVERED: errore esplicito, mai valori inventati.
  */
 #include "fmlx/fmlx_quant.h"
+#include "fmlx_quant_internal.h"
 #include "fmlx_iq2_tables.h" /* GENERATO: vedi tools/gen_codebooks.py */
 
 #include <string.h>
-
-static inline uint16_t ld16(const uint8_t *p) {
-    uint16_t v;
-    memcpy(&v, p, 2);
-    return v;
-}
 
 float fmlx_ggml_f16_to_f32(uint16_t h) {
     uint32_t s = (uint32_t)(h & 0x8000u) << 16;
@@ -35,6 +30,12 @@ float fmlx_ggml_f16_to_f32(uint16_t h) {
             u = s | (e << 23) | (m << 13);
         }
     } else if (e == 31) {
+        /* Inf (m == 0) va copiato così com'è; un NaN SEGNALATO (bit 10 della mantissa
+         * spento) va QUIETATO: `ggml_fp16_to_fp32` arriva a un moltiplicatore che imposta
+         * il bit più alto della mantissa, e il gate esaustivo sui 65536 pattern misura la
+         * divergenza esattamente in 1022 = 2 segni × 511 mantisse con bit 10 spento.
+         * Fuori da quell'insieme i due codici non divergono di un bit. */
+        if (m && !(m & 0x200u)) m |= 0x200u;
         u = s | 0x7F800000u | (m << 13); /* inf / NaN */
     } else {
         u = s | ((e - 15 + 127) << 23) | (m << 13);
@@ -68,9 +69,15 @@ int fmlx_ggml_type_is_covered(int type) {
     switch (type) {
     case 0:  /* F32  */ case 1:  /* F16  */ case 30: /* BF16 */
     case 2:  /* Q4_0 */ case 8:  /* Q8_0 */
-    case 10: /* Q2_K */ case 12: /* Q4_K */ case 13: /* Q5_K */ case 14: /* Q6_K */
+    case 3:  /* Q4_1 */ case 6:  /* Q5_0 */ case 7:  /* Q5_1 */
+    case 10: /* Q2_K */ case 11: /* Q3_K */ case 12: /* Q4_K */ case 13: /* Q5_K */
+    case 14: /* Q6_K */ case 15: /* Q8_K */
     case 16: /* IQ2_XXS */
     case 24: /* I8   */ case 25: /* I16  */ case 26: /* I32  */
+    case 20: /* IQ4_NL */ case 23: /* IQ4_XS */
+    case 34: /* TQ1_0 */ case 35: /* TQ2_0 */
+    case 39: /* MXFP4 */ case 40: /* NVFP4 */
+    case 41: /* Q1_0  */
         return 1;
     default:
         return 0;
@@ -270,11 +277,23 @@ FmlxGgufStatus fmlx_ggml_dequant_row(int type, const uint8_t *src, uint64_t n, f
     case 2:
         dq_q4_0(src, nblk, dst);
         return FMLX_GGUF_OK;
+    case 3:
+        fmlx_dq_q4_1(src, nblk, dst);
+        return FMLX_GGUF_OK;
+    case 6:
+        fmlx_dq_q5_0(src, nblk, dst);
+        return FMLX_GGUF_OK;
+    case 7:
+        fmlx_dq_q5_1(src, nblk, dst);
+        return FMLX_GGUF_OK;
     case 8:
         dq_q8_0(src, nblk, dst);
         return FMLX_GGUF_OK;
     case 10:
         dq_q2_k(src, nblk, dst);
+        return FMLX_GGUF_OK;
+    case 11:
+        fmlx_dq_q3_k(src, nblk, dst);
         return FMLX_GGUF_OK;
     case 12:
         dq_qk(src, nblk, dst, 0);
@@ -284,6 +303,9 @@ FmlxGgufStatus fmlx_ggml_dequant_row(int type, const uint8_t *src, uint64_t n, f
         return FMLX_GGUF_OK;
     case 14:
         dq_q6_k(src, nblk, dst);
+        return FMLX_GGUF_OK;
+    case 15:
+        fmlx_dq_q8_k(src, nblk, dst);
         return FMLX_GGUF_OK;
     case 16:
         dq_iq2_xxs(src, nblk, dst);
@@ -311,6 +333,27 @@ FmlxGgufStatus fmlx_ggml_dequant_row(int type, const uint8_t *src, uint64_t n, f
         }
         return FMLX_GGUF_OK;
     }
+    case 20:
+        fmlx_dq_iq4_nl(src, nblk, dst);
+        return FMLX_GGUF_OK;
+    case 23:
+        fmlx_dq_iq4_xs(src, nblk, dst);
+        return FMLX_GGUF_OK;
+    case 34:
+        fmlx_dq_tq1_0(src, nblk, dst);
+        return FMLX_GGUF_OK;
+    case 35:
+        fmlx_dq_tq2_0(src, nblk, dst);
+        return FMLX_GGUF_OK;
+    case 39:
+        fmlx_dq_mxfp4(src, nblk, dst);
+        return FMLX_GGUF_OK;
+    case 40:
+        fmlx_dq_nvfp4(src, nblk, dst);
+        return FMLX_GGUF_OK;
+    case 41:
+        fmlx_dq_q1_0(src, nblk, dst);
+        return FMLX_GGUF_OK;
     default:
         return FMLX_GGUF_ERR_NOT_COVERED;
     }

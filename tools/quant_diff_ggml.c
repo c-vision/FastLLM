@@ -84,10 +84,38 @@ int ggc_block_vals(int type) {
 }
 
 /* 1 = il testimone C conosce `type` e ha scritto `n` float in `dst`.
- * Ritorna 0 SENZA TOCCARE `dst` per ogni tipo che ggml non dequantizza (F32/F16/BF16/I*
- * sono copia diretta in ggml, non hanno un dequantize_row_*; Q8_1, Q4_2, Q4_3 idem). */
+ * Ritorna 0 SENZA TOCCARE `dst` per ogni tipo che ggml non dequantizza (I*, Q8_1, Q4_2,
+ * Q4_3 idem).
+ *
+ * F32/F16/BF16 (0, 1, 30) NON hanno un `dequantize_row_*`: in ggml sono una copia con
+ * conversione, fatta dalle `ggml_*_to_fp32_row` esportate. Sono testimoni a tutti gli
+ * effetti — è lì che si vede se la ns. conversione f16 quieta gli NaN come quella che
+ * gira nei modelli veri — e prima di questa riga il tipo 1 arrivava senza alcun
+ * testimone C, quindi la ns. scelta sul NaN era ARGOMENTATA e non CONFRONTATA. */
 int ggc_dequant_row(int type, const uint8_t *bytes, int64_t n, float *dst) {
-    if (n % ggc_block_vals(type)) return 0; /* 0 % ... = 0: tipo ignoto ricade qui */
+    int bv;
+    switch (type) {
+    case 0: /* F32: identità bit per bit */
+        if (n <= 0) return 0;
+        memcpy(dst, bytes, (size_t)n * sizeof(float));
+        return 1;
+    case 1: /* F16 */
+        if (n <= 0) return 0;
+        ggml_fp16_to_fp32_row((const ggml_fp16_t *)bytes, dst, n);
+        return 1;
+    case 30: /* BF16 */
+        if (n <= 0) return 0;
+        ggml_bf16_to_fp32_row((const ggml_bf16_t *)bytes, dst, n);
+        return 1;
+    default: break;
+    }
+    bv = ggc_block_vals(type);
+    if (bv == 0) return 0; /* nessun dequantize_row_* per questo valore */
+    if (n % bv) return 0;  /* era `n % ggc_block_vals(type)`: con 0 a lato è UB, su
+                            * AArch64 un sdiv per zero RESTITUISCE 0 senza intrappolare,
+                            * quindi il controllo non scattava e il tipo sconosciuto
+                            * ricadeva nel default per puro caso. Su altre piattaforme
+                            * è SIGFPE. */
     switch (type) {
     case 2:  dequantize_row_q4_0((const block_q4_0 *)bytes, dst, n); return 1;
     case 3:  dequantize_row_q4_1((const block_q4_1 *)bytes, dst, n); return 1;
@@ -141,4 +169,18 @@ int ggc_type_count(void) {
 uint64_t ggc_row_bytes_any(int type, int64_t n) {
     if (type < 0 || type >= (int)GGML_TYPE_COUNT || n <= 0) return 0;
     return (uint64_t)ggml_row_size((enum ggml_type)type, n);
+}
+
+/* La conversione f16->f32 CHE GGML USA NEI SUOI DEQUANT. Si chiama la funzione ESPORTATA
+ * dalla libreria linkata (`ggml.c:448`, il cui corpo è esattamente la macro
+ * `GGML_FP16_TO_FP32`), non una sua copia qui dentro: includere `ggml-impl.h` per la macro
+ * avrebbe portato nella nostra unità le sue `static inline` non usate — 11
+ * `-Wunused-function` con `-Werror`. Serve al confronto ESAUSTIVO sui 65536 pattern: i
+ * dequant moltiplicano la scala, quindi un NaN con payload diverso di solito non si vede —
+ * Q1_0 invece COPIA la scala, e lì il payload emerge. */
+uint32_t ggc_f16_bits(uint16_t h) {
+    float f = ggml_fp16_to_fp32(h);
+    uint32_t bits;
+    memcpy(&bits, &f, 4);
+    return bits;
 }

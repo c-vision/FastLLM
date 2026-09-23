@@ -12,8 +12,13 @@ if(FASTMLX_WERROR)
 endif()
 
 # --- lane_gguf: il lettore GGUF di riferimento (nessun cap, allineamento onorato) ----
-add_library(fmlx_gguf STATIC src/lane_gguf/fmlx_gguf.c src/lane_gguf/fmlx_quant.c)
+# Tre file perché due contratti diversi: `quant.c` smista e conosce il rifiuto, `quant_ext.c`
+# è SOLA aritmetica, `quant_iq.c` ha bisogno delle codebook generate da tools/gen_codebooks.py
+# (e per questo legge un header accanto a sé, da cui il include dir qui sotto).
+add_library(fmlx_gguf STATIC src/lane_gguf/fmlx_gguf.c src/lane_gguf/fmlx_quant.c
+                             src/lane_gguf/fmlx_quant_ext.c src/lane_gguf/fmlx_quant_iq.c)
 target_include_directories(fmlx_gguf PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_include_directories(fmlx_gguf PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/lane_gguf)
 
 enable_testing()
 

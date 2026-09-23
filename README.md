@@ -10,7 +10,7 @@ da Hugging Face). Piano completo: `AiWiki/01-Projects/FastMLX/Piani/(open) - Fas
 | componente | stato |
 |---|---|
 | `src/lane_gguf/fmlx_gguf.c` — lettore GGUF di riferimento | **esiste, compilato, testato** (259 verifiche) |
-| `src/lane_gguf/fmlx_quant.c` — dequant ggml → F32 (13 tipi) | **esiste, compilato, testato** (461 verifiche + gate differenziale) |
+| `src/lane_gguf/fmlx_quant.c` + `fmlx_quant_ext.c` + `fmlx_quant_iq.c` — dequant ggml → F32 (25 tipi) | **esiste, compilato, testato** (461 verifiche + gate differenziale) |
 | `src/hf/fmlx_hf_cache.c` + `fmlx_hf_hash.c` — cache HF letto, senza rete | **esiste, compilato, testato** (131 verifiche + sonda sul cache reale) |
 | `src/hf/fmlx_hf_fetch.c` + `fmlx_hf_curl.c` — download, lock, resume, watchdog di stall, backend classico su repo xet | **esiste, compilato, testato** (199 verifiche senza rete + probe sul server vero; il watchdog su rete reale NON è ancora misurato) |
 | `src/hf/fmlx_hf_manifest.c` — lista dei file di un repo (ciò che serve a `pull` per sapere COSA scaricare) | **esiste, compilato, testato** (51 verifiche senza rete + sonda sul server vero: `bert-base-uncased` 16 file, commit `86b5e09…`, 7 con `lfs`) |
@@ -65,28 +65,42 @@ pesi), `fmlx_gguf_parse` (stesso parser su un buffer in memoria), `fmlx_gguf_rea
 
 ## La lane di dequant oggi
 
-`include/fmlx/fmlx_quant.h` + `src/lane_gguf/fmlx_quant.c`: `fmlx_ggml_dequant_row(type, src, n,
-dst)` converte una riga di `n` elementi in F32. Copre **13** tipi: F32, F16, BF16, Q4_0, Q8_0,
-Q2_K, Q4_K, Q5_K, Q6_K, **IQ2_XXS**, I8, I16, I32. Non è una scelta di comodo: ogni tipo è entrato
-perché esiste un **secondo codice** con cui confrontarlo bit a bit — oggi i codici indipendenti
-confrontati dal gate sono tre (due di casa + `ggml` di llama.cpp) e i 13 sono esatti su tutti e
-tre. Tutto il resto (Q4_1, Q5_0/1, Q8_1, Q3_K, Q8_K, gli altri IQ, TQ*, MXFP4, NVFP4, Q1_0, I64,
-F64) ritorna `FMLX_GGUF_ERR_NOT_COVERED` e **non tocca `dst`**: gap dichiarato, non uno stub che
+`include/fmlx/fmlx_quant.h` + `src/lane_gguf/fmlx_quant.c` (smistamento e rifiuto) +
+`fmlx_quant_ext.c` (sola aritmetica) + `fmlx_quant_iq.c` (valori che escono da una codebook):
+`fmlx_ggml_dequant_row(type, src, n, dst)` converte una riga di `n` elementi in F32. Copre **21**
+tipi: F32, F16, BF16, Q4_0, **Q4_1**, **Q5_0**, **Q5_1**, Q8_0, Q2_K, **Q3_K**, Q4_K, Q5_K, Q6_K,
+**Q8_K**, **IQ2_XXS**, I8, I16, I32, **IQ4_NL**, **IQ4_XS**, **TQ1_0**, **TQ2_0**, **MXFP4**,
+**NVFP4**, **Q1_0**. Non è una scelta di comodo:
+ogni tipo è entrato perché esiste un **secondo codice** con cui confrontarlo bit a bit — oggi i
+codici indipendenti confrontati dal gate sono tre (due di casa + `ggml` di llama.cpp) e i 25 sono
+esatti su almeno uno, dove gli altri due ce l'hanno. Tutto il resto (Q8_1, Q4_2/3, i sei IQ
+rimasti, I64, F64) ritorna
+`FMLX_GGUF_ERR_NOT_COVERED` e **non tocca `dst`**: gap dichiarato, non uno stub che
 rimette zeri. `fmlx_ggml_type_is_covered` permette di saperlo prima di copiare byte.
 
-**18 di quei gap sono già colmabili** — il gate li enumera uno per uno con i testimoni pronti
-(Q4_1, Q5_0, Q5_1, Q3_K, Q8_K, IQ2_XS, IQ3_XXS, IQ1_S, IQ4_NL, IQ3_S, IQ2_S, IQ4_XS, IQ1_M,
-TQ1_0, TQ2_0, MXFP4, NVFP4, Q1_0: tutti con `ggml` come secondo codice). Sono il lavoro di
-dequant successivo, non una promessa: un tipo entra solo quando la SUA riga passa, non prima.
+**6 di quei gap sono già colmabili** — il gate li enumera uno per uno con i testimoni pronti
+(IQ2_XS, IQ3_XXS, IQ1_S, IQ3_S, IQ2_S, IQ1_M: tutti con `ggml` come
+secondo codice). Sono il lavoro di dequant successivo, non una promessa. Usciranno dal
+lotto solo con una passata **esaustiva per indice**, non a campione: un codebook da 256/512/1024/
+2048 voci lasciato a campioni sarebbe un soffitto verde (vedi sotto, la lezione del NaN). Le
+loro tabelle sono già nel generatore (`tools/gen_codebooks.py` incrocia `iq2xxs_grid` e
+`iq2_ksigns` su tre copie e non scrive se divergono); mancano `iq2xs_grid` (512), `iq2s_grid`
+(1024), `iq3xxs_grid` (256), `iq3s_grid` (512), `iq1s_grid` (2048) e `iq1s_grid_gpu` (2048).
 
 Conseguenza misurata: **ogni tensore dei 7 GGUF presenti su questa macchina è di un tipo
 coperto** (istogrammi: `F32 F16 Q8_0 Q2_K Q4_K Q6_K IQ2_XXS I32 BF16`), e il gate sotto lo
 conferma bit a bit su quei tensori reali.
 
 Le codebook IQ2 (`src/lane_gguf/fmlx_iq2_tables.h`) sono **generate**, non trascritte a mano:
-`python3 tools/gen_codebooks.py --check` confronta voce per voce le tre copie indipendenti su
-disco (ds4 + i due duplicati del vault GMBasic) e rifiuta di scrivere se divergono anche di uno
-solo dei 256×64 + 128×8 bit. Licenza MIT ggml: vedi `LICENSES.md`.
+`python3 tools/gen_codebooks.py --check` confronta voce per voce le copie indipendenti su
+disco e rifiuta di scrivere se divergono anche di uno solo dei 256×64 + 128×8 bit. Le due
+classi di prova non sono la stessa cosa e il file generato lo dice:
+`iq2xxs_grid`/`iq2_ksigns` hanno **due autori distinti** (ds4 + la linea ggml dei duplicati
+GMBasic); `kvalues_iq4nl` ha invece **due versioni di ggml** (`~/llamacpp` e il vendor dentro
+GMBasic), che esclude la deriva di versione ma non un errore di conception; `kvalues_fp4` ha
+un testimone che non è una copia — lo script **ricalcola i 16 valori dai bit E2M1** della
+specifica OCP MX (è `derived_e2m1_doubled`, e il check è stato verificato capace di andare
+rosso). Licenza MIT ggml: vedi `LICENSES.md`.
 
 ## La lane HF (cache) oggi
 
@@ -541,22 +555,28 @@ bisogno di quei sorgenti e della libreria già costruita su questa macchina. Si 
 ```sh
 G=~/Documents/Projects/GMBasic
 L=~/llamacpp
-cc -Wall -Wextra -Werror -std=gnu17 -I include -I "$G/native/gmb_host_ai_mlx" \
+cc -Wall -Wextra -Werror -std=gnu17 -I include -I src/lane_gguf -I "$G/native/gmb_host_ai_mlx" \
    -I "$G/native/gmb_moe_runtime/include" -I "$G/native/gmb_moe_runtime/src" \
    -I "$L/ggml/src" -I "$L/ggml/include" \
    tools/quant_diff.c tools/quant_diff_ggml.c src/lane_gguf/fmlx_gguf.c \
-   src/lane_gguf/fmlx_quant.c "$G/native/gmb_moe_runtime/src/gmb_moe_ggml.c" \
+   src/lane_gguf/fmlx_quant.c src/lane_gguf/fmlx_quant_ext.c \
+   src/lane_gguf/fmlx_quant_iq.c \
+   "$G/native/gmb_moe_runtime/src/gmb_moe_ggml.c" \
    -L "$L/build/bin" -lggml-base -Wl,-rpath,"$L/build/bin" -o build/quant_diff
 ./build/quant_diff ~/ai/Models/gguf/*.gguf ~/ds4/ds4flash.gguf
+./build/quant_diff --synthetic          # blocchi pseudo-casuali + sweep ESAUSTIVO f16->f32
 ```
 
 Esito a tre valori, volutamente: `0` nessun bit divergente, `1` divergenze, `2` **almeno un file
 non si è aperto** — che non è un verdetto sui bit e non va mai stampato come se lo fosse. Il gate
 segnala anche il caso "due testimoni divergono tra loro", che è un bug da aprire dove quei codici
-vivono (vault GMBasic per A e B), non una scelta di questo progetto.
+vivono (vault GMBasic per A e B), non una scelta di questo progetto — ed è già successo: oggi
+`tipo 1` (F16) è bit-esatto con ggml e DIVERSO da A e B per il solo payload degli NaN segnalati
+(`GMBasic/Bugs/(open) - GGUF-F16-Nan-Segnalandi-Non-Quietato.md`). Il gate resta rosso su quella
+riga finché non è sistemata lì: **non** si assorbe e non si zittisce.
 
 Lo stesso eseguibile fa l'**audit** su due assi (`34 tipi confrontati sui bit, 42 forme confrontate
-con ggml, 0 incoerenze, 18 gap colmabili`):
+con ggml, 0 incoerenze, 6 gap colmabili`):
 * **bit** — `is_covered` non può mai asserire una copertura che nessun secondo codice conferma;
   il caso inverso (un testimone copre e noi no) NON è un fallimento ma una **lista di gap
   colmabili**, cioè il lavoro che si può fare restando dentro la regola;

@@ -115,17 +115,19 @@ static void test_iq2_xxs_by_hand(void) {
 }
 
 /* Il rifiuto non deve lasciare valori in `dst`: è il modo in cui i lettori di casa
- * producono pesi a zero senza dire niente. */
+ * producono pesi a zero senza dire niente. L'elenco da rifiutare NON è una lista a mano:
+ * era `bad[] = {3, 4, 5, 11, 15, 17, ...}`, e quando i tipi 3/11/15 sono diventati coperti
+ * il test è arancione da solo — il che va bene — ma la lista non diceva MAI a nessuno di
+ * aggiornarla. Qui si iterà la tabella e si chiede a `is_covered` chi deve parlare. */
 static void test_refusal_does_not_write(void) {
-    static const int bad[] = { 3, 4, 5, 11, 15, 17, 18, 20, 31, 999 };
     uint8_t src[4096];
     float y[1024];
-    size_t k;
+    int t;
     memset(src, 0x5A, sizeof src);
-    for (k = 0; k < sizeof bad / sizeof *bad; k++) {
-        int t = bad[k];
+    for (t = 0; t <= FMLX_GGML_TYPE_MAX; t++) {
         uint64_t i;
         FmlxGgufStatus s;
+        if (fmlx_ggml_type_is_covered(t) || !fmlx_ggml_type(t)) continue;
         for (i = 0; i < 1024; i++) y[i] = 7.5f;
         s = fmlx_ggml_dequant_row(t, src, 1024, y);
         CHECK(s != FMLX_GGUF_OK, "tipo %d: ritornato OK, il gap non doveva essere silenzioso",
@@ -153,17 +155,16 @@ static void test_refusal_does_not_write(void) {
 #define NELEM   2048u /* multipla di 1, 32 e 256: tutti i blocchi della tabella */
 #define SRC_CAP 8192u /* il tipo più esigente a 2048 elementi è F32: 2048 * 4 byte */
 static void test_zero_blocks(void) {
-    static const int covered[] = { 0, 1, 2, 8, 10, 12, 13, 14, 16, 24, 25, 26, 30 };
     uint8_t src[SRC_CAP];
     float y[NELEM];
-    size_t k;
+    int t;
     memset(src, 0, sizeof src);
-    for (k = 0; k < sizeof covered / sizeof *covered; k++) {
-        int t = covered[k];
+    for (t = 0; t <= FMLX_GGML_TYPE_MAX; t++) {
         const FmlxGgmlType *ty = fmlx_ggml_type(t);
         uint64_t bs = ty ? ty->block_vals : 1, rowb = 0, n, i;
         FmlxGgufStatus s;
-        CHECK(ty != NULL, "tipo %d assente dalla tabella", t);
+        if (!fmlx_ggml_type_is_covered(t)) continue; /* il resto è nel test sopra */
+        CHECK(ty != NULL, "tipo %d coperto ma assente dalla tabella", t);
         if (!ty) continue;
         n = NELEM - (NELEM % bs);
         /* Il contratto di dequant_row è che `src` contenga i byte della riga
@@ -179,12 +180,9 @@ static void test_zero_blocks(void) {
         for (i = 0; i < n && y[i] == 0.0f; i++) {}
         CHECK(i == n, "tipo %d: valore non nullo all'elemento %llu", t,
               (unsigned long long)i);
-        /* coerenza con is_covered: ciò che è coperto dequantizza, il contrario no */
-        CHECK(fmlx_ggml_type_is_covered(t) == 1, "tipo %d coperto ma is_covered dice no", t);
     }
     /* e per tutti i tipi della tabella: is_covered == (dequant ritorna OK su dati validi) */
     {
-        int t;
         for (t = 0; t <= FMLX_GGML_TYPE_MAX; t++) {
             const FmlxGgmlType *ty = fmlx_ggml_type(t);
             uint64_t rowb = 0, n;

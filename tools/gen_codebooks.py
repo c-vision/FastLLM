@@ -10,6 +10,12 @@ Le copie note (tutte locali, nessun download):
   * native/gmb_host_ai_mlx/gmb_iq2_tables.h  (duplicato nel vault GMBasic, lane MLX)
   * native/gmb_moe_runtime/src/gmb_moe_iq2_tables.h  (gemello, lane MoE)
   * <ds4>/ds4.c  (sorgente da cui i primi due dichiarano di essere generati)
+  * due checkout di llama.cpp su questa macchina, a VERSIONI DIVERSE (~/llamacpp e il
+    vendor dentro GMBasic): per le tabelle che esistono solo in ggml — kvalues_iq4nl e
+    kvalues_fp4 — due versioni dello stesso autore escludono la deriva di versione, NON
+    l'errore di conception. Per `kvalues_fp4` c'è di più: la tabella è RICAVATA qui sotto
+    dai bit E2M1 della specifica OCP MX, che è una prova indipendente dall'autore. Se il
+    letterale di ggml divergesse dalla derivazione, lo script rifiuta di scrivere.
 
 Uso:
     python3 tools/gen_codebooks.py --check [--ref GMBasic=<path>] [--ref ds4=<path>]
@@ -28,13 +34,41 @@ TABLES = {
     "iq2_ksigns":    {"ctype": "uint8_t",  "src": [("gmb_mlx", "gmb_iq2_ksigns"),
                                                     ("gmb_moe", "gmb_iq2_ksigns"),
                                                     ("ds4",     "ksigns_iq2xs")]},
+    # Le due kvalues sono le uniche tabelle di cui vive il dequant dei tipi 20/23/39/40:
+    # iq4_nl e iq4_xs condividono la prima, mxfp4 e nvfp4 condividono la seconda.
+    "kvalues_iq4nl": {"ctype": "int8_t",   "src": [("ggml_main",     "kvalues_iq4nl"),
+                                                    ("ggml_vendored", "kvalues_iq4nl")]},
+    "kvalues_fp4":   {"ctype": "int8_t",   "src": [("ggml_main",     "kvalues_fp4"),
+                                                    ("ggml_vendored", "kvalues_fp4")],
+                      "derive": "e2m1_doubled"},
 }
+
+# Valori attesi derivati dai BIT, non da una copia: e2m1 (1 segno, 2 esponente bias 1,
+# 1 mantissa) moltiplicato per 2, che è la convenzione di ggml ("e2m1 values (doubled)").
+# L'indice 8 è -0.0 e si scrive 0: è il motivo per cui la tabella NON è antisimmetrica.
+def derived_e2m1_doubled():
+    out = []
+    for code in range(16):
+        sgn, i = code >> 3, code & 7
+        e, m = i >> 1, i & 1
+        v = 0.5 * m if e == 0 else (2.0 ** (e - 1)) * (1.0 + 0.5 * m)
+        v *= -1 if sgn else 1
+        out.append(int(round(v * 2)))
+    return [0 if v == 0 else v for v in out]      # -0 -> 0, come (int8_t)
+
+DERIVATIONS = {"e2m1_doubled": derived_e2m1_doubled}
 
 DEF_RELS = {
     "gmb_mlx": "native/gmb_host_ai_mlx/gmb_iq2_tables.h",
     "gmb_moe": "native/gmb_moe_runtime/src/gmb_moe_iq2_tables.h",
     "ds4":     "ds4.c",
 }
+# I due checkout ggml sono cercati per path assoluto noto: sono FORI repo, non dipendenze.
+GGML_RELS = {
+    "ggml_main":     "ggml/src/ggml-common.h",
+    "ggml_vendored": "native/gmb_host_ai/build/_deps/llama_cpp-src/ggml/src/ggml-common.h",
+}
+GGML_ENV = {"ggml_main": "LLAMACPP_REPO", "ggml_vendored": "GMBASIC_REPO"}
 # Le etichette NON di questo progetto vivono accanto, su questa macchina: i default sono
 # percorsi candidati, non dipendenze hard (si possono sempre scavalcare con --ref).
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -43,31 +77,66 @@ SIBLINGS = [os.path.join(os.path.dirname(REPO_ROOT), "GMBasic"),
             os.path.expanduser("~/ds4")]
 
 
+ENV_FOR = {"gmb_mlx": "GMBASIC_REPO", "gmb_moe": "GMBASIC_REPO", "ds4": "DS4_REPO"}
+
+
 def default_ref(label):
+    """I percorsi qui sono CANDIDATI, non dipendenze: --ref scavalca sempre.
+
+    `ggml_main` e `ggml_vendored` non hanno una relazione con questo repo (non è un
+    submodule, non è un download): sono due checkout che esistono SU QUESTA MACCHINA a
+    versioni diverse. Se uno dei due manca, il controllo di deriva di versione non può
+    essere fatto e lo script rifiuta, invece di fidarsi di una copia sola.
+    """
+    if label in GGML_RELS:
+        env = os.environ.get(GGML_ENV[label])
+        cands = [os.path.join(os.path.expanduser(env), GGML_RELS[label])] if env else []
+        if label == "ggml_main":
+            cands += [os.path.join(p, GGML_RELS[label])
+                      for p in ("~/llamacpp", "~/llama.cpp", "~/ai/llamacpp")]
+        else:
+            cands += [os.path.join(b, GGML_RELS[label]) for b in SIBLINGS]
+        for p in cands:
+            p = os.path.expanduser(p)
+            if os.path.isfile(p):
+                return p
+        return None
     rel = DEF_RELS[label]
     for base in [os.getcwd(), REPO_ROOT] + SIBLINGS:
         p = os.path.join(base, rel)
         if os.path.isfile(p):
             return p
-    env = {"gmb_mlx": "GMBASIC_REPO", "gmb_moe": "GMBASIC_REPO", "ds4": "DS4_REPO"}[label]
-    root = os.environ.get(env)
-    if root:
-        p = os.path.join(os.path.expanduser(root), rel)
+    env = os.environ.get(ENV_FOR[label])
+    if env:
+        p = os.path.join(os.path.expanduser(env), rel)
         if os.path.isfile(p):
             return p
     return None
 
+# Le tabelle ggml moderne non sono `static const`: sono aperte da una macro il cui corpo
+# cambia a seconda del target (C, Metal, CUDA, `constant`), quindi il pattern è DUE.
 ARRAY_RE = r"static const\s+\w+\s+%s\[(\d+)\]\s*=\s*\{(.*?)\n\};"
+MACRO_RE = r"GGML_TABLE_BEGIN\(\s*\w+\s*,\s*%s\s*,\s*(\d+)\s*\)\s*(.*?)\n\s*GGML_TABLE_END"
 
 
 def parse_table(path, name):
-    """Ritorna (dichiarati, valori) oppure None se il nome non c'è."""
+    """Ritorna (dichiarati, valori) oppure None se il nome non c'è.
+
+    Il conteggio dichiarato nella macro NON è decorative: è il numero che ggml stessa
+    asserisce, e se i valori parsati sono di meno il `\n};` finale è stato mangiato da una
+    formattazione diversa. In quel caso si rifiuta, non si prende `len(vals)`.
+    """
     text = open(path, encoding="utf-8", errors="replace").read()
-    m = re.search(ARRAY_RE % re.escape(name), text, re.S)
+    for rx in (ARRAY_RE, MACRO_RE):
+        m = re.search(rx % re.escape(name), text, re.S)
+        if m:
+            break
     if not m:
         return None
     decl = int(m.group(1))
-    vals = [int(v, 0) for v in re.findall(r"0x[0-9a-fA-F]+|\b\d+\b", m.group(2))]
+    body = m.group(2)
+    vals = [int(v, 0) if not v.startswith("-") else -int(v[1:], 0)
+            for v in re.findall(r"-?0x[0-9a-fA-F]+|-?\b\d+\b", body)]
     return decl, vals
 
 
@@ -134,6 +203,33 @@ def fmt_rows(vals, ctype, per_line):
     return "\n".join(lines)
 
 
+def derivation_check(collected):
+    """Dove la tabella È derivabile dai bit, la copia non basta: si confronta coi bit.
+
+    Questo è l'unico controllo del file che non dipende da quello che qualcuno ha scritto:
+    i 16 valori `kvalues_fp4` sono funzione della sola codifica E2M1 (specifica OCP MX),
+    quindi se ggml e il nostro derivatore concordano, la concordanza non è ereditata.
+    """
+    bad = []
+    for canon, spec in TABLES.items():
+        how = spec.get("derive")
+        if not how:
+            continue
+        expect = DERIVATIONS[how]()
+        for label, (decl, vals) in sorted(collected[canon].items()):
+            if len(vals) != len(expect):
+                bad.append("%s/%s: %d valori, la derivazione ne produce %d"
+                           % (canon, label, len(vals), len(expect)))
+                continue
+            diff = [i for i in range(len(vals)) if vals[i] != expect[i]]
+            if diff:
+                i = diff[0]
+                bad.append("%s/%s: DIVERGE dalla derivazione dai bit su %d/%d voci "
+                           "(prima: [%d] copia %d, bit %d)"
+                           % (canon, label, len(diff), len(vals), i, vals[i], expect[i]))
+    return bad
+
+
 def emit(canon, spec, vals):
     per = 4 if spec["ctype"] == "uint64_t" else 8
     return ("static const %s fmlx_%s[%d] = {\n%s\n};\n"
@@ -156,7 +252,7 @@ def main():
             ap.error("--ref vuole ETICHETTA=FILE")
         k, v = r.split("=", 1)
         refs[k] = os.path.expanduser(v)
-    for k in DEF_RELS:
+    for k in list(DEF_RELS) + list(GGML_RELS):
         if k not in refs:
             p = default_ref(k)
             if p:
@@ -170,6 +266,7 @@ def main():
 
     collected, problems = collect(refs)
     problems += cross_check(collected)
+    problems += derivation_check(collected)
     for canon, copies in sorted(collected.items()):
         for lbl, (n, _) in sorted(copies.items()):
             print("  %-14s <- %-8s %4d voci in %s" % (canon, lbl, n, refs[lbl]))
@@ -186,6 +283,14 @@ def main():
                  " * questa macchina (vedi --check); se una copia diverge, lo script rifiuta",
                  " * di scrivere. Provenienza: tabelle codebook ggml (licenza MIT, vedi",
                  " * LICENSES.md) quali sono in ds4.c e nei duplicati del vault GMBasic.",
+                 " *",
+                 " * Asimmetria da conoscere, perché cambia come si legge questo file:",
+                 " * iq2xxs_grid/ksigns hanno DUE AUTORI distinti (ds4 e la linea ggml di",
+                 " * GMBasic) che dicono gli stessi valori; kvalues_iq4nl ha invece DUE",
+                 " * VERSIONI di ggml, che esclude la deriva di versione ma non un errore di",
+                 " * conception. A kvalues_fp4 questo non è bastato: i suoi 16 valori sono",
+                 " * anche derivati qui dai bit E2M1 della specifica OCP MX, che è l'unico",
+                 " * testimone che non è la copia di qualcuno.",
                  " */",
                  "#ifndef FMLX_IQ2_TABLES_H",
                  "#define FMLX_IQ2_TABLES_H",
