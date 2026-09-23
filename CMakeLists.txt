@@ -105,3 +105,19 @@ target_include_directories(fmlx_http PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 add_executable(test_http tests/http/test_http.c)
 target_link_libraries(test_http PRIVATE fmlx_http)
 add_test(NAME http COMMAND test_http)
+
+# --- lane_api: il layer ② — router, catalogo errori, adapter OpenAI/Anthropic -----------
+# Tre file perché due DIALETTI non stanno nello stesso file: il confine è quello che rende
+# leggibile "questa regola è del protocollo" versus "questa è del nostro motore". Il quarto
+# (fmlx_api.c) è ciò che i due dialetti DEVONO condividere, e che se duplicato li fa
+# divergere: il catalogo errori, la rotta, l'accumulatore, il ponte arguments<->input.
+add_library(fmlx_api STATIC
+    src/server/fmlx_api.c
+    src/server/fmlx_api_openai.c
+    src/server/fmlx_api_anthropic.c)
+target_include_directories(fmlx_api PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(fmlx_api PUBLIC fmlx_json fmlx_http)
+
+add_executable(test_api tests/api/test_api.c)
+target_link_libraries(test_api PRIVATE fmlx_api)
+add_test(NAME api COMMAND test_api)

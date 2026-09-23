@@ -15,8 +15,9 @@ da Hugging Face). Piano completo: `AiWiki/01-Projects/FastMLX/Piani/(open) - Fas
 | `src/hf/fmlx_hf_fetch.c` + `fmlx_hf_curl.c` — download, lock, resume, verifica | **esiste, compilato, testato** (172 verifiche senza rete + probe sul server vero) |
 | `src/json/fmlx_json.c` + `fmlx_jsonw.c` — parser e writer JSON | **esiste, compilato, testato** (327 + 148 verifiche, **e** differenziale contro CPython su 122 record: 8 divergenze dure volute, 0 round-trip — `docs/json-contract.md`) |
 | `src/server/fmlx_http.c` — codec HTTP/1.1: framing richiesta, testata risposta, SSE | **esiste, compilato, testato** (127 verifiche byte-esatte) |
+| `src/server/fmlx_api*.c` — router + adapter OpenAI/Anthropic sopra il codec | **esiste, compilato, testato** (151 verifiche, **9/9** suite `ctest`). Non c'è ancora un motore sotto: la generazione è attaccata al confine `FmlxApiNext`, che il test copre con un doppio scriptato |
 | `src/lane_mlx/` — motore MLX estratto da GMBasic | non scritto. **D2 non blocca il "come"**: i prerequisiti per compilarlo sono già su questa macchina (verificato 2026-09-22: 28 header in `GMBasic/libs/mlx-deps/mlx-c-src/mlx/c/*.h`, più `libmlx.a` 31 MB e `libmlxc.a` 1,0 MB in `libs/mlx-deps/precompiled/darwin-arm64`). D2 decide solo **chi possiede** il motore |
-| `src/server/` router + adapter OpenAI/Anthropic, `src/cli/` (stile Ollama) | non scritti. Il codec HTTP che li ospita **sì** |
+| `src/cli/` (stile Ollama: `run\|chat\|serve\|pull\|ps\|models`) | non scritto. Il livello HTTP che deve servire **sì** |
 
 Qui sotto c'è solo ciò che compila davvero. Nessuna cartella vuota "perché il piano la prevede".
 L'enumerazione di ciò che MLX/caricatore loader GGUF sanno davvero fare, con i `file:riga` della
@@ -179,12 +180,53 @@ socket nudi senza TLS come `gmb_network.c`. Gli SHA per la verifica vengono da `
 (`CC_SHA1`/`CC_SHA256`, header nell'SDK): una nostra copia di SHA1 sarebbe l'unico modo di
 sbagliarla in silenzio.
 
+## La lane API — router e adapter (`src/server/fmlx_api*.c`)
+
+Il pezzo che sta **sopra** il codec e **sotto** il motore, ed è il punto in cui i due dialetti
+diventano una cosa sola. Tre file: `fmlx_api.c` (ciò che non ha dialetto: catalogo errori, rotta,
+accumulatore, ponte), `fmlx_api_openai.c`, `fmlx_api_anthropic.c` — uno per formato perché il
+requisito qui è che un reader possa tenere in testa UN dialetto per volta, e niente nel core
+menzioni l'altro.
+
+**Il confine è un puntatore di funzione, non un'assunzione.** Il layer ① (motore) emette eventi
+neutrali — `{ev, text, n, tool_id, tool_name, finish, stop_sequence, token}` — attraverso
+`FmlxApiNext`; il layer ② (adapter) è l'unico che decide la forma di ciò che esce. Il motore non
+sa cosa sia HTTP, l'adapter non campiona nulla. Per questo la lane è testabile **oggi, senza
+motore**: il test attacca al confine un doppio scriptato e verifica byte, non uno stub che finge
+gettoni.
+
+**Un catalogo, due formati** (piano:513-518). `invalid_request`, `context_length_exceeded`,
+`memory_guard_refused`, `model_not_found`, … sono il `code` interno; `type` è per dialetto. Due
+codici nuovi perché la regola della casa è "un codice per causa": `not_found` (404 su rotta
+sconosciuta, che NON è `model_not_found`) e `not_supported` (501) — quest'ultimo perché
+`/v1/messages/count_tokens` **non viene stimato**: senza il chat template esatto del modello il
+numero sarebbe falso, e il piano (494) dice che un numero falso si rifiuta, non si inventa.
+
+**Il ponte `arguments` ↔ `input`** è la ragione per cui questa lane esiste. OpenAI mette gli
+argomenti di un tool in una STRINGA JSON, Anthropic in un OGGETTO. Il passaggio passa da
+`fmlx_api_tool_input`: si parsea una volta e si renderizza nell'altra forma con
+`fmlx_json_render` — mai una stringa manipolata a mano. Da lì la regola di piano:505: se il JSON
+è troncato, `finish_reason=length` e **nessun** blocco tool viene emesso (nemmeno uno parziale,
+nemmeno `{}`). Nel non-stream è applicabile alla lettera; nello stream no, perché un byte già
+partito non si ritira, e quindi diventa un invariante: `finish_reason` non è mai `tool_calls` se
+gli argomenti raccolti non validano.
+
+**Ciò che non è onorato viene DETTO.** `logit_bias`, `logprobs`, `top_logprobs`,
+`response_format`, `user` sono accettati per nome e dichiarati in `ignored_params[]` (piano:474);
+`n:2` è un 400 con `param:"n"`, non una risposta singola silenziosa; `max_tokens: 1.5` è un errore
+di tipo, non un troncamento. Due `max_tokens`/`max_completion_tokens` discordi: vince il più
+recente, l'altro finisce negli ignored.
+
+**Zero allocazioni anche qui**, come nel codec: gli adapter scrivono nella memoria del chiamante e
+`t->d`/`id`/`created` arrivano da `FmlxApiMeta` passati dall'alto — un adapter che leggesse
+l'orologio o un RNG renderebbe ogni test non deterministico.
+
 ## Build e test
 
 ```sh
 cmake -S . -B build
 cmake --build build          # -Wall -Wextra -Werror
-ctest --test-dir build --output-on-failure   # 4 suite, nessuna tocca la rete
+ctest --test-dir build --output-on-failure   # 9 suite, nessuna tocca la rete
 ./build/fmlx_gguf_inspect <file.gguf>   # testata, tipi, allineamento, coda di byte
 ./build/hf_probe --tree <org>/<repo> [<rev>]   # cache HF reale: locate + verifica, sola lettura
 HF_HUB_CACHE=work/probe-cache ./build/hf_fetch_probe <org>/<repo> [<rev>] [<file>] [<max byte>]
