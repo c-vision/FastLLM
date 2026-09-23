@@ -12,7 +12,7 @@ da Hugging Face). Piano completo: `AiWiki/01-Projects/FastMLX/Piani/(open) - Fas
 | `src/lane_gguf/fmlx_gguf.c` — lettore GGUF di riferimento | **esiste, compilato, testato** (259 verifiche) |
 | `src/lane_gguf/fmlx_quant.c` + `fmlx_quant_ext.c` + `fmlx_quant_iq.c` — dequant ggml → F32 (31 tipi) | **esiste, compilato, testato** (510 verifiche + gate differenziale: 247 confronti, 0 ns. bit divergenti) |
 | `src/hf/fmlx_hf_cache.c` + `fmlx_hf_hash.c` — cache HF letto, senza rete | **esiste, compilato, testato** (131 verifiche + sonda sul cache reale) |
-| `src/hf/fmlx_hf_fetch.c` + `fmlx_hf_curl.c` — download, lock, resume, watchdog di stall, backend classico su repo xet | **esiste, compilato, testato** (199 verifiche senza rete + probe sul server vero; il watchdog su rete reale NON è ancora misurato) |
+| `src/hf/fmlx_hf_fetch.c` + `fmlx_hf_curl.c` — download, lock, resume, watchdog di stall, backend classico su repo xet | **esiste, compilato, testato** (199 verifiche senza rete + probe sul server vero + **`tools/hf_stall_probe.c`: il watchdog misurato per la prima volta su un server locale che si ferma a metà — 16 verifiche, e ha già trovato un difetto: lo stall tagliava come `ERR_HTTP`, cioè «non ritentare», e la ripresa non partiva mai**) |
 | `src/hf/fmlx_hf_manifest.c` — lista dei file di un repo (ciò che serve a `pull` per sapere COSA scaricare) | **esiste, compilato, testato** (51 verifiche senza rete + sonda sul server vero: `bert-base-uncased` 16 file, commit `86b5e09…`, 7 con `lfs`) |
 | `src/json/fmlx_json.c` + `fmlx_jsonw.c` — parser e writer JSON | **esiste, compilato, testato** (327 + 148 verifiche, **e** differenziale contro CPython su 122 record: 8 divergenze dure volute, 0 round-trip — `docs/json-contract.md`) |
 | `src/server/fmlx_http.c` — codec HTTP/1.1: framing richiesta, testata risposta, SSE | **esiste, compilato, testato** (127 verifiche byte-esatte) |
@@ -151,11 +151,15 @@ DOVE-finiscono-i-byte, che sono gli unici che corrompono un cache condiviso.
 
 Lo **stream fermo** è l'unico fallimento che si ritenta: la soglia (`FmlxHfFetchOpts.stall_timeout_s`,
 `--stall-timeout` della CLI) arriva al transport con `configure` e vive nelle opzioni della chiamata,
-non in una scelta cablata del transport; `CURLOPT_XFERINFOFUNCTION` tronca la richiesta quando non
-arriva **un byte** per quel tempo (`LOW_SPEED_TIME`, che misura la media, da solo non lo prenderebbe
-mai) e la ripartenza chiede `Range: bytes=N-` sui byte già scritti nel `.incomplete`, con
-`stall_retries` ripartenze e backoff 250→2000 ms. Un 404, un hash che non torna o un lock in mano ad
-altri risale subito: ripeterebbe la stessa risposta.
+non in una scelta cablata del transport. **Come taglia davvero è misurato, non dedotto**
+(`tools/hf_stall_probe.c`, libcurl 8.7.1 SecureTransport di sistema): su uno stream muto
+`CURLOPT_XFERINFOFUNCTION` non viene chiamata **neanche una volta**, quindi non tronca niente; l'unico
+a parlare è `LOW_SPEED_TIME`, e lo fa a `soglia + 6` secondi (1→7,03 · 2→8,02 · 3→9,03 · 5→11,04 ·
+6→12,04) con `CURLE_OPERATION_TIMEDOUT`. Quel codice è **lo stesso del `CONNECTTIMEOUT`**, quindi il
+transport lo traduce in `ERR_STALL` solo SE il server ha già risposto (`saw_status`): senza riga di
+stato è una connessione morta e resta `ERR_HTTP`. La ripartenza chiede `Range: bytes=N-` sui byte già
+scritti nel `.incomplete`, con `stall_retries` ripartenze e backoff 250→2000 ms. Un 404, un hash che
+non torna o un lock in mano ad altri risale subito: ripeterebbe la stessa risposta.
 
 Regole misurate, non ricordate. **Su questa macchina ci sono DUE `huggingface_hub` 0.36.2 che non
 sono lo stesso file** (`~/ai/env-vllmlx`, serie `requests`, e `~/ai/env-mflux`, serie `httpx`): i
@@ -218,6 +222,44 @@ dipendenza da vendere, nessun CA bundle da distribuire), non un figlio di `/usr/
 socket nudi senza TLS come `gmb_network.c`. Gli SHA per la verifica vengono da `CommonCrypto`
 (`CC_SHA1`/`CC_SHA256`, header nell'SDK): una nostra copia di SHA1 sarebbe l'unico modo di
 sbagliarla in silenzio.
+
+### Il watchdog di stall misurato (`tools/hf_stall_probe.c`) — e il difetto che ha trovato
+
+Non è un caso di `ctest` e non lo diventerà: sta nel tempo (≈16 s). Ma è la guardia che rende `pull`
+riprendibile su un blob da 30 GB, e **non era mai stata eseguita nemmeno una volta**: il fake
+transport copriva la *politica* dei ritentativi, `hf_fetch_probe` parla con huggingface.co dove il
+server non lo puoi far fermare. Qui il server che si ferma è nostro, locale (una porta effimera,
+`bind(0)` + `getsockname`), e la misura è su libcurl vera.
+
+**La prima esecuzione ha fallito 6 verifiche su 14 sul codice COME ERA.** `esito = risposta HTTP non
+valida (… Transferred a partial file)` a 8,00 s: il che vuol dire che il `CURLE_OPERATION_TIMEDOUT`
+di `LOW_SPEED_TIME` finiva in `ERR_HTTP` — la classe **non** ritentabile — e il ciclo di
+`fmlx_hf_fetch.c:435` (`if (s != FMLX_HF_ERR_STALL …) goto done`) non riprovava. In altre parole:
+`--stall-retries` era decorativo per l'unico caso a cui serve, lo scaricamento che si ferma a metà.
+Da lì il ramo `curl_stalled_by_lowspeed` descritto sopra.
+
+**Dopo la correzione** (`./build/hf_stall_probe work-hf-stall 2 1`):
+
+| fase | cosa succede | misura |
+|---|---|---|
+| 1 — `stall_retries 1` | HEAD → GET muta → watchdog → ripartenza `Range: bytes=1500-` → 206 → rinomina | `esito = ok` a **8,29 s**, `[fetch] stream fermo: ripartenza da 1500 byte su 4096`; i 4096 byte sono **uguali byte per byte** a `BODY` e l'hash verifica |
+| 2 — `stall_retries 0` | lo stall risale, i byte restano | `esito = ERR_STALL` a **8,02 s** con `nessun byte da 8 secondi (soglia 2): 1500 nuovi, 1500 su 4096`; il `.incomplete` ha **1500** byte |
+
+16 verifiche, 0 fallite. Le prove che contano non vengono dalle parole del server (è finto, le
+scriviamo noi): vengono dai **byte** — una ripresa dal numero sbagliato darebbe un file diverso e
+l'hash non combacerebbe — e dal **contare i byte del `.incomplete` con `stat`**, non dal fidarsi del
+messaggio. L'`ETag` che il finto server promette è il git blob id calcolato con
+`fmlx_hf_hash_fd`, la stessa funzione della lane; una copia dell'algoritmo nel probe sarebbe il
+secondo parere che non volevamo.
+
+**Tre controlli negativi** (mutazioni su copie fuori dal tree, in `build/nc/`, linkate davanti
+all'archive member — mai nel sorgente): **A** `curl_stalled_by_lowspeed` che ritorna 0 → 6 fallimenti
+e il messaggio nomina la classe mancante; **B** `Range: bytes=0-` forzato al posto del numero vero →
+`5596 byte contro 4096 dichiarati`, cioè una corruzione presa sul fatto; **C** togliere il rinfresco
+dell'orologio sui chunk **NON cambia niente** — 16 verifiche, 0 fallite, perché in questa scena i byte
+arrivano un istante dopo la riga di stato e i due orologi coincidono. **Quel rinfresco dunque NON è
+coperto dal probe**: è lì perché un download lungo che si ferma a metà dica il vero nel messaggio
+("nessun byte da N secondi"), e la ragione è la stessa per cui `xfer_cb` resettava a ogni byte.
 
 ## Manifesto dei file (`src/hf/fmlx_hf_manifest.c`) — la prerequisita di `pull`
 

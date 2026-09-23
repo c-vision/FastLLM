@@ -87,6 +87,15 @@ target_link_libraries(hf_fetch_probe PRIVATE fmlx_hf_fetch)
 add_executable(hf_manifest_probe tools/hf_manifest_probe.c)
 target_link_libraries(hf_manifest_probe PRIVATE fmlx_hf_fetch)
 
+# Terza sonda, e la sola che parli con un server CHE SI FERMA: huggingface.co non lo si può far
+# stare zitto a comando, e il watchdog di stall è esattamente la guardia che serve a un `pull` da
+# 30 GB ripreso all'90%. Sta nel tempo (pochi secondi), quindi NON in ctest — vedi l'intestazione
+# del file. Il path privato serve per il git blob id: calcolarsene uno proprio avrebbe significato
+# avere due autorità sullo stesso nome di blob.
+add_executable(hf_stall_probe tools/hf_stall_probe.c)
+target_include_directories(hf_stall_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/hf)
+target_link_libraries(hf_stall_probe PRIVATE fmlx_hf_fetch)
+
 # --- lane_json: il codec che tocca ogni byte in entrata e in uscita dalle API -------------
 # Due file separati perché parser e writer hanno contratti diversi: il parser RIFIUTA con
 # un codice per causa e un offset, il writer NON DEVE MAI produrre output a metà.

@@ -118,6 +118,12 @@ struct FmlxHfFetchOpts {
      * cambiare nulla). `stall_timeout_s` finisce su `CURLOPT_LOW_SPEED_TIME` con limite 1 byte/s,
      * che E' il watchdog di libcurl: niente thread, niente timer, niente segnali (AGENTS: il
      * processo che scarica non è quello che gestisce una UI).
+     * MISURATO con `tools/hf_stall_probe.c` su questa macchina (libcurl 8.7.1 SecureTransport, la
+     * libcurl di sistema che il build linka): la Soglia è l'intenzione, non il momento del taglio,
+     * che arriva a `soglia + 6` secondi (1→7,03, 2→8,02, 3→9,03, 5→11,04, 6→12,04) e NON tramite
+     * `CURLOPT_XFERINFOFUNCTION`, che su uno stream muto viene chiamata zero volte. Il codice 28 di
+     * curl viene tradotto in `FMLX_HF_ERR_STALL` (ritentabile) dal transport SOLO se il server ha
+     * già risposto: senza riga di stato è un CONNECTTIMEOUT, che è un'altra cosa.
      * `stall_retries` è il numero di RIPARTENZE dopo uno stall: ognuna chiede `Range: bytes=N-`
      * con N = byte già nel `.incomplete`, quindi un 30 GB fermi al 90% riparte dal 90%. */
     int stall_timeout_s;

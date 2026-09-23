@@ -87,6 +87,14 @@ typedef struct {
      * (ERR_STALL, ritentabile) da quello per corpo oltre la promessa (ERR_SIZE, non ritentabile),
      * che arrivano entrambi come CURLE_ABORTED_BY_CALLBACK. */
     int stalled;
+    /* 1 = il server HA GIA' RISPOSTO (riga di stato vista). È il criterio che distingue il codice 28
+     * di libcurl: dopo una risposta significa che LOW_SPEED_TIME ha troncato uno STREAM fermo, cioè
+     * ERR_STALL (ritentabile); prima di ogni risposta è il CONNECTTIMEOUT, cioè un errore DI
+     * CONNESSIONE (ERR_HTTP). Misurato su questa macchina (libcurl 8.7.1 SecureTransport, sonda
+     * `tools/hf_stall_probe.c`): la callback di progresso non viene chiamata NEPPURE una volta su
+     * uno stream muto, quindi il taglio arriva SOLO da lì — e senza questa classe il `pull` non
+     * riparte MAI dal byte giusto: vede ERR_HTTP, che è la lingua del «non ritentare». */
+    int saw_status;
     long long xfer_now;  /* dlnow+ulnow dell'ultimo giro di callback: -1 = mai visto */
     time_t xfer_at;      /* a che ora quel progresso è arrivato */
 } Ctx;
@@ -112,6 +120,7 @@ static void hop_reset(Ctx *c) {
  * ancora", e il primo giro di callback fissa solo l'istante, senza giudicare. */
 static void xfer_reset(Ctx *c) {
     c->stalled = 0;
+    c->saw_status = 0;
     c->xfer_now = -1;
     c->xfer_at = time(NULL);
 }
@@ -137,6 +146,23 @@ static int xfer_cb(void *ud, curl_off_t dltotal, curl_off_t dlnow, curl_off_t ul
     return 0;
 }
 #endif
+
+/* 1 = ha tagliato libcurl sul proprio watchdog (`CURLOPT_LOW_SPEED_TIME`) DOPO che il server aveva
+ * già risposto: è uno STREAM FERMO, non una risposta HTTP sbagliata. La callback qui sopra non è
+ * una via affidabile — misurato: zero chiamate su uno stream muto — quindi il codice 28 è l'unico
+ * segnale che arriva, e va tradotto nella lingua ritentabile (ERR_STALL) invece che in ERR_HTTP,
+ * che sopra significa «non riprovare». Senza la riga di stato è il CONNECTTIMEOUT: lì `from` non
+ * esiste ancora e la lingua giusta resta ERR_HTTP. */
+static int curl_stalled_by_lowspeed(Ctx *c, CURLcode rc) {
+    return rc == CURLE_OPERATION_TIMEDOUT && c->saw_status;
+}
+
+/* Secondi passati senza che arrivasse UN byte (intestazione o corpo): la MISURA, non la soglia —
+ * che è ciò che l'operatore deve leggere per capire se il watchdog è in ritardo o è spento. */
+static int curl_silence_s(Ctx *c) {
+    long d = (long)(time(NULL) - c->xfer_at);
+    return d < 0 ? 0 : (int)d;
+}
 
 static void copy_field(char *dst, size_t dst_len, const char *v, size_t vlen) {
     while (vlen && (v[vlen - 1] == '\r' || v[vlen - 1] == '\n' || v[vlen - 1] == ' ')) vlen--;
@@ -164,6 +190,11 @@ static size_t hdr_cb(char *buf, size_t size, size_t nitems, void *ud) {
     if (len == 0) return 0;
 
     if (len >= 5 && memcmp(buf, "HTTP/", 5) == 0) { /* riga di stato: inizia un'altra risposta */
+        /* Il momento del primo movimento della risposta: `xfer_at` è l'orologio dell'attesa, e va
+         * aggiornato QUI e non solo nella callback di progresso — che su uno stream muto non gira
+         * mai (misurato, vedi il campo `saw_status`). */
+        c->saw_status = 1;
+        c->xfer_at = time(NULL);
         hop_reset(c);
         return len;
     }
@@ -197,6 +228,8 @@ static size_t body_cb(char *ptr, size_t size, size_t nitems, void *ud) {
     Ctx *c = (Ctx *)ud;
     size_t len = size * nitems;
     long code = 0;
+    c->xfer_at = time(NULL); /* un chunk arrivato è progresso: lo dice qui, perché la callback di
+                              * progresso non è chiamata di sicuro (vedi `saw_status`) */
     curl_easy_getinfo(c->h, CURLINFO_RESPONSE_CODE, &code);
 
     /* Range ignorato dal server (200 invece di 206): si ricomincia il file, come fa HF. */
@@ -353,7 +386,8 @@ static int64_t parse_length(const char *v) {
     return (int64_t)n;
 }
 
-static FmlxHfStatus curl_meta(void *ctx_, const char *url, const char *token, FmlxHfMeta *out) {    Ctx *c = (Ctx *)ctx_;
+static FmlxHfStatus curl_meta(void *ctx_, const char *url, const char *token, FmlxHfMeta *out) {
+    Ctx *c = (Ctx *)ctx_;
     struct curl_slist *list = NULL;
     char next[CURL_HDR_LINE];
     FmlxHfStatus s;
@@ -387,6 +421,10 @@ static FmlxHfStatus curl_meta(void *ctx_, const char *url, const char *token, Fm
                  * sopra ritenta BOTH e non deve imparare due lingue. */
                 s = fmlx_hf_fail(FMLX_HF_ERR_STALL, "HEAD %s: nessun byte per %d secondi",
                                  c->url, c->stall_timeout_s);
+            } else if (curl_stalled_by_lowspeed(c, rc)) {
+                /* Ha parlato libcurl, non la nostra callback: stesso ESITO, stessa lingua. */
+                s = fmlx_hf_fail(FMLX_HF_ERR_STALL, "HEAD %s: nessun byte da %d secondi (soglia %d)",
+                                 c->url, curl_silence_s(c), c->stall_timeout_s);
             } else {
                 s = fmlx_hf_fail(FMLX_HF_ERR_HTTP, "HEAD %s: %s", c->url, curl_easy_strerror(rc));
             }
@@ -473,6 +511,14 @@ static FmlxHfStatus curl_get(void *ctx_, const char *url, const char *token, int
         s = fmlx_hf_fail(FMLX_HF_ERR_STALL, "GET %s: nessun byte per %d secondi (%lld nuovi, %lld su %lld)",
                          url, c->stall_timeout_s, (long long)c->written,
                          (long long)(from + c->written), (long long)limit);
+    } else if (curl_stalled_by_lowspeed(c, rc)) {
+        /* Il caso reale di un `pull` interrotto: i byte arrivati restano nel `.incomplete` e il
+         * livello sopra riparte da lì. Se questo ramo non ci fosse, lo stesso evento arriverebbe
+         * come ERR_HTTP e la ripresa non partirebbe MAI. */
+        s = fmlx_hf_fail(FMLX_HF_ERR_STALL,
+                         "GET %s: nessun byte da %d secondi (soglia %d): %lld nuovi, %lld su %lld",
+                         url, curl_silence_s(c), c->stall_timeout_s, (long long)c->written,
+                         (long long)(from + c->written), (long long)limit);
     } else if (rc == CURLE_WRITE_ERROR || rc == CURLE_ABORTED_BY_CALLBACK) {
         /* Il limite l'abbiamo imposto noi: è la lunghezza dichiarata dal server, quindi un corpo
          * più lungo è una promessa non mantenuta — stessa classe di ERR_SIZE. */
@@ -530,6 +576,10 @@ static FmlxHfStatus curl_get_buf(void *ctx_, const char *url, const char *token,
          * l'ERRORE è distintivo — non un elenco vuoto. */
         s = fmlx_hf_fail(FMLX_HF_ERR_STALL, "GET %s: nessun byte per %d secondi", url,
                          c->stall_timeout_s);
+    } else if (curl_stalled_by_lowspeed(c, rc)) {
+        /* Stessa traduzione che sul GET: uno stream fermo è una lingua sola, non due. */
+        s = fmlx_hf_fail(FMLX_HF_ERR_STALL, "GET %s: nessun byte da %d secondi (soglia %d)", url,
+                         curl_silence_s(c), c->stall_timeout_s);
     } else if (rc != CURLE_OK) {
         s = fmlx_hf_fail(FMLX_HF_ERR_HTTP, "GET %s: %s", url, curl_easy_strerror(rc));
     } else if (code == 404 || code == 405) {
