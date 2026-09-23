@@ -144,6 +144,15 @@ FmlxHfStatus fmlx_hf_download_with(const char *repo_id, const char *revision, co
                                    const FmlxHfFetchOpts *opts, const FmlxHfTransport *t,
                                    FmlxHfRef *out);
 
+/* Scrive `refs/<revision> = commit` quando il commit viene da un'altra parte rispetto alla HEAD
+ * del singolo file — cioè dal manifesto, che è una richiesta sola per tutto il repo. `fetch_one`
+ * non può farlo, in questo caso: il `pull` gli passa già il commit, quindi la revisione richiesta
+ * È il commit e il passo 9 lo salta di proposito (per non scrivere come ref qualcosa che ref non è).
+ * `cache_root == NULL` = `fmlx_hf_cache_root()`. Ritorna void perché un ref non scritto non rende
+ * falso un download: i byte sono già verificati e raggiungibili (stessa ragione del passo 9). */
+void fmlx_hf_record_ref(const char *cache_root, const char *repo_id, const char *revision,
+                        const char *commit);
+
 /* --- il manifesto dei file (piano §12.1) ----------------------------------------------------
  * `GET {endpoint}/api/models/{repo}[/revision/{rev}]?blobs=true` — l'URL esatto è misurato su
  * huggingface_hub `hf_api.py:2648-2657` (`revision` va NEL PATH, con `quote()`, e `blobs=true` è

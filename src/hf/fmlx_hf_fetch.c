@@ -46,7 +46,8 @@ void fmlx_hf_normalize_etag(const char *raw, char *out, size_t out_len) {
     out[len] = '\0';
 }
 
-static int mkdir_p(const char *path) {
+/* Perché è pubblica: vedi il commento della dichiarazione in `fmlx/fmlx_hf.h`. */
+int fmlx_hf_mkdir_p(const char *path) {
     char buf[FMLX_HF_PATH_MAX];
     snprintf(buf, sizeof buf, "%s", path);
     for (char *c = buf + 1; *c; c++) {
@@ -58,10 +59,10 @@ static int mkdir_p(const char *path) {
     return mkdir(buf, 0777) == 0 || errno == EEXIST ? 0 : -1;
 }
 
-/* SOLO il genitore. Il nome dice esattamente ciò che fa: `mkdir_p(dirname(path))`. Chi deve
- * scrivere IN una directory (blobs/, il repo stesso) deve chiamare mkdir_p su QUELLA directory:
- * confondere i due è il bug che ha reso impossibile il primo download. */
-static int ensure_parent(const char *path) {
+/* SOLO il genitore. Il nome dice esattamente ciò che fa: `fmlx_hf_mkdir_p(dirname(path))`. Chi deve
+ * scrivere IN una directory (blobs/, il repo stesso) deve chiamare fmlx_hf_mkdir_p su QUELLA
+ * directory: confondere i due è il bug che ha reso impossibile il primo download. */
+int fmlx_hf_ensure_parent(const char *path) {
     char dir[FMLX_HF_PATH_MAX];
     const char *slash = strrchr(path, '/');
     if (!slash) return 0;
@@ -69,7 +70,7 @@ static int ensure_parent(const char *path) {
     if (n == 0 || n >= sizeof dir) return -1;
     memcpy(dir, path, n);
     dir[n] = '\0';
-    return mkdir_p(dir);
+    return fmlx_hf_mkdir_p(dir);
 }
 
 static void sleep_ms(int ms) {
@@ -84,7 +85,7 @@ static FmlxHfStatus write_no_exist_marker(const char *repo, const char *sha, con
     if (fmlx_hf_pjoin(path, sizeof path, repo, ".no_exist") != FMLX_HF_OK) return FMLX_HF_ERR_BUF_SMALL;
     if (fmlx_hf_pjoin(path, sizeof path, path, sha) != FMLX_HF_OK) return FMLX_HF_ERR_BUF_SMALL;
     if (fmlx_hf_pjoin(full, sizeof full, path, relpath) != FMLX_HF_OK) return FMLX_HF_ERR_BUF_SMALL;
-    if (ensure_parent(full) != 0)
+    if (fmlx_hf_ensure_parent(full) != 0)
         return fmlx_hf_fail(FMLX_HF_ERR_IO, "mkdir per %s: %s", full, strerror(errno));
     int fd = open(full, O_CREAT | O_WRONLY | O_TRUNC, 0644);
     if (fd < 0) return fmlx_hf_fail(FMLX_HF_ERR_IO, "touch %s: %s", full, strerror(errno));
@@ -109,7 +110,7 @@ static FmlxHfStatus make_snapshot_link(const char *repo, const char *sha, const 
         if (unlink(full) != 0) /* symlink pendente o vecchio: è un puntatore, non dati */
             return fmlx_hf_fail(FMLX_HF_ERR_IO, "unlink %s: %s", full, strerror(errno));
     }
-    if (ensure_parent(full) != 0)
+    if (fmlx_hf_ensure_parent(full) != 0)
         return fmlx_hf_fail(FMLX_HF_ERR_IO, "mkdir per %s: %s", full, strerror(errno));
 
     size_t depth = 2;
@@ -169,11 +170,28 @@ static void write_ref_if_new(const char *repo, const char *revision, const char 
         fclose(f);
         if (strcmp(cur, sha) == 0) return;           /* già a posto */
     }
-    if (ensure_parent(path) != 0) return;
+    if (fmlx_hf_ensure_parent(path) != 0) return;
     f = fopen(path, "wb");
     if (!f) return;
     fprintf(f, "%s", sha);
     fclose(f);
+}
+
+/* Il `pull` ha il commit da un'altra parte (il manifesto, non la HEAD di un file), quindi il
+ * ref non lo scrive la lane download: `fetch_one` salta il passo 9 quando la revisione requestata
+ * ERA già il commit. Questa è la stessa regola, esportata — non una seconda scrittura del ref,
+ * perché due copie avrebbero potuto divergere su quando NON toccare un cache in sola lettura.
+ * Ritorna void per lo stesso motivo di `write_ref_if_new`: un ref non scritto non rende falso un
+ * download i cui byte sono già verificati e raggiungibili. */
+void fmlx_hf_record_ref(const char *cache_root, const char *repo_id, const char *revision,
+                        const char *commit) {
+    char root[FMLX_HF_PATH_MAX], repo[FMLX_HF_PATH_MAX];
+
+    if (!revision || !commit) return;
+    if (cache_root) snprintf(root, sizeof root, "%s", cache_root);
+    else if (fmlx_hf_cache_root(root, sizeof root) != FMLX_HF_OK) return;
+    if (fmlx_hf_repo_dir(root, repo_id, repo, sizeof repo) != FMLX_HF_OK) return;
+    write_ref_if_new(repo, revision, commit);
 }
 
 /* Un passetto della macchina: tutto ciò che decide DOVE finiscono i byte, con il transport
@@ -253,7 +271,7 @@ static FmlxHfStatus fetch_one(const char *repo_id, const char *revision, const c
     /* 3) la rete è concessa? */
     if (d.offline || fmlx_hf_offline())
         return fmlx_hf_fail(FMLX_HF_ERR_OFFLINE, "%s:%s non nel cache e rete vietata", repo_id, relpath);
-    if (mkdir_p(repo) != 0)
+    if (fmlx_hf_mkdir_p(repo) != 0)
         return fmlx_hf_fail(FMLX_HF_ERR_IO, "mkdir %s: %s", repo, strerror(errno));
 
     token = d.token;
@@ -349,7 +367,7 @@ static FmlxHfStatus fetch_one(const char *repo_id, const char *revision, const c
         if (ll + 6 >= sizeof lock) return fmlx_hf_fail(FMLX_HF_ERR_BUF_SMALL, "nome di lock troppo lungo");
         memcpy(lock + ll, ".lock", 6);
     }
-    if (ensure_parent(lock) != 0)
+    if (fmlx_hf_ensure_parent(lock) != 0)
         return fmlx_hf_fail(FMLX_HF_ERR_IO, "mkdir per %s: %s", lock, strerror(errno));
     for (;;) {
         int e;
@@ -382,7 +400,7 @@ static FmlxHfStatus fetch_one(const char *repo_id, const char *revision, const c
      *    il temporaneo — sempre. */
     s = fmlx_hf_pjoin(blobs, sizeof blobs, repo, "blobs");
     if (s != FMLX_HF_OK) goto done;
-    if (mkdir_p(blobs) != 0) {
+    if (fmlx_hf_mkdir_p(blobs) != 0) {
         s = fmlx_hf_fail(FMLX_HF_ERR_IO, "mkdir %s: %s", blobs, strerror(errno));
         goto done;
     }

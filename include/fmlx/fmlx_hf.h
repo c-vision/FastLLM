@@ -138,6 +138,23 @@ FmlxHfStatus fmlx_hf_repo_dirname(const char *repo_id, char *out, size_t out_len
 /* Valida un path relativo dentro il repo (es. "weights/model.safetensors"). */
 FmlxHfStatus fmlx_hf_check_relpath(const char *relpath);
 
+/* Unisce due path con "/", o FMLX_HF_ERR_BUF_SMALL (e azzera `out` in quel caso).
+ * È pubblico da quando il `pull` costruisce path suo (il `--dest`): la regola «componente + '/' +
+ * componente, e se non sta NON troncare» è UNA, e due copie sarebbero due comportamenti diversi
+ * sullo stesso cache — lo stesso motivo per cui `quote` non è stata riscritta nel manifesto. */
+FmlxHfStatus fmlx_hf_pjoin(char *out, size_t n, const char *a, const char *b);
+
+/* `mkdir -p` sul path, per livelli: EEXIST non è un errore. Ritorna 0 o -1 con `errno`.
+ * Pubblico per la stessa ragione di `fmlx_hf_pjoin`: chi specchia un modello fuori dal cache deve
+ * creare la stessa forma di albero, non una seconda versione della regola. */
+int fmlx_hf_mkdir_p(const char *path);
+
+/* SOLO il genitore di `path`: `fmlx_hf_mkdir_p(dirname(path))`. Il nome dice esattamente ciò che
+ * fa, perché chi deve scrivere IN una directory (i `blobs/`, il repo stesso) deve chiamare
+ * `fmlx_hf_mkdir_p` su QUELLA directory: confondere i due è il bug che ha reso impossibile il
+ * primo download, e la distinzione vale anche fuori dal cache. 0 o -1 con `errno`. */
+int fmlx_hf_ensure_parent(const char *path);
+
 /* Revisione -> commit SHA a 40 hex. Se `revision` è già 40-hex la usa così com'è (a
  * condizione che lo snapshot esista: qui non si guarda il disco), altrimenti legge
  * `<repo_dir>/refs/<revision>` e valida il contenuto. */

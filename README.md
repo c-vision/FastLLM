@@ -16,9 +16,10 @@ da Hugging Face). Piano completo: `AiWiki/01-Projects/FastMLX/Piani/(open) - Fas
 | `src/hf/fmlx_hf_manifest.c` — lista dei file di un repo (ciò che serve a `pull` per sapere COSA scaricare) | **esiste, compilato, testato** (51 verifiche senza rete + sonda sul server vero: `bert-base-uncased` 16 file, commit `86b5e09…`, 7 con `lfs`) |
 | `src/json/fmlx_json.c` + `fmlx_jsonw.c` — parser e writer JSON | **esiste, compilato, testato** (327 + 148 verifiche, **e** differenziale contro CPython su 122 record: 8 divergenze dure volute, 0 round-trip — `docs/json-contract.md`) |
 | `src/server/fmlx_http.c` — codec HTTP/1.1: framing richiesta, testata risposta, SSE | **esiste, compilato, testato** (127 verifiche byte-esatte) |
-| `src/server/fmlx_api*.c` — router + adapter OpenAI/Anthropic sopra il codec | **esiste, compilato, testato** (151 verifiche, **10/10** suite `ctest`). Non c'è ancora un motore sotto: la generazione è attaccata al confine `FmlxApiNext`, che il test copre con un doppio scriptato |
+| `src/server/fmlx_api*.c` — router + adapter OpenAI/Anthropic sopra il codec | **esiste, compilato, testato** (151 verifiche). Non c'è ancora un motore sotto: la generazione è attaccata al confine `FmlxApiNext`, che il test copre con un doppio scriptato |
 | `src/lane_mlx/` — motore MLX estratto da GMBasic | non scritto. **D2 non blocca il "come"**: i prerequisiti per compilarlo sono già su questa macchina (verificato 2026-09-22: 28 header in `GMBasic/libs/mlx-deps/mlx-c-src/mlx/c/*.h`, più `libmlx.a` 31 MB e `libmlxc.a` 1,0 MB in `libs/mlx-deps/precompiled/darwin-arm64`). D2 decide solo **chi possiede** il motore |
-| `src/cli/` (stile Ollama: `run\|chat\|serve\|pull\|ps\|models`) | non scritto. Il livello HTTP che deve servire **sì** |
+| `src/cli/fmlx_pull.c` + `fmlx_cli.c` — `fastmlx pull`, il dispatch e gli esiti | **esiste, compilato, testato, provato sul server vero** (48 + 96 verifiche; pull reale `sshleifer/tiny-gpt2`: 9/9 file, 9 blob il cui nome è il loro hash, snapshot riletto da `hf_probe`) |
+| `src/cli/` — `run\|chat\|serve\|models\|list\|ps\|cp\|rm\|doctor` | **non collegati, e lo dicono**: `fmlx_cli_exec` ritorna `NOT_WIRED` nominando il pezzo che manca (motore / catalogo locale / motore + HTTP in ascolto) ed esce 1. Il parser delle bandiere invece **esiste**, ed è provato per i 9 verbi |
 
 Qui sotto c'è solo ciò che compila davvero. Nessuna cartella vuota "perché il piano la prevede".
 L'enumerazione di ciò che MLX/caricatore loader GGUF sanno davvero fare, con i `file:riga` della
@@ -308,13 +309,62 @@ di 100 colonne), e il gate è un `grep`: `bad |=` deve restituire zero in `src/s
 `t->d`/`id`/`created` arrivano da `FmlxApiMeta` passati dall'alto — un adapter che leggesse
 l'orologio o un RNG renderebbe ogni test non deterministico.
 
+## La lane CLI (`src/cli/fmlx_pull.c` + `fmlx_cli.c`) — il primo pezzo eseguibile
+
+`fastmlx` è il primo binario di questo repo che si può lanciare da terminale. Fa **una** cosa
+(`pull`) e per il resto **dice cosa manca**. Il motivo per cui le due cose stanno nello stesso
+commit: un dispatch che esce 0 su un verbo non implementato è il risultato silenzioso che il piano
+vieta, e l'unica alternativa onesta è un esito che nomina il pezzo mancante.
+
+**`pull` tiene in mano UN commit per tutti i file.** Chiede il manifesto una volta, prende lo `sha`,
+e scarica ogni `rfilename` **a QUEL** commit — non "ultimo" file per file, perché un repo che
+carica mentre scarichi ti dà uno snapshot misto, cioè un modello i cui pesi non corrispondono alla
+sua configurazione. Poi, e solo dopo che tutto è ok, scrive `refs/<branch>`: la download lane
+**non** lo scrive quando la revisione richiesta è già il commit (è il suo contratto), quindi
+nessuno lo scriverebbe — e senza quel ref un secondo `pull` rifarebbe la rete. `test_pull` verifica
+esattamente questo: la seconda invocazione fa **zero** chiamate di transport.
+
+**Il nome del blob non lo decide `pull`** (è la trappola §12.1, misurata di nuovo sul campo): il
+`git_blob_id` del manifesto è sempre a 40 hex, ma un file LFS nel cache si chiama con lo sha256
+dall'etag. `pull` prende `ref.blob_path` da chi ha fatto il download e non guarda mai `blobId` per
+nominare un file. Nel cache reale di prova si vede la conseguenza: **6 blob a 40 hex e 3 a 64**, e
+ciascuno è il proprio hash (`git hash-object` e `shasum -a 256` restituiscono il nome).
+
+**`--dest` è uno specchio, e specchia con hardlink — mai symlink** (piano §10.2). Se `link()` non è
+possibile (`EXDEV`/`EPERM`/`EOPNOTSUPP`) si copre in `<dst>.fmlx-part` e si fa `rename`: un file
+iniziato e mai rinominato non è mai lo specchio di qualcosa. Un `stat` con stesso inode rende il
+mirror idempotente (il secondo `pull` non tocca niente), e il `link=2` misurato con `ls -la` sui tre
+file LFS è la prova che non c'è una copia da 2.5 MB per ciascuno.
+
+**Un errore ferma tutto, senza lasciare pezzi.** Al primo fallimento: nessun mirror, nessun ref, `FmlxPullReport.error_*` compilato con la causa e il file, esito `FAILED`. Copiare i file già scaricati
+prima di sapere se il nono esiste vorrebbe dire consegnare uno snapshot parziale che sembra completo.
+
+**Il dispatch:** `fmlx_cli_parse` non sa nulla dei motori e `fmlx_cli_exec` non sa nulla delle
+bandiere; il primo produce `FmlxCliArgs`, il secondo mappa gli esiti su exit code (`OK`→0,
+`USAGE`→2, `FAILED`→1, `NOT_WIRED`→1). Il token **non è una bandiera**: si passa solo con
+`HF_TOKEN`, perché una `--token` finirebbe nello storico del terminale e in ogni script che la
+invoca. `--help` non è un errore e non vuole un verbo; un parse fallito azzera `FmlxCliArgs` (un
+verbo residuo verrebbe eseguito). I nomi long si ammettono sia staccati sia `--flag=val`.
+
+**Misurato sul server vero** (fuori da `ctest`, come le altre tre sonde):
+`build/fastmlx pull sshleifer/tiny-gpt2 --cache <work> --dest <work>` → esito 0, 9/9 file, 10.9 s,
+`refs/main` = `5f91d94bd9cd…`, e `HF_HUB_CACHE=<work> build/hf_probe --tree sshleifer/tiny-gpt2 main`
+risolve lo snapshot scritto da `pull` con **`verifica=ok` su tutte le entry** — il cache che
+scriviamo è leggibile dal lettore con cui abbiamo verificato il cache di `huggingface_hub`.
+
+**Cosa NON è misurato qui**: la via di fallback `copy_stream` (hardlink impossibile) non è mai
+stata eseguita — il test gira su un singolo filesystem; la riga di avanzamento in-place (stile
+Ollama) non è implementata; i 9 verbi non collegati non hanno ancora un motore da nominare davvero,
+nominano il pezzo.
+
 ## Build e test
 
 ```sh
 cmake -S . -B build
 cmake --build build          # -Wall -Wextra -Werror
-ctest --test-dir build --output-on-failure   # 10 suite, nessuna tocca la rete
+ctest --test-dir build --output-on-failure   # 12 suite, nessuna tocca la rete
 ./build/fmlx_gguf_inspect <file.gguf>   # testata, tipi, allineamento, coda di byte
+./build/fastmlx pull <org>/<repo> [--revision R] [--dest D] [--cache C]   # lo snapshot nel cache
 ./build/hf_probe --tree <org>/<repo> [<rev>]   # cache HF reale: locate + verifica, sola lettura
 HF_HUB_CACHE=work/probe-cache ./build/hf_fetch_probe <org>/<repo> [<rev>] [<file>] [<max byte>]
                                          # download VERO, in una cache di lavoro: mai la reale
