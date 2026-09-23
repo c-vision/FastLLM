@@ -58,6 +58,8 @@ typedef struct {
     int not_found;     /* 404/405 => il marker .no_exist va scritto */
 } FmlxHfMeta;
 
+typedef struct FmlxHfFetchOpts FmlxHfFetchOpts;
+
 typedef struct {
     void *ctx;
     /* HEAD dei metadati: DEVE compilare `out` senza scaricare il corpo. Due regole prese da
@@ -83,9 +85,15 @@ typedef struct {
      * `expected_size` byte, il GET non parte affatto (`:359-361`). */
     FmlxHfStatus (*get)(void *ctx, const char *url, const char *token, int64_t from, int64_t limit,
                         int fd, int64_t *written);
+    /* NULL ammessa (il transport finto dei test non ne ha bisogno). Chiamata UNA volta prima del
+     * primo `get`, con le opzioni effettive della chiamata: il watchdog dello stream NON può avere
+     * una soglia cablata nel transport, perché è `--stall-timeout` della CLI la decisione. Portare
+     * le opzioni qui dentro invece che aggiungere un parametro per capo tiene il sigillo a tre
+     * funzioni (meta/get/configure) anche quando il piano §12.5 ci aggiunge il resto. */
+    void (*configure)(void *ctx, const FmlxHfFetchOpts *opts);
 } FmlxHfTransport;
 
-typedef struct {
+struct FmlxHfFetchOpts {
     const char *cache_root; /* NULL = fmlx_hf_cache_root() */
     const char *endpoint;   /* NULL = fmlx_hf_endpoint() */
     const char *token;      /* NULL = getenv("HF_TOKEN") */
@@ -93,7 +101,16 @@ typedef struct {
     int64_t max_bytes;      /* 0 = nessun limite */
     int repair;             /* 1 = permesso di sostituire un blob che non verifica */
     int wait_lock_ms;       /* >0: attende il lock altrui per questo tempo, poi ERR_LOCKED */
-} FmlxHfFetchOpts;
+    /* Watchdog dello stream (piano §12.5). 0 = default: 60 s senza UN byte, e NESSUN ritentativo
+     * (il comportamento di prima che queste opzioni esistessero — così chi non le tocca non vede
+     * cambiare nulla). `stall_timeout_s` finisce su `CURLOPT_LOW_SPEED_TIME` con limite 1 byte/s,
+     * che E' il watchdog di libcurl: niente thread, niente timer, niente segnali (AGENTS: il
+     * processo che scarica non è quello che gestisce una UI).
+     * `stall_retries` è il numero di RIPARTENZE dopo uno stall: ognuna chiede `Range: bytes=N-`
+     * con N = byte già nel `.incomplete`, quindi un 30 GB fermi al 90% riparte dal 90%. */
+    int stall_timeout_s;
+    int stall_retries;
+};
 
 /* Stato del transport libcurl di sistema. Init/finalize NON sono richiesti: `acquire` crea
  * l'handle quando serve. Il transport è riusato tra chiamate (handle reuse = keepalive). */

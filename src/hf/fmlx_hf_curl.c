@@ -46,10 +46,21 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 #define CURL_HDR_LINE 8192 /* una riga di header più lunga di così non la si interpreta */
 #define CURL_MAX_HOPS 8
+
+/* `CURLOPT_XFERINFOFUNCTION` (progresso con contatori a 64 bit) esiste da curl 7.32; il
+ * `curl_off_t` che usa arriva da `curl/curl.h`, che qui sopra è già incluso: niente check in
+ * più. Se la libcurl di build è più vecchia, il watchdog fine non c'è e resta solo
+ * `LOW_SPEED_TIME` (che di suo basta, ma misura la velocità MEDIA: vedi `xfer_cb`). */
+#if CURL_AT_LEAST_VERSION(7, 32, 0)
+#  define FMLX_HAVE_XFERINFO 1
+#else
+#  define FMLX_HAVE_XFERINFO 0
+#endif
 
 typedef struct {
     CURL *h;
@@ -63,6 +74,16 @@ typedef struct {
     int fd;
     int64_t from, written, limit;
     int range_reset;
+    /* Watchdog dello stream, in secondi SENZA un byte (0 => default 60). Viene da
+     * `configure`/`FmlxHfFetchOpts.stall_timeout_s`, NON da una scelta di qui: la soglia è della
+     * CLI (`--stall-timeout`), e un transport che se la sceglie da solo rende vuota l'opzione. */
+    int stall_timeout_s;
+    /* 1 = siamo stati NOI a troncare per stream fermo: distingue l'aborto della callback-da-noi
+     * (ERR_STALL, ritentabile) da quello per corpo oltre la promessa (ERR_SIZE, non ritentabile),
+     * che arrivano entrambi come CURLE_ABORTED_BY_CALLBACK. */
+    int stalled;
+    long long xfer_now;  /* dlnow+ulnow dell'ultimo giro di callback: -1 = mai visto */
+    time_t xfer_at;      /* a che ora quel progresso è arrivato */
 } Ctx;
 
 static void meta_reset(FmlxHfMeta *m) {
@@ -76,6 +97,36 @@ static void hop_reset(Ctx *c) {
     c->etag[0] = c->size[0] = c->loc[0] = '\0';
     if (c->meta) meta_reset(c->meta);
 }
+
+/* Watchdog fine: riparte a OGNI perform. `xfer_now = -1` significa "nessun progresso visto
+ * ancora", e il primo giro di callback fissa solo l'istante, senza giudicare. */
+static void xfer_reset(Ctx *c) {
+    c->stalled = 0;
+    c->xfer_now = -1;
+    c->xfer_at = time(NULL);
+}
+
+#if FMLX_HAVE_XFERINFO
+/* "N secondi senza UN byte", non "N secondi a passo di lumaca". `CURLOPT_LOW_SPEED_TIME` misura
+ * la velocita' MEDIA su una finestra, quindi con `--stall-timeout 5` cinque secondi a 1 byte/s
+ * non lo fanno scattare mai: qui il clock si RESETTA a ogni byte ricevuto, e un progresso anche
+ * minuscolo vale come progresso. Ritorna 1 = tronca la transazione (curl la chiama comunque il
+ * numero di volte che le pare, quindi la misura deve essere dello STREAM, non del conteggio). */
+static int xfer_cb(void *ud, curl_off_t dltotal, curl_off_t dlnow, curl_off_t ultotal,
+                   curl_off_t ulnow) {
+    Ctx *c = (Ctx *)ud;
+    long long now_x = (long long)dlnow + (long long)ulnow;
+    time_t t;
+    (void)dltotal; (void)ultotal;
+    t = time(NULL);
+    if (now_x != c->xfer_now) { c->xfer_now = now_x; c->xfer_at = t; return 0; }
+    if (c->stall_timeout_s > 0 && t - c->xfer_at >= (time_t)c->stall_timeout_s) {
+        c->stalled = 1;
+        return 1;
+    }
+    return 0;
+}
+#endif
 
 static void copy_field(char *dst, size_t dst_len, const char *v, size_t vlen) {
     while (vlen && (v[vlen - 1] == '\r' || v[vlen - 1] == '\n' || v[vlen - 1] == ' ')) vlen--;
@@ -202,6 +253,7 @@ static FmlxHfStatus setup(Ctx *c, const char *url, const char *token, int want_i
     CURLcode rc;
 
     curl_easy_reset(c->h);
+    xfer_reset(c);
     if (want_identity) list = curl_slist_append(list, "Accept-Encoding: identity");
     if (token && *token) {
         char auth[2048];
@@ -228,7 +280,15 @@ static FmlxHfStatus setup(Ctx *c, const char *url, const char *token, int want_i
     if (rc == CURLE_OK) rc = curl_easy_setopt(c->h, CURLOPT_NOSIGNAL, 1L);
     if (rc == CURLE_OK) rc = curl_easy_setopt(c->h, CURLOPT_CONNECTTIMEOUT, 30L);
     if (rc == CURLE_OK) rc = curl_easy_setopt(c->h, CURLOPT_LOW_SPEED_LIMIT, 1L); /* 1 byte/s ... */
-    if (rc == CURLE_OK) rc = curl_easy_setopt(c->h, CURLOPT_LOW_SPEED_TIME, 60L); /* ... per 60 s */
+    if (rc == CURLE_OK)
+        rc = curl_easy_setopt(c->h, CURLOPT_LOW_SPEED_TIME, (long)(c->stall_timeout_s > 0 ? c->stall_timeout_s : 60));
+#if FMLX_HAVE_XFERINFO
+    /* Il watchdog vero (vedi xfer_cb). Resta anche LOW_SPEED_*: e' quello che parla quando la
+     * connessione e' morta e curl non chiama nessuna callback, e qui sopra la finestra e' la
+     * media, non "senza un byte da N secondi". I due insieme coprono casi diversi. */
+    if (rc == CURLE_OK) rc = curl_easy_setopt(c->h, CURLOPT_XFERINFOFUNCTION, xfer_cb);
+    if (rc == CURLE_OK) rc = curl_easy_setopt(c->h, CURLOPT_XFERINFODATA, c);
+#endif
     if (rc == CURLE_OK) rc = curl_easy_setopt(c->h, CURLOPT_FOLLOWLOCATION, 0L);
     if (rc == CURLE_OK) rc = curl_easy_setopt(c->h, CURLOPT_UNRESTRICTED_AUTH, 0L);
     if (rc == CURLE_OK) rc = curl_easy_setopt(c->h, CURLOPT_SSL_VERIFYPEER, 1L);
@@ -293,7 +353,14 @@ static FmlxHfStatus curl_meta(void *ctx_, const char *url, const char *token, Fm
         curl_easy_getinfo(c->h, CURLINFO_RESPONSE_CODE, &code);
         out->status = (int)code;
         if (rc != CURLE_OK) {
-            s = fmlx_hf_fail(FMLX_HF_ERR_HTTP, "HEAD %s: %s", c->url, curl_easy_strerror(rc));
+            if (rc == CURLE_ABORTED_BY_CALLBACK && c->stalled) {
+                /* La risposta non arriva affatto: stesso ESITO del GET fermo, perche' il livello
+                 * sopra ritenta BOTH e non deve imparare due lingue. */
+                s = fmlx_hf_fail(FMLX_HF_ERR_STALL, "HEAD %s: nessun byte per %d secondi",
+                                 c->url, c->stall_timeout_s);
+            } else {
+                s = fmlx_hf_fail(FMLX_HF_ERR_HTTP, "HEAD %s: %s", c->url, curl_easy_strerror(rc));
+            }
             goto out;
         }
         if (code == 404 || code == 405) { out->not_found = 1; s = FMLX_HF_OK; goto out; }
@@ -370,7 +437,14 @@ static FmlxHfStatus curl_get(void *ctx_, const char *url, const char *token, int
     rc = curl_easy_perform(c->h);
     curl_easy_getinfo(c->h, CURLINFO_RESPONSE_CODE, &code);
     *written = c->written;
-    if (rc == CURLE_WRITE_ERROR || rc == CURLE_ABORTED_BY_CALLBACK) {
+    if (rc == CURLE_ABORTED_BY_CALLBACK && c->stalled) {
+        /* L'ha troncato il NOSTRO watchdog, non la guardia sulla lunghezza: è la classe di errore
+         * che si RITENTA dallo stesso byte, e i `written` fin qui sono lavoro valido nel
+         * `.incomplete`. Il messaggio non contiene il token (regola della lane). */
+        s = fmlx_hf_fail(FMLX_HF_ERR_STALL, "GET %s: nessun byte per %d secondi (%lld nuovi, %lld su %lld)",
+                         url, c->stall_timeout_s, (long long)c->written,
+                         (long long)(from + c->written), (long long)limit);
+    } else if (rc == CURLE_WRITE_ERROR || rc == CURLE_ABORTED_BY_CALLBACK) {
         /* Il limite l'abbiamo imposto noi: è la lunghezza dichiarata dal server, quindi un corpo
          * più lungo è una promessa non mantenuta — stessa classe di ERR_SIZE. */
         s = fmlx_hf_fail(FMLX_HF_ERR_SIZE, "%s: il server ha dato piu' byte dei %lld dichiarati (HTTP %ld)",
@@ -395,6 +469,16 @@ out:
 
 /* ---- il transport, come oggetto statico ---- */
 
+/* Il watchdog deve sapere QUANTO aspettare, e non è il transport che lo decide: è
+ * `--stall-timeout` della CLI, che arriva con le opzioni della chiamata. `opts == NULL` (o il
+ * campo a zero) = 60 s, il comportamento storico di questo file. */
+static void curl_configure(void *ctx_, const FmlxHfFetchOpts *opts) {
+    Ctx *c = (Ctx *)ctx_;
+    pthread_mutex_lock(&c->mu);
+    c->stall_timeout_s = (opts && opts->stall_timeout_s > 0) ? opts->stall_timeout_s : 60;
+    pthread_mutex_unlock(&c->mu);
+}
+
 static Ctx g_ctx;
 static pthread_once_t g_once = PTHREAD_ONCE_INIT;
 static int g_ready;
@@ -407,12 +491,14 @@ static void ctx_init(void) {
     pthread_mutex_init(&g_ctx.mu, NULL);
     g_ctx.h = curl_easy_init();
     g_ctx.fd = -1;
+    g_ctx.stall_timeout_s = 60;
+    g_ctx.xfer_now = -1;
     g_ready = g_ctx.h != NULL;
 }
 
 /* Un solo oggetto, a livello di file: un compound literal in un blocco ha durata AUTOMATICA,
  * quindi `&(...)` dentro la funzione restituirebbe un puntatore a stack morto. */
-static const FmlxHfTransport g_transport = {&g_ctx, curl_meta, curl_get};
+static const FmlxHfTransport g_transport = {&g_ctx, curl_meta, curl_get, curl_configure};
 
 const FmlxHfTransport *fmlx_hf_transport_curl(void) {
     pthread_once(&g_once, ctx_init);

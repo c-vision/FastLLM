@@ -74,7 +74,13 @@ typedef enum {
     FMLX_HF_ERR_BAD_ETAG = 23,
     /* 24: il server non ha dichiarato MAI una lunghezza. Non è il caso "byte diversi": qui non
      * esiste nemmeno un'attesa da confrontare, quindi un troncamento sarebbe invisibile. */
-    FMLX_HF_ERR_NO_SIZE = 24
+    FMLX_HF_ERR_NO_SIZE = 24,
+    /* 25: lo STREAM si è fermato — nessun byte per `stall_timeout_s`. NON è un errore HTTP: la
+     * connessione è viva e il server non ha detto niente, quindi il corpo parziale è valido e il
+     * `.incomplete` resta. È l'unica classe di fallimento che conviene RITENTARE con lo stesso
+     * `Range` (la replica del `--stall-timeout`/`--stall-retries` di rapid-mlx); le altre si
+     * ritentano solo a scaldare il server. */
+    FMLX_HF_ERR_STALL = 25
 } FmlxHfStatus;
 
 const char *fmlx_hf_status_str(FmlxHfStatus s);

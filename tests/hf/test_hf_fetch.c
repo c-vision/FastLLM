@@ -215,9 +215,19 @@ typedef struct {
     int64_t body_len;
     int ignore_range; /* 1 = risponde 200 a una richiesta Range: il transport DEVE azzerare */
     int serve_less;   /* 1 = un byte in meno del dichiarato */
+    /* Lo STREAM FERMO: `stall_times` risposte che scrivono `stall_bytes` byte e poi si fermano.
+     * E' l'unico fallimento che il livello sopra DEVE ritentare (piano §12.5), quindi è l'unico
+     * che va simulato: `get_status = ERR_STALL` senza byte non proverebbe il resume. */
+    int stall_times;
+    int64_t stall_bytes;
     /* le OSSERVAZIONI, non le promesse */
     int meta_calls, get_calls;
     int64_t got_from, got_limit, got_written;
+    int64_t from_seq[8];  /* i `from` in ORDINE di chiamata: è la prova che si riparte dai byte
+                           * già pagati e non da zero */
+    int n_seq;
+    int configure_calls;
+    int saw_stall_timeout, saw_stall_retries;
     char meta_url[FMLX_HF_PATH_MAX * 2], get_url[FMLX_HF_PATH_MAX * 2];
     char meta_token[128], get_token[128];
     int get_token_was_null;
@@ -260,6 +270,7 @@ static FmlxHfStatus fake_get(void *ctx, const char *url, const char *token, int6
     f->get_calls++;
     f->got_from = from;
     f->got_limit = limit;
+    if (f->n_seq < (int)(sizeof f->from_seq / sizeof f->from_seq[0])) f->from_seq[f->n_seq++] = from;
     snprintf(f->get_url, sizeof f->get_url, "%s", url);
     f->get_token_was_null = token == NULL;
     if (token) snprintf(f->get_token, sizeof f->get_token, "%s", token);
@@ -272,9 +283,15 @@ static FmlxHfStatus fake_get(void *ctx, const char *url, const char *token, int6
         start = 0;
     }
     int64_t n = f->body_len - start;
+    int stall_now = 0;
     if (n < 0) n = 0;
     if (f->serve_less && n > 1) n -= 1;
     if (limit >= 0 && n > limit) n = limit;
+    if (f->stall_times > 0) {
+        f->stall_times--;
+        stall_now = 1;
+        if (n > f->stall_bytes) n = f->stall_bytes;
+    }
     int64_t off = 0;
     while (off < n) {
         ssize_t k = write(fd, f->body + start + off, (size_t)(n - off));
@@ -286,10 +303,21 @@ static FmlxHfStatus fake_get(void *ctx, const char *url, const char *token, int6
     }
     *written = off;
     f->got_written = off;
+    if (stall_now) return FMLX_HF_ERR_STALL;
     return FMLX_HF_OK;
 }
 
-static const FmlxHfTransport FAKE_VT = {NULL, fake_meta, fake_get};
+/* Il configure del finto serve a due cose: provare che le opzioni ARRIVANO al transport (altrimenti
+ * `stall_timeout_s` sarebbe un campo decorativo) e registrare i valori visti. */
+static void fake_configure(void *ctx, const FmlxHfFetchOpts *opts) {
+    Fake *f = ctx ? ctx : CUR;
+    if (!f) return;
+    f->configure_calls++;
+    f->saw_stall_timeout = opts ? opts->stall_timeout_s : -1;
+    f->saw_stall_retries = opts ? opts->stall_retries : -1;
+}
+
+static const FmlxHfTransport FAKE_VT = {NULL, fake_meta, fake_get, fake_configure};
 
 static void opts_for(FmlxHfFetchOpts *o) {
     memset(o, 0, sizeof *o);
@@ -523,6 +551,89 @@ static void case_range_ignored(void) {
     pblob(b, sizeof b, W3_GIT);
     CK(size_of(b) == W3_LEN, "il blob ha %lld byte: il corpo si è raddoppiato", (long long)size_of(b));
     CK(same_bytes(b, W3, W3_LEN), "contenuto sbagliato dopo un 200 a richiesta Range");
+}
+
+/* Stream fermo: il watchdog scatta e la GET successiva RIPARTE dai byte già scritti. È il caso
+ * per cui il §12.5 esiste: su un modello da 30 GB al 90% la scelta fra "ricomincia" e "riprendi"
+ * è un'ora di riscaricamento contro pochi minuti. */
+static void case_stall_resumes(void) {
+    fresh("stall");
+    Fake f;
+    FmlxHfFetchOpts o;
+    FmlxHfRef out;
+    char b[FMLX_HF_PATH_MAX], t[FMLX_HF_PATH_MAX * 2];
+
+    fake_init(&f, COMMIT_NEW, W3_GIT, W3_LEN, W3);
+    f.stall_times = 2;  /* due troncamenti, poi la terza risposta arriva in fondo */
+    f.stall_bytes = 3;  /* 3 byte, poi altri 3: quelli "pagati" sono 6 su 10 */
+    opts_for(&o);
+    /* Il valore NON è una soglia misurata dal fake (sarebbe inutile: il fake non ha un clock da
+     * fermare). Serve a provare che l'opzione ARRIVI al transport: se `configure` non fosse
+     * chiamato, `stall_timeout_s` sarebbe un campo decorativo del struct. */
+    o.stall_timeout_s = 1;
+    o.stall_retries = 2;
+    CK_ST(fmlx_hf_download_with(REPO, "main", "model.bin", &o, &FAKE_VT, &out), FMLX_HF_OK);
+    CK(f.configure_calls == 1, "configure chiamato %d volte, attendevo 1", f.configure_calls);
+    CK(f.saw_stall_timeout == 1 && f.saw_stall_retries == 2,
+       "opzioni non arrivate al transport: timeout=%d retries=%d", f.saw_stall_timeout,
+       f.saw_stall_retries);
+    CK(f.get_calls == 3, "GET %d volte, attendevo 3 (due stall + una risposta completa)",
+       f.get_calls);
+    /* La sequenza dei `from` È la prova: 0, 3, 6. Un "resume" che ripartisse da zero sfuggirebbe
+     * al controllo sull'hash — il corpo finale sarebbe comunque giusto — quindi qui si guardano le
+     * CHIAMATE, non il blob. */
+    CK(f.n_seq == 3 && f.from_seq[0] == 0 && f.from_seq[1] == 3 && f.from_seq[2] == 6,
+       "sequenza from = %lld,%lld,%lld su %d chiamate, attendevo 0,3,6 su 3",
+       (long long)f.from_seq[0], (long long)f.from_seq[1], (long long)f.from_seq[2], f.n_seq);
+    pblob(b, sizeof b, W3_GIT);
+    CK(same_bytes(b, W3, W3_LEN), "la ricomposizione dopo gli stall ha un altro contenuto");
+    ptemp(t, sizeof t, W3_GIT);
+    CK(!exists(t), "il temporaneo è sopravvissuto al rename");
+    CK_ST(fmlx_hf_verify(&out, NULL), FMLX_HF_OK);
+}
+
+/* Ritentativi esauriti: ERR_STALL risale com'è e i byte arrivati RESTANO nel `.incomplete`. Il
+ * punto non è il codice d'errore, è che il lavoro non si perde: la prossima invocazione riparte
+ * di lì, che è il comportamento del `pull` con `--stall-retries`. */
+static void case_stall_exhausted(void) {
+    fresh("stallmax");
+    Fake f;
+    FmlxHfFetchOpts o;
+    char b[FMLX_HF_PATH_MAX], t[FMLX_HF_PATH_MAX * 2];
+
+    fake_init(&f, COMMIT_NEW, W3_GIT, W3_LEN, W3);
+    f.stall_times = 5; /* più troncamenti dei ritentativi concessi */
+    f.stall_bytes = 3;
+    opts_for(&o);
+    o.stall_timeout_s = 1;
+    o.stall_retries = 1;
+    CK_ST(fmlx_hf_download_with(REPO, "main", "model.bin", &o, &FAKE_VT, NULL),
+           FMLX_HF_ERR_STALL);
+    CK(f.get_calls == 2, "GET %d volte con retries=1, attendevo 2 (una sola ripartenza)",
+       f.get_calls);
+    pblob(b, sizeof b, W3_GIT);
+    CK(!exists(b), "uno stream interrotto ha prodotto il blob definitivo");
+    ptemp(t, sizeof t, W3_GIT);
+    CK(size_of(t) == 6, "il temporaneo ha %lld byte, attendevo i 6 già pagati",
+       (long long)size_of(t));
+}
+
+/* Un errore DIVERSO dallo stall non si ritenta MAI: un 404, un lock in mano ad altri o un HTTP
+ * ripetuti un secondo dopo ridicono la stessa cosa, e il ritentativo sarebbe solo rumore — o un
+ * pestaggio del server. `stall_retries` alto qui serve a provare che il filtro è sul CODICE. */
+static void case_nostall_not_retried(void) {
+    fresh("norestall");
+    Fake f;
+    FmlxHfFetchOpts o;
+
+    fake_init(&f, COMMIT_NEW, W3_GIT, W3_LEN, W3);
+    f.get_status = FMLX_HF_ERR_HTTP;
+    opts_for(&o);
+    o.stall_timeout_s = 1;
+    o.stall_retries = 3;
+    CK_ST(fmlx_hf_download_with(REPO, "main", "model.bin", &o, &FAKE_VT, NULL),
+           FMLX_HF_ERR_HTTP);
+    CK(f.get_calls == 1, "GET %d volte su un errore non-stall, attendevo 1", f.get_calls);
 }
 
 /* Un altro processo tiene il lock: ERR_LOCKED, e nessun file nostro. */
@@ -890,6 +1001,9 @@ int main(int argc, char **argv) {
     case_temp_complete_skips_get();
     case_temp_too_long_restarts();
     case_range_ignored();
+    case_stall_resumes();
+    case_stall_exhausted();
+    case_nostall_not_retried();
     case_lock_held();
     case_regular_entry_untouched();
     case_repair();

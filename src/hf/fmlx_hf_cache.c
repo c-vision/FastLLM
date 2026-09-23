@@ -65,6 +65,7 @@ const char *fmlx_hf_status_str(FmlxHfStatus s) {
         case FMLX_HF_ERR_SIZE: return "lunghezza ricevuta diversa da quella dichiarata";
         case FMLX_HF_ERR_BAD_ETAG: return "l'etag del server non e' un nome di file accettabile";
         case FMLX_HF_ERR_NO_SIZE: return "il server non ha dichiarato una lunghezza";
+        case FMLX_HF_ERR_STALL: return "lo stream si e' fermato: nessun byte per il tempo limite";
     }
     return "codice sconosciuto";
 }

@@ -202,6 +202,10 @@ static FmlxHfStatus fetch_one(const char *repo_id, const char *revision, const c
 
     if (opts) d = *opts;
     if (!t || !t->meta || !t->get) return fmlx_hf_fail(FMLX_HF_ERR_IO, "transport senza meta/get");
+    /* Le opzioni della chiamata arrivano al transport UNA volta, prima di qualunque richiesta:
+     * `stall_timeout_s` è una soglia di CHI scarica, non del transport (vedi il sigillo).
+     * NULL = il transport finto dei test non ha bisogno di saperlo. */
+    if (t->configure) t->configure(t->ctx, &d);
     if (fmlx_hf_check_relpath(relpath) != FMLX_HF_OK) return FMLX_HF_ERR_NAME;
     if (!repo_id || !*repo_id || !revision || !*revision)
         return fmlx_hf_fail(FMLX_HF_ERR_REPO_ID, "repo id o revisione vuoti");
@@ -391,10 +395,13 @@ static FmlxHfStatus fetch_one(const char *repo_id, const char *revision, const c
     } else {
         const char *dl_url = meta.location[0] ? meta.location : url;
         const char *dl_token = token;
+        int attempt = 0;
         /* Su un host DIVERSO dal hub (CDN) il token non si manda: la firma dell'URL è già
          * l'autorizzazione. È la regola di file_download.py:1760-1766, e senza di essa ogni
          * download LFS esporrebbe la credenziale a un terzo host. */
         if (token && !same_authority(url, dl_url)) dl_token = NULL;
+        /* APERTURA: identica a prima che esistesse il ritentativo — `O_TRUNC` SOLO se si chiede
+         * da zero, altrimenti un 200 che ignorava il Range avrebbe già azzerato il transport. */
         fd = open(tmp, O_CREAT | O_WRONLY | (from > 0 ? 0 : O_TRUNC), 0644);
         if (fd < 0) {
             s = fmlx_hf_fail(FMLX_HF_ERR_IO, "open %s: %s", tmp, strerror(errno));
@@ -406,14 +413,47 @@ static FmlxHfStatus fetch_one(const char *repo_id, const char *revision, const c
             fd = -1;
             goto done;
         }
-        /* Il limite È la lunghezza dichiarata dal server per il file intero, non "quanto manca":
-         * se il server ignora il Range risponde con TUTTO il corpo, e fermarlo a metà sarebbe un
-         * falso positivo. Resta una guardia vera: un server che dichiara 1 KB e ne streamma 1 TB
-         * viene fermato al primo kilobyte oltre la promessa. */
-        s = t->get(t->ctx, dl_url, dl_token, from, meta.size, fd, &written);
-        close(fd);
-        fd = -1;
-        if (s != FMLX_HF_OK) goto done; /* il .incomplete RESTA: è lavoro già pagato, per la ripresa */
+        for (;;) {
+            /* Il limite È la lunghezza dichiarata dal server per il file intero, non "quanto manca":
+             * se il server ignora il Range risponde con TUTTO il corpo, e fermarlo a metà sarebbe un
+             * falso positivo. Resta una guardia vera: un server che dichiara 1 KB e ne streamma 1 TB
+             * viene fermato al primo kilobyte oltre la promessa. */
+            s = t->get(t->ctx, dl_url, dl_token, from, meta.size, fd, &written);
+            close(fd);
+            fd = -1;
+            if (s == FMLX_HF_OK) break;
+            if (s != FMLX_HF_ERR_STALL || attempt >= d.stall_retries) goto done;
+            /* Solo LO STALL si ritenta: un 404, un hash che non torna o un lock in mano ad altri
+             * ripetuti un secondo dopo ridicono la stessa cosa. Qui il punto è che i byte arrivati
+             * SONO già pagati: si riparte dall'ultimo, non da zero — su 30 GB al 90% è la
+             * differenza fra un resume e un riscaricamento. */
+            attempt++;
+            from = file_size(tmp);
+            if (from < 0) from = 0;
+            if (from > meta.size) from = 0;   /* il temporaneo è più lungo del promesso: si ricomincia */
+            {
+                struct timespec ts;
+                long ms = 250;
+                int i;
+                for (i = 1; i < attempt && ms < 2000; i++) ms *= 2;   /* 250, 500, 1000, 2000, ... */
+                ts.tv_sec = ms / 1000;
+                ts.tv_nsec = (ms % 1000) * 1000000L;
+                nanosleep(&ts, NULL);   /* il server che ha smesso di rispondere non va pestato */
+            }
+            fprintf(stderr, "[fetch] stream fermo: ripartenza da %lld byte su %lld, tentativo %d/%d\n",
+                    (long long)from, (long long)meta.size, attempt, d.stall_retries);
+            fd = open(tmp, O_CREAT | O_WRONLY | (from > 0 ? 0 : O_TRUNC), 0644);
+            if (fd < 0) {
+                s = fmlx_hf_fail(FMLX_HF_ERR_IO, "open %s: %s", tmp, strerror(errno));
+                goto done;
+            }
+            if (from > 0 && lseek(fd, 0, SEEK_END) < 0) {
+                s = fmlx_hf_fail(FMLX_HF_ERR_IO, "seek %s: %s", tmp, strerror(errno));
+                close(fd);
+                fd = -1;
+                goto done;
+            }
+        }
     }
 
     /* La verifica è sui BYTE DEL FILE, non su un contatore: se il server ha ignorato il Range
