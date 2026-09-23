@@ -137,12 +137,30 @@ static void test_refusal_does_not_write(void) {
         }
         CHECK(i == 1024, "tipo %d: dst sporcata nonostante il rifiuto", t);
     }
-    /* Il tipo 17 (IQ2_XS) è legittimo ma NON COPERTO: deve dirlo con il SUO codice. */
+    /* Il "tipo legittimo ma NON COPERTO" non si nomina più a mano: era il 17 (IQ2_XS) e il
+     * batch C lo ha coperto, rendendo arancione un'aspettativa che non diceva niente di più.
+     * Ora lo chiede la tabella: primo tipo `usable` per cui `is_covered` tace. Se un giorno
+     * non ci fosse più, qui si DICE che il caso non è provabile — un CHECK che non ha un
+     * candidato passa per vuoto, e "passa per vuoto" è esattamente ciò che questo file
+     * rifiuta. */
     {
+        int probe = -1;
         uint64_t i;
-        for (i = 0; i < 1024; i++) y[i] = 7.5f;
-        CHECK(fmlx_ggml_dequant_row(17, src, 1024, y) == FMLX_GGUF_ERR_NOT_COVERED,
-              "IQ2_XS deve dare NOT_COVERED");
+        for (t = 0; t <= FMLX_GGML_TYPE_MAX; t++) {
+            const FmlxGgmlType *ty = fmlx_ggml_type(t);
+            if (ty && ty->usable && !fmlx_ggml_type_is_covered(t)) {
+                probe = t;
+                break;
+            }
+        }
+        if (probe >= 0) {
+            for (i = 0; i < 1024; i++) y[i] = 7.5f;
+            CHECK(fmlx_ggml_dequant_row(probe, src, 1024, y) == FMLX_GGUF_ERR_NOT_COVERED,
+                  "tipo %d (usable, non coperto): atteso NOT_COVERED", probe);
+        } else {
+            printf("  nota nessun tipo usable non coperto in tabella: il codice "
+                   "NOT_COVERED non è più esercitato da qui\n");
+        }
         CHECK(fmlx_ggml_dequant_row(4, src, 1024, y) == FMLX_GGUF_ERR_TYPE_REMOVED,
               "Q4_2 deve dare TYPE_REMOVED");
         CHECK(fmlx_ggml_dequant_row(999, src, 1024, y) == FMLX_GGUF_ERR_TYPE_UNKNOWN,

@@ -1,6 +1,6 @@
 # Licenze e attribuzioni
 
-Aggiornato: 2026-09-22. Questo file elenca **cosa è stato usato** e **cosa si userà**, tenendo
+Aggiornato: 2026-09-23. Questo file elenca **cosa è stato usato** e **cosa si userà**, tenendo
 separate le due cose: un'attribuzione per codice non ancora preso è falsa tanto quanto un'ombra.
 
 ## Oggi (lane_gguf)
@@ -15,6 +15,7 @@ numeri della tabella dei tipi, con la fonte citata nel codice e nel test di pari
 | **testimone C del gate**: `dequantize_row_*` (25) e `ggml_row_size`, letti E LINKATI a solo tempo-di-sviluppo dalla libreria già costruita su questa macchina (`llamacpp/build/bin/libggml-base.0.15.3.dylib`) | llama.cpp / ggml | **MIT** — **nessun codice copiato, nulla distribuito**: l'obbligo scatta solo se la lane engine linkerà ggml nel prodotto (riga sotto) |
 | struttura del record GGUF (magic, versioni 2/3/4, KV, tensor-info, `general.alignment`) | formato pubblico GGUF, ricopiato dai tre lettori già su questa macchina e verificato sui file a disco | — (specifica di formato) |
 | **tabelle codebook IQ2** (`src/lane_gguf/fmlx_iq2_tables.h`: `iq2xxs_grid` 256×u64, `ksigns` 128×u8) | **dati copiati**, generati da `tools/gen_codebooks.py` contro tre copie concordi su questa macchina: `/Users/gaetano/ds4/ds4.c` e i due duplicati `GMBasic/native/{gmb_host_ai_mlx,gmb_moe_runtime/src}/gmb_iq2_tables.h` (che a monte sono le tabelle ggml) | **MIT (ggml)** — attribuzione dovuta qui e nel file generato |
+| **griglie IQ del lotto C** (`src/lane_gguf/fmlx_iqgrid_tables.h`: `iq2xs_grid` 512, `iq3xxs_grid` 256, `iq3s_grid` 512, `iq2s_grid` 1024; `src/lane_gguf/fmlx_iq1s_tables.h`: `iq1s_grid` 2048) + **`kvalues_iq4nl`** (16) e **`kvalues_fp4`** (16) | **dati copiati ggml** (`ggml-common.h`), generati con lo stesso script su DUE versioni del file (`~/llamacpp` e il vendor in GMBasic) per `kvalues_iq4nl` e le griglie; `kvalues_fp4` invece è **derivato dai bit E2M1** della specifica OCP MX, non copiato. Nessuna di queste è `iq1s_grid_gpu`: quella è usata solo da codice device e ha encoding diversa | **MIT (ggml)** per le copie; **specifica pubblica OCP Microscaling** per `kvalues_fp4` (il valore è dedotto, non attribuito a un autore). Il file generato dichiara il **grado** di prova, e la prova vera è eseguita: `grid_sweep()` in `tools/quant_diff.c` batte ogni indice contro la tabella compilata nella dylib |
 
 **Derivazione reale, oggi:** le codebook IQ2 sono *data copying*, non lettura: per questo esistono
 (a) nel file generato, con la provenienza, (b) con il comando che le rigenera e le incrocia,
@@ -81,7 +82,7 @@ dovuto misurare le due copie per accorgermi che non c'era nessun numero sbagliat
 | kernel Metal `oq_a8*` (già usati da GMBasic) | `GMBasic/native/gmb_metal_oq_a8/` → a monte **oMLX** | **Apache-2.0** (`LICENSE-oMLX-Apache-2.0.txt`, `THIRD_PARTY_NOTICES.md`) | §4(a)(b)(c): copia della licenza, notice di modifica, conservazione degli attributi |
 | host/engine MLX | `mlx` (Apple/ml-explore) e `mlx-c` (ml-explore) — sorgenti letti su questa macchina in `GMBasic/libs/mlx-deps/{mlx-src,mlx-c-src}` | **MIT** — **misurato sui due `LICENSE`** (2026-09-22), non assunto. La riga che stava qui diceva "Apache-2.0": falso |
 | ↳ come si linkano | `libmlx.a` (31 MB) + `libmlxc.a` (1,0 MB) in `libs/mlx-deps/precompiled/darwin-arm64`; GMBasic forza `BUILD_SHARED_LIBS OFF` (`native/gmb_host_ai_mlx/CMakeLists.txt:24`) | **link STATICO**, non dinamico: l'obbligo MIT (testo integrale + copyright nel bundle) **scatta alla distribuzione**, non è opzionale "se si redistribuisce" |
-| link a ggml/llama.cpp per i tipi IQ non ancora coperti (invece di riscriverli) | llama.cpp / ggml | MIT | attribuzione se si linka statico o si copia |
+| ~~link a ggml/llama.cpp per i tipi IQ non ancora coperti~~ **non serve più**: tutti e sei i tipi IQ con un testimone sono riscritti qui e provati bit a bit (`docs/quant-coverage.md` §4). La riga resta come **strada chiusa**: se in futuro si linkerà `dequantize_row_*` nel prodotto, l'attribuzione scatta | llama.cpp / ggml | MIT | attribuzione **se** si linka statico o si copia: oggi nessuno dei due avviene nel prodotto (la dylib è linkata solo dal gate, a solo tempo-di-sviluppo, e non è distribuita) |
 | motore ds4 (`ds4_infer.c`) | `/Users/gaetano/ds4/` | MIT | attribuzione |
 
 La decisione **D3** del piano (distribuzione: binario privato vs pacchetto) determina *come*

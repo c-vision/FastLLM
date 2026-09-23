@@ -1,6 +1,6 @@
 # Copertura quant GGUF: cosa carica MLX, cosa dequantizza FastMLX
 
-> Aggiornato: 2026-09-22. Fonte: **codice letto su questa macchina**, non documentazione.
+> Aggiornato: 2026-09-23. Fonte: **codice letto su questa macchina**, non documentazione.
 > Ogni affermazione ha il suo `file:riga`. Dove il dato non è verificabile localmente è
 > scritto **non verificabile**, mai spacciato per numero.
 
@@ -63,11 +63,15 @@ nostri e la regola del vault scatta.
 `PaddleOCR-VL-1.6-GGUF.gguf` (istogrammi del nostro `fmlx_gguf_inspect`): caricarli con MLX dipende
 dal codice di §1 "non verificabile qui". `fmlx_ggml_dequant_row` lo copre, con testimone bit-exact.
 
-La lane GGUF di FastMLX copre **13** tipi: F32, F16, BF16, Q4_0, Q8_0, Q2_K, Q4_K, Q5_K, Q6_K,
-IQ2_XXS, I8, I16, I32 — e l'audit del gate (`tools/quant_diff.c::coverage_audit`) verifica che
-nessuno di quei 13 sia asserito senza almeno un testimone, non una lista scritta a mano.
+La lane GGUF di FastMLX copre **31** tipi (dal 2026-09-23: erano 13, poi 21 con i lotti A e B):
+F32, F16, BF16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, Q8_K, IQ2_XXS,
+IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S, IQ1_S, IQ1_M, IQ4_NL, IQ4_XS, TQ1_0, TQ2_0, MXFP4, NVFP4, Q1_0,
+I8, I16, I32 — e l'audit del gate (`tools/quant_diff.c::coverage_audit`) verifica che
+nessuno di quei 31 sia asserito senza almeno un testimone, non una lista scritta a mano.
+Fuori, e **senza** possibilità di testimone: Q8_1 (ggml non ha `dequantize_row_q8_1`: è un tipo
+di quantizzazione *intermedia*), Q4_2/Q4_3 (ritirati upstream), I64/F64 (non sono quantizzazioni).
 
-## 4. Il testimone C, e i 18 gap che apre (misurato, non proposto)
+## 4. Il testimone C: i 18 gap che apriva, oggi tutti colmati
 
 `/Users/gaetano/llamacpp`: sorgente `ggml/src/ggml-quants.c` + libreria già costruita
 `build/bin/libggml-base.0.15.3.dylib` (più recente del sorgente, stesso giorno; repo a
@@ -76,20 +80,23 @@ definizioni nel sorgente. Firma: `void dequantize_row_X(const block_X *x, float 
 `assert(k % QK_x == 0)` — **la stessa forma del nostro contratto** (riga di `n` elementi → F32), a
 differenza di MLX che produce pesi impaccati + scale/bias separate.
 
-Il gate li confronta tutti (`tools/quant_diff_ggml.c`). Esito di oggi: **34 tipi confrontati sui
-bit, 42 forme confrontate con ggml, 0 incoerenze, 18 gap colmabili**.
+Il gate li confronta tutti (`tools/quant_diff_ggml.c`). Esito del 2026-09-23, dopo i tre lotti:
+**34 tipi confrontati sui bit, 42 forme confrontate con ggml, 0 incoerenze, 0 gap colmabili**,
+`247 confronti` totali (7 GGUF reali + sintetico + sweep + esaustivo f16), di cui **0 nostri**
+bit-diversi e **4 disaccordi fra testimoni** (A e B contro ggml sul payload degli NaN in tipo 1:
+voce aperta nel vault GMBasic, `Bugs/(open) - GGUF-F16-Nan-Segnalandi-Non-Quietato.md`).
 
-* i nostri **13** tipi sono bit-exact anche contro C — non solo contro A e B — sui tensori reali
-  dei 7 GGUF e su blocchi pseudo-casuali;
-* **18** tipi hanno già un secondo codice pronto: Q4_1, Q5_0, Q5_1, Q3_K, Q8_K, IQ2_XS, IQ3_XXS,
-  IQ1_S, IQ4_NL, IQ3_S, IQ2_S, IQ4_XS, IQ1_M, TQ1_0, TQ2_0, MXFP4, NVFP4, Q1_0. Entrano uno per
-  uno, quando la LORO riga passa — non "quando avremo implementato la famiglia";
+* i **31** tipi coperti sono bit-exact anche contro C — non solo contro A e B — sui tensori reali
+  dei 7 GGUF, su blocchi pseudo-casuali a seed fisso e, per le codebook, su **OGNI indice**;
+* gli 18 tipi che nel lotto precedente erano "secondo codice pronto, nostra riga assente" sono
+  entrati uno per uno, ciascuno con la SUA passata: Q4_1, Q5_0, Q5_1, Q3_K, Q8_K, IQ2_XS, IQ3_XXS,
+  IQ1_S, IQ4_NL, IQ3_S, IQ2_S, IQ4_XS, IQ1_M, TQ1_0, TQ2_0, MXFP4, NVFP4, Q1_0;
 * restano **senza** testimone: **Q8_1** (ggml non ha `dequantize_row_q8_1`, pur avendo il tipo e
   `QK8_1`: è un tipo di *quantizzazione intermedia*, non di archiviazione), Q4_2/Q4_3 (ritirati
   upstream), I64/F64 (non sono quantizzazioni).
 
-Il caso che l'enumerazione MLX aveva fatto notare — **Q4_1, che MLX sa caricare e noi no** — ha ora
-un secondo codice: entra quando lo implemento e lo confronto, non prima.
+Il caso che l'enumerazione MLX aveva fatto notare — **Q4_1, che MLX sa caricare e noi no** — è
+chiuso: implementato, confrontato bit a bit, coperto.
 
 ## 5. L'incidente: la NS. tabella aveva cinque tipi spostati di uno
 
@@ -135,3 +142,40 @@ I lettori GMBasic **non** hanno questo difetto: `gmb_ggml.h` si ferma a `BF16 = 
 affatto 31..41 (il loro gap è un altro, ed è già una voce aperta nel vault — `type_size` che
 ritorna 0 fuori range). **Nessuna nuova voce GMBasic aperta da questo incidente**, e nessuna
 modifica a codice GMBasic.
+
+## 6. Le codebook IQ: che grado di prova ha ogni tabella, e due lezioni misurate
+
+Le griglie IQ **non sono formule**: sono codicebook *imparati* dalla calibrazione di un modello
+reale, e nessuna derivazione matematica li produce. Dire "due copie concordano" non è una prova: sono due
+copie dello stesso dato. Il grado di prova allora si dichiara, e per le griglie la prova vera è
+**eseguita**: `grid_sweep()` in `tools/quant_diff.c` costruisce blocchi che exercano **ogni**
+indice di **ognuna** delle 11 righe di codebook e batte i float contro la tabella compilata dentro
+`libggml-base.dylib`.
+
+| tabella | voci | grado di prova |
+|---|---|---|
+| `iq2xxs_grid`, `iq2_ksigns` | 256, 128 | **due AUTORI** distinti (ds4 + linea ggml dei duplicati GMBasic), **e** sweep esaustivo |
+| `kvalues_iq4nl` | 16 | **due VERSIONI** di ggml (`~/llamacpp` e il vendor in GMBasic) + ricalcolo dalla tabella + sweep |
+| `kvalues_fp4` (E2M1) | 16 | **derivata dai bit** della specifica OCP MX: non è una copia |
+| `iq2xs_grid`, `iq3xxs_grid`, `iq3s_grid`, `iq2s_grid`, `iq1s_grid` | 512, 256, 512, 1024, 2048 | una sola sorgente (ggml): lo **sweep esaustivo è** la prova, non il confronto fra copie |
+
+Esito dello sweep (2026-09-23): 256/256, 512/512, 256/256, 512/512, 1024/1024, 2048/2048 (tipo 19),
+2048/2048 (tipo 29), 16/16 ×4 — **nessun bit divergente**.
+
+**Lezione 1 — lo sweep serve, e l'ho misurato.** Scambiando due voci adiacenti dell'header generato
+(`iq2s_grid[504]` ↔ `[505]`) il gate `gen_codebooks.py --check` dice *"tutte le copie concordano"*
+exit 0 — perché confronta le **copie sorgente** e non rilegge mai l'header scritto — e passa anche
+la forma (voci distinte, alfabeto dei byte: sono due valori *legali*, solo al posto sbagliato).
+A rispondere è stato solo `grid_sweep`: `DIVERGENZA C (ggml) su "iq2s_grid"[160]: 11 vs 34.375`,
+uscita 1. È la ragione per cui quello sweep esiste, ed è scritta in `tools/gen_codebooks.py` per
+non far finta che la rete di forma copra più di quanto copra.
+
+**Lezione 2 — il segno si applica negando il PRODOTTO.** La riga C di ggml è
+`db * grid[j] * (segni & mask ? -1.f : 1.f)`; trascritta così com'è, sui valori finiti e su ±0 dà
+gli stessi bit della dylib. Con `d` **NaN** no: su ARM64 `NaN * -1.0f` conserva il segno del NaN
+(IEEE 754 non specifica il segno del risultato quando un operando è NaN, e l'AdvSIMD propaga
+l'operando), mentre il codice compilato gira il bit 31. Misurato su un blocco IQ3_S con `d` NaN:
+**135 elementi su 256 fuori di UN solo bit**, e **0** fuori costringendo `d` a 1.0f — la divergenza
+era quello, non la formula. Da qui `fmlx_iq_signed(prod, neg)` in `fmlx_quant_internal.h`, usato da
+tutti e sei i tipi IQ con i segni. Il caso non è teorico: un file corrotto, o un blocco che
+moltiplica 0 per una scala infinita.

@@ -34,6 +34,23 @@ static inline float ld_f32(const uint8_t *p) {
     return v;
 }
 
+/* Il segno dei tipi IQ si applica NEGANDO IL PRODOTTO, non moltiplicando per -1.0f.
+ *
+ * Perché non è lo stesso numero: sull'ARM64 di questa macchina `NaN * -1.0f` conserva il
+ * segno del NaN (IEEE 754 NON specifica il segno del risultato quando un operando è NaN, e
+ * l'AdvSIMD qui l'ha risolto propagando il NaN dell'operando), mentre la riga C di ggml, una
+ * volta compilata, gira il bit 31. Misurato, non theorizzato: blocco IQ3_S con `d` NaN, 135
+ * elementi su 256 diversi di UN SOLO BIT, e 0 diversi costringendo `d` a 1.0f.
+ *
+ * Il caso è reale? Sì, due: un file GGUF corrotto, e un blocco che moltiplica 0 per un `d`
+ * infinito. Su ogni valore FINITO e su ±0 le due scritture danno gli stessi bit, quindi non
+ * si sta scegliendo una semantica più comoda: dove divergono, si segue l'autorità con cui il
+ * gate confronta i bit.
+ */
+static inline float fmlx_iq_signed(float prod, int neg) {
+    return neg ? -prod : prod;
+}
+
 /* Ogni funzione scrive `nblk * VALORI_PER_BLOCCO` float in `y`, partendo da `p` che punta
  * il primo blocco. I nomi e gli arità sono quelli delle `dequantize_row_*` di ggml, così il
  * confronto differenziale di tools/quant_diff.c è riga-per-riga con la forma di riferimento. */
@@ -53,6 +70,12 @@ void fmlx_dq_tq2_0(const uint8_t *p, uint64_t nblk, float *y);  /* tipo 35, 66 b
 /* --- tipi a codebook: il valore esce da una TABELLA (fmlx_quant_iq.c) --- */
 void fmlx_dq_iq4_nl(const uint8_t *p, uint64_t nblk, float *y);  /* tipo 20,  18 byte / 32  */
 void fmlx_dq_iq4_xs(const uint8_t *p, uint64_t nblk, float *y);  /* tipo 23, 136 byte / 256 */
+void fmlx_dq_iq2_xs(const uint8_t *p, uint64_t nblk, float *y);  /* tipo 17,  74 byte / 256 */
+void fmlx_dq_iq2_s(const uint8_t *p, uint64_t nblk, float *y);   /* tipo 22,  82 byte / 256 */
+void fmlx_dq_iq3_xxs(const uint8_t *p, uint64_t nblk, float *y); /* tipo 18,  98 byte / 256 */
+void fmlx_dq_iq3_s(const uint8_t *p, uint64_t nblk, float *y);   /* tipo 21, 110 byte / 256 */
+void fmlx_dq_iq1_s(const uint8_t *p, uint64_t nblk, float *y);   /* tipo 19,  50 byte / 256 */
+void fmlx_dq_iq1_m(const uint8_t *p, uint64_t nblk, float *y);   /* tipo 29,  56 byte / 256 */
 
 /* --- microscaling FP4 (tavola kvalues_fp4 + scale E8M0/UE4M3) --- */
 void fmlx_dq_mxfp4(const uint8_t *p, uint64_t nblk, float *y);  /* tipo 39, 17 byte / 32  */

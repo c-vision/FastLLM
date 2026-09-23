@@ -75,6 +75,9 @@ int fmlx_ggml_type_is_covered(int type) {
     case 16: /* IQ2_XXS */
     case 24: /* I8   */ case 25: /* I16  */ case 26: /* I32  */
     case 20: /* IQ4_NL */ case 23: /* IQ4_XS */
+    case 17: /* IQ2_XS */ case 22: /* IQ2_S  */
+    case 18: /* IQ3_XXS */ case 21: /* IQ3_S  */
+    case 19: /* IQ1_S   */ case 29: /* IQ1_M  */
     case 34: /* TQ1_0 */ case 35: /* TQ2_0 */
     case 39: /* MXFP4 */ case 40: /* NVFP4 */
     case 41: /* Q1_0  */
@@ -241,8 +244,10 @@ static void dq_iq2_xxs(const uint8_t *p, uint64_t nblk, float *y) {
                 uint32_t j;
                 for (j = 0; j < 8; j++) {
                     float v = (float)grid[j];
-                    if (sg & (1u << j)) v = -v;
-                    out[ib * 32 + li * 8 + j] = 0.125f * d * ls * v;
+                    /* il segno gira IL PRODOTTO, non il valore di griglia: con `d` NaN
+                     * negare la griglia (finita) lascia il NaN positivo, mentre ggml
+                     * compilato gira il bit 31 del risultato. Vedi fmlx_iq_signed. */
+                    out[ib * 32 + li * 8 + j] = fmlx_iq_signed(0.125f * d * ls * v, sg & (1u << j));
                 }
             }
         }
@@ -338,6 +343,24 @@ FmlxGgufStatus fmlx_ggml_dequant_row(int type, const uint8_t *src, uint64_t n, f
         return FMLX_GGUF_OK;
     case 23:
         fmlx_dq_iq4_xs(src, nblk, dst);
+        return FMLX_GGUF_OK;
+    case 17:
+        fmlx_dq_iq2_xs(src, nblk, dst);
+        return FMLX_GGUF_OK;
+    case 22:
+        fmlx_dq_iq2_s(src, nblk, dst);
+        return FMLX_GGUF_OK;
+    case 18:
+        fmlx_dq_iq3_xxs(src, nblk, dst);
+        return FMLX_GGUF_OK;
+    case 21:
+        fmlx_dq_iq3_s(src, nblk, dst);
+        return FMLX_GGUF_OK;
+    case 19:
+        fmlx_dq_iq1_s(src, nblk, dst);
+        return FMLX_GGUF_OK;
+    case 29:
+        fmlx_dq_iq1_m(src, nblk, dst);
         return FMLX_GGUF_OK;
     case 34:
         fmlx_dq_tq1_0(src, nblk, dst);

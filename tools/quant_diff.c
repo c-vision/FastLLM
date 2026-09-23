@@ -25,10 +25,18 @@
  *      -I "$L/ggml/src" -I "$L/ggml/include" \
  *      tools/quant_diff.c tools/quant_diff_ggml.c src/lane_gguf/fmlx_gguf.c \
  *      src/lane_gguf/fmlx_quant.c src/lane_gguf/fmlx_quant_ext.c \
+ *      src/lane_gguf/fmlx_quant_iq.c \
  *      "$G/native/gmb_moe_runtime/src/gmb_moe_ggml.c" \
  *      -L "$L/build/bin" -lggml-base -Wl,-rpath,"$L/build/bin" -o build/quant_diff
  * Uso: build/quant_diff <file.gguf> [...]      oppure   build/quant_diff --synthetic
- *      exit 0 = nessun bit divergente, 1 = anche UN solo bit diverge,
+ *      Il giro include SEMPRE anche `grid_sweep()`: ogni indice di ogni codebook (2048 voci
+ *      di iq1s_grid, 1024 di iq2s_grid, ...) battuto uno per uno contro la tabella compilata
+ *      nella dylib. È la sola prova che vede una PERMUTAZIONE dello header generato, che
+ *      `gen_codebooks.py --check` non vede (confronta le copie sorgente, non il file scritto)
+ *      e che nessuna verifica di forma vede (le voci restano distinte e in alfabeto).
+ *      exit 0 = nessun ns. bit divergente, 1 = un ns. bit diverge (lavoro di questo repo),
+ *      3 = noi esatti e i TESTIMONI in disaccordo tra loro (bug esterno, da aprire dove
+ *      quel codice vive — oggi: i due convertitori f16 di GMBasic sugli NaN),
  *      2 = almeno un file non si è aperto (NON è un verdetto sui bit).
  */
 #include "fmlx/fmlx_gguf.h"
@@ -79,17 +87,30 @@ struct witness {
     float *buf;
 };
 
+/* I due numeri NON sono uno solo, e tenerli insieme era il difetto: finché il tipo 1
+ * (F16) divergeva dai due testimoni di GMBasic, il gate chiudeva 1 e la riga diceva
+ * "DIVERGENZE" — un rosso PERMANENTE che assomiglia a un nostro bug e che, a forza di
+ * vederlo, smette di significare niente. `ours` è quello che dobbiamo noi; `ext` è il
+ * disaccordo tra codici che vivono altrove, da APRIRE come bug dove quel codice sta. */
+struct verdict {
+    uint64_t ours; /* ns. bit divergono, e nessuna autorità ci dà ragione */
+    uint64_t ext;  /* chi sbaglia è un testimone (o due): noi coincidiamo con ggml */
+    uint64_t calls;
+};
+
 static void compare(int type, const uint8_t *bytes, uint64_t elems, const char *label,
-                    uint64_t *bad) {
+                    int verbose, struct verdict *v) {
     struct witness w[3];
     FmlxGgufStatus s;
+    int eq[3];
     int i, j, n_ok = 0;
 
+    v->calls++;
     s = fmlx_ggml_dequant_row(type, bytes, elems, mine);
     if (s != FMLX_GGUF_OK) {
         printf("    %s tipo %d: IL NS. DEQUANT RIFIUTA (%" PRIu64 " elem) -> %s\n", label, type,
                elems, fmlx_gguf_status_str(s));
-        (*bad)++;
+        v->ours++;
         return;
     }
     w[0].tag = "A (gmb_ggml.h)";
@@ -111,16 +132,25 @@ static void compare(int type, const uint8_t *bytes, uint64_t elems, const char *
     for (i = 0; i < 3; i++) {
         uint64_t first = 0;
         float maxdiff = 0;
-        int eq;
+        eq[i] = -1;
         if (!w[i].ok) continue;
-        eq = cmp_bufs(mine, w[i].buf, elems, w[i].tag, label, &first, &maxdiff);
-        printf("    %s tipo %d vs %s: %s", label, type, w[i].tag, eq ? "bit-exact" : "DIVERSO");
-        if (!eq) {
-            printf("  max|diff|=%.9g", (double)maxdiff);
-            (*bad)++;
+        eq[i] = cmp_bufs(mine, w[i].buf, elems, w[i].tag, label, &first, &maxdiff) ? 1 : 0;
+        if (verbose || !eq[i]) {
+            printf("    %s tipo %d vs %s: %s", label, type, w[i].tag,
+                   eq[i] ? "bit-exact" : "DIVERSO");
+            if (!eq[i]) printf("  max|diff|=%.9g", (double)maxdiff);
+            printf("\n");
         }
-        printf("\n");
     }
+    /* Classificazione: C è l'autorità (è il codice che i GGUF li SCRIVE). Se i ns. bit
+     * coincidono con C e un testimone secondario dice altro, l'outlier è LUI. Se C non
+     * copre il tipo, la divergenza resta nostra: non abbiamo modo di assolverci. */
+    for (i = 0; i < 2; i++) {
+        if (eq[i] != 0) continue;
+        if (eq[2] == 1) v->ext++;
+        else v->ours++;
+    }
+    if (eq[2] == 0) v->ours++;
     /* Testimone contro testimone: se due di loro divergono, il disaccordo NON è nostro da
      * assorbire — è un bug da aprire dove il codice vive. */
     for (i = 0; i < 3; i++) {
@@ -132,14 +162,14 @@ static void compare(int type, const uint8_t *bytes, uint64_t elems, const char *
                 printf("    !! I TESTIMONI DIVERGONO tra loro (%s vs %s, tipo %d): bug da "
                        "aprire dove quei codici vivono, non una scelta di questo repo\n",
                        w[i].tag, w[j].tag, type);
-                (*bad)++;
+                v->ext++;
             }
         }
     }
 }
 
 static void one_tensor(const FmlxGgufFile *f, uint64_t idx, int type, uint64_t elems,
-                       uint64_t *bad) {
+                       struct verdict *v) {
     const FmlxGgufTensor *t = &f->tensors[idx];
     uint64_t need = 0;
     const uint8_t *bytes;
@@ -152,15 +182,15 @@ static void one_tensor(const FmlxGgufFile *f, uint64_t idx, int type, uint64_t e
         return;
     }
     snprintf(label, sizeof label, "\"%s\"", t->name);
-    compare(type, bytes, elems, label, bad);
+    compare(type, bytes, elems, label, 1, v);
 }
 
-/* Ritorna 0 = nessun bit divergente, 1 = divergenze, 2 = il file non si è nemmeno aperto
- * (un path sbagliato NON è un verdetto sui bit: mischiare i due significati ha già fatto
- * uscire "ESITO: DIVERGENZE" su un argomento che non era un file). */
-static int one(const char *path) {
+/* Ritorna 0 = nulla di nostro diverge, 2 = il file non si è nemmeno aperto (un path
+ * sbagliato NON è un verdetto sui bit: mischiare i due significati ha già fatto uscire
+ * "ESITO: DIVERGENZE" su un argomento che non era un file). */
+static int one(const char *path, struct verdict *v) {
     FmlxGgufFile f;
-    uint64_t i, bad = 0;
+    uint64_t i, before = v->ours;
     int seen[64];
     memset(seen, 0, sizeof seen);
     if (fmlx_gguf_open_header(path, &f) != FMLX_GGUF_OK) {
@@ -178,19 +208,20 @@ static int one(const char *path) {
         elems = SAMPLE_ELEMS - (SAMPLE_ELEMS % bs);
         if (elems == 0 || f.tensors[i].numel < elems) continue;
         seen[type] = 1;
-        one_tensor(&f, i, type, elems, &bad);
+        one_tensor(&f, i, type, elems, v);
     }
     fmlx_gguf_close(&f);
-    return bad ? 1 : 0;
+    return v->ours > before ? 1 : 0;
 }
 
 /* Ogni tipo coperto, anche su blocchi FINITI: i file locali non contengono tutti i tipi
  * (Q4_0, Q5_K, I8, I16 mancano del tutto), e un confronto differenziale non ha bisogno di
  * dati veri — basta che le due implementazioni leggano gli STESSI byte. Byte pseudo-casuali
- * con seed fisso = deterministico; per gli IQ questo esplora anche gli indici di griglia. */
-static int synthetic(void) {
+ * con seed fisso = deterministico; per gli IQ questo esplora anche gli indici di griglia,
+ * MA NON LI COPRE TUTTI: per quelli c'è grid_sweep() qui sotto. */
+static void synthetic(struct verdict *v) {
     unsigned char bytes[SAMPLE_ELEMS * 4];
-    uint64_t bad = 0, seed = 20260922u;
+    uint64_t seed = 20260922u;
     size_t i;
     int t;
     printf("synthetic (blocchi pseudo-casuali, seed %" PRIu32 ")\n", (uint32_t)seed);
@@ -211,9 +242,8 @@ static int synthetic(void) {
         bs = ty->block_vals;
         elems = SAMPLE_ELEMS - (SAMPLE_ELEMS % bs);
         if (elems == 0) continue;
-        compare(t, bytes, elems, "synthetic", &bad);
+        compare(t, bytes, elems, "synthetic", 1, v);
     }
-    return bad ? 1 : 0;
 }
 
 /* Audit della REGOLA di copertura, su DUE assi che prima non c'erano.
@@ -226,7 +256,7 @@ static int synthetic(void) {
  * ns. tabella devono coincidere con quelli di ggml. È l'asse che ha beccato i cinque tipi
  * spostati di uno: quei tipi non hanno un solo tensore sui file di questa macchina, quindi
  * nessun confronto bit-a-bit li avrebbe mai toccati. */
-static int coverage_audit(void) {
+static int coverage_audit(struct verdict *v) {
     static unsigned char bytes[SAMPLE_ELEMS * 4];
     uint64_t seed = 20260923u;
     size_t i;
@@ -305,6 +335,7 @@ static int coverage_audit(void) {
     }
     printf("    %d tipi confrontati sui bit, %d forme confrontate con ggml, %d incoerenze, "
            "%d gap colmabili\n", seen, forms, bad, gaps);
+    v->ours += (uint64_t)bad; /* un'incoerenza di copertura è nostra, non di un testimone */
     return bad ? 1 : 0;
 }
 
@@ -313,7 +344,7 @@ static int coverage_audit(void) {
  * confrontano i BIT del risultato con quelli di ggml: un convertitore che diverge sugli NaN
  * darebbe risultati "nan vs nan" ovunque e in nessun posto — esattamente il tipo di difetto
  * che un soffitto verde non vede. */
-static int f16_exhaustive(void) {
+static void f16_exhaustive(struct verdict *v) {
     uint32_t h, bad = 0;
     int shown = 0;
     for (h = 0; h < 65536u; h++) {
@@ -332,11 +363,272 @@ static int f16_exhaustive(void) {
     }
     printf("f16->f32 esaustivo: 65536 pattern, %u bit-diversi%s\n", bad,
            bad ? " (mostrati i primi 6)" : "");
-    return bad ? 1 : 0;
+    v->ours += bad;
+}
+
+/* ================= grid_sweep: OGNI indice di griglia, uno per uno =================
+ *
+ * Perché esiste, ed è la parte CHE NON SI PUÒ FARE CON I BYTE CASUALI: le tabelle di
+ * `fmlx_iqgrid_tables.h` e `fmlx_iq1s_tables.h` sono codebook ALLENATI — non c'è una
+ * specifica da ricalcolare, e i due testi ggml che le contano sono due VERSIONI dello
+ * STESSO autore, non due autori. Il generatore (tools/gen_codebooks.py) può solo dire che
+ * concordano; qui si esegue il testimone che vale: la copia COMPILATA dentro
+ * libggml-base, quella che i GGUF li ha scritti.
+ *
+ * Il seed pseudo-casuale del giro `synthetic` copre una frazione degli indici e non dice
+ * QUANTO: su 2048 voci di `iq1s_grid` ne aveva toccate qualche centinaio. Lo sweep invece
+ * costruisce un blocco per volta in cui i CAMPI DI INDICE enumerano la tabella, e i campi
+ * SEGNO/moltiplicatore girano con loro — così ogni voce è letta almeno una volta, e ogni
+ * bit di `ksigns` è applicato almeno una volta.
+ *
+ * `d` è 1.0f (0x3c00) e le scale sono nibble esatti: i prodotti restano numeri binari
+ * esatti, quindi una voce di tabella diversa di UNO cambia i BIT del risultato — non un
+ * "quasi uguale" che un confronto a tolleranza ingoierebbe.
+ *
+ * Uscita: una riga di conto per tabella. Le divergenze, se ci sono, le stampa `compare()`
+ * in modalità quieta (che è il solo motivo per cui gli sweep non inondano il terminale). */
+
+/* Scrive `width` bit di `val` a partire da `bitpos` in un campo little-endian, ORandoli:
+ * stesso ordine di bit con cui i dequant leggono (`ld32` + shift su little-endian). */
+static void put_bits(uint8_t *p, uint32_t bitpos, uint32_t width, uint32_t val) {
+    uint32_t i;
+    for (i = 0; i < width; i++) {
+        if (val & (1u << i)) {
+            p[(bitpos + i) / 8] |= (uint8_t)(1u << ((bitpos + i) % 8));
+        }
+    }
+}
+
+/* Ogni builder riempie UN BLOCCO con gli indici base, base+1, ... e ritorna quanti ne
+ * ha scritti (0 = non ha scritto nulla, e il pilota lo tratta come errore, non come "fatto").
+ * I campi che NON sono l'indice (segni, scale, moltiplicatori, segno del delta) girano con
+ * la base, perché la prova che interessa include anche l'aritmetica che li usa. */
+
+static uint32_t sw_iq2_xxs(uint8_t *b, uint32_t base, uint32_t n_grid) {
+    uint32_t k;
+    memset(b, 0, 66);
+    b[0] = 0x00; b[1] = 0x3c;                         /* d = 1.0f */
+    for (k = 0; k < 32 && base + k < n_grid; k++) {   /* 8 gruppi da 4 indici da 8 bit */
+        uint32_t ib = k / 4, li = k % 4;
+        b[2 + 8 * ib + li] = (uint8_t)(base + k);
+        put_bits(b + 2 + 8 * ib + 4, 7 * li, 7, (base + k) & 127u); /* indice dei segni */
+        if (li == 0) put_bits(b + 2 + 8 * ib + 4, 28, 4, base & 15u); /* ls, una per gruppo */
+    }
+    return k;
+}
+
+static uint32_t sw_iq2_xs(uint8_t *b, uint32_t base, uint32_t n_grid) {
+    uint32_t k;
+    memset(b, 0, 74);
+    b[0] = 0x00; b[1] = 0x3c;
+    for (k = 0; k < 8; k++) b[66 + k] = (uint8_t)(base + k); /* due scale per byte */
+    for (k = 0; k < 32 && base + k < n_grid; k++) {          /* 9 bit griglia + 7 di segno */
+        uint32_t q = (base + k) & 511u, sg = (base + k) & 127u, v = q | (sg << 9);
+        b[2 + 2 * k] = (uint8_t)v;
+        b[3 + 2 * k] = (uint8_t)(v >> 8);
+    }
+    return k;
+}
+
+static uint32_t sw_iq3_xxs(uint8_t *b, uint32_t base, uint32_t n_grid) {
+    uint32_t k;
+    memset(b, 0, 98);
+    b[0] = 0x00; b[1] = 0x3c;
+    for (k = 0; k < 64 && base + k < n_grid; k++) {   /* 64 indici da 8 bit per blocco */
+        uint32_t ib = k / 8, l = k % 8;
+        b[2 + k] = (uint8_t)(base + k);
+        put_bits(b + 66 + 4 * ib, 7 * (l / 2), 7, (base + k) & 127u);
+        if (l == 0) put_bits(b + 66 + 4 * ib, 28, 4, base & 15u);
+    }
+    return k;
+}
+
+/* IQ3_S: l'indice è 8 bit in `qs` + UN bit in `qh`, e il bit di `qh` che corrisponde a
+ * ciascuna delle 64 posizioni è 2*l per la griglia 1 e 2*l+1 per la griglia 2 (vengono dai
+ * due shift diversi `(qh << (8-2l))` e `(qh << (7-2l))` di ggml-quants.c:2551). */
+static uint32_t sw_iq3_s(uint8_t *b, uint32_t base, uint32_t n_grid) {
+    uint32_t s;
+    memset(b, 0, 110);
+    b[0] = 0x00; b[1] = 0x3c;
+    for (s = 0; s < 32; s++) b[74 + s] = (uint8_t)(base + s);   /* segni */
+    for (s = 0; s < 4; s++) b[106 + s] = (uint8_t)(base + s);   /* scale (due nibble) */
+    for (s = 0; s < 64 && base + s < n_grid; s++) {
+        uint32_t h = s / 16, half = (s % 16) / 8, rem = s % 8, x = base + s;
+        b[2 + 16 * h + 8 * half + rem] = (uint8_t)(x & 0xFFu);
+        put_bits(b + 66 + 2 * h + half, 2 * (rem / 2) + (rem % 2), 1, (x >> 8) & 1u);
+    }
+    return s;
+}
+
+/* IQ2_S: 10 bit per indice (griglia da 1024), e i due bit alti stanno in `qh[ib]` alle
+ * posizioni 2l e 2l+1 — lo shift dipendente da l di ggml-quants.c:2489. */
+static uint32_t sw_iq2_s(uint8_t *b, uint32_t base, uint32_t n_grid) {
+    uint32_t s;
+    memset(b, 0, 82);
+    b[0] = 0x00; b[1] = 0x3c;
+    for (s = 0; s < 32; s++) b[34 + s] = (uint8_t)(base + s);   /* segni (dentro qs, in ggml) */
+    for (s = 0; s < 8; s++) b[74 + s] = (uint8_t)(base + s);   /* scale */
+    for (s = 0; s < 32 && base + s < n_grid; s++) {
+        uint32_t ib = s / 4, l = s % 4, x = base + s;
+        b[2 + s] = (uint8_t)(x & 0xFFu);
+        put_bits(b + 66 + ib, 2 * l, 2, (x >> 8) & 3u);
+    }
+    return s;
+}
+
+/* IQ1_S: 11 bit per indice (2048 voci), tre per volta in `qh[ib]` a 3*l; i bit 12..14
+ * scelgono il moltiplicatore e il 15 il segno del delta, e anche quelli girano. */
+static uint32_t sw_iq1_s(uint8_t *b, uint32_t base, uint32_t n_grid) {
+    uint32_t s;
+    memset(b, 0, 50);
+    b[0] = 0x00; b[1] = 0x3c;
+    for (s = 0; s < 8; s++) {
+        put_bits(b + 34 + 2 * s, 12, 3, (base + s) & 7u);         /* moltiplicatore */
+        put_bits(b + 34 + 2 * s, 15, 1, ((base + s) >> 3) & 1u);  /* segno del delta */
+    }
+    for (s = 0; s < 32 && base + s < n_grid; s++) {
+        uint32_t ib = s / 4, l = s % 4, x = base + s;
+        b[2 + s] = (uint8_t)(x & 0xFFu);
+        put_bits(b + 34 + 2 * ib, 3 * l, 3, (x >> 8) & 7u);
+    }
+    return s;
+}
+
+/* IQ1_M: nessun `d` nel blocco — la scala è ricomposta da quattro half e qui va FORZATA a
+ * 1.0f, perché i nibble che la compongono sono gli STESSI bit (12..15 di ogni parola) che
+ * il builder usa per variare: senza questo vincolo `d` diventerebbe un NaN a caso e lo
+ * sweep misurerebbe NaN contro NaN. 0x3c00 vuole 0,0,C,3 in quei quattro nibble. */
+static uint32_t sw_iq1_m(uint8_t *b, uint32_t base, uint32_t n_grid) {
+    uint32_t s;
+    memset(b, 0, 56);
+    for (s = 0; s < 8; s++) b[48 + s] = (uint8_t)(base + s); /* scale/moltiplicatori */
+    b[49] &= 0x0F; b[51] &= 0x0F;
+    b[53] = (uint8_t)(0xC0 | (b[53] & 0x0Fu));
+    b[55] = (uint8_t)(0x30 | (b[55] & 0x0Fu));
+    for (s = 0; s < 32 && base + s < n_grid; s++) {
+        uint32_t ib = s / 4, l = s % 4, x = base + s;
+        b[s] = (uint8_t)(x & 0xFFu);
+        put_bits(b + 32 + 2 * ib + l / 2, 4 * (l % 2), 3, (x >> 8) & 7u);       /* indice */
+        put_bits(b + 32 + 2 * ib + l / 2, 4 * (l % 2) + 3, 1, (x >> 11) & 1u);  /* delta */
+    }
+    return s;
+}
+
+/* kvalues_iq4nl: sedici voci, due nibble per byte. Un blocco le copre TUTTE in entrambe le
+ * posizioni (la codebook NON è simmetrica, -127..+113: basso e alto non sono lo stesso
+ * giro), quindi la base non avanza e il giro finisce al primo blocco. */
+static uint32_t sw_iq4_nl(uint8_t *b, uint32_t base, uint32_t n_grid) {
+    uint32_t j;
+    (void)base;
+    memset(b, 0, 18);
+    b[0] = 0x00; b[1] = 0x3c;                    /* d = 1.0f */
+    for (j = 0; j < 16; j++) b[2 + j] = (uint8_t)((j & 15u) | (((j + 8) & 15u) << 4));
+    return n_grid;
+}
+
+/* IQ4_XS: otto sottoblocchi da 32 con scala propria (6 bit spaccati tra scales_h e
+ * scales_l). Le 128 byte di `qs` coprono i 16 valori otto volte, e le scale girano. */
+static uint32_t sw_iq4_xs(uint8_t *b, uint32_t base, uint32_t n_grid) {
+    uint32_t j;
+    (void)base;
+    memset(b, 0, 136);
+    b[0] = 0x00; b[1] = 0x3c;
+    for (j = 0; j < 128; j++) b[8 + j] = (uint8_t)((j & 15u) | (((j + 8) & 15u) << 4));
+    b[2] = 0x05; b[4] = 0x97;                    /* scales_h / scales_l: non tutte uguali */
+    return n_grid;
+}
+
+static uint32_t sw_mxfp4(uint8_t *b, uint32_t base, uint32_t n_grid) {
+    uint32_t j;
+    (void)base;
+    memset(b, 0, 36);
+    b[0] = 127;                                  /* E8M0: 2^0, che è mezzo per convenzione */
+    for (j = 0; j < 16; j++) b[1 + j] = (uint8_t)((j & 15u) | (((j + 8) & 15u) << 4));
+    return n_grid;
+}
+
+static uint32_t sw_nvfp4(uint8_t *b, uint32_t base, uint32_t n_grid) {
+    static const uint8_t sc[4] = {0x38, 0x39, 0x20, 0x21};
+    uint32_t j;
+    (void)base;
+    memset(b, 0, 36);
+    /* Quattro scale UE4M3 NON degenere: i due codici degeneri (0 e 0x7F, che valgono
+     * entrambi 0.0f) azzererebbero un sottoblocco intero e lo sweep non misurerebbe
+     * nulla su quei 16 nibble; sono coperti dal giro synthetic sui byte casuali. */
+    for (j = 0; j < 4; j++) b[j] = sc[j];
+    for (j = 0; j < 32; j++) b[4 + j] = (uint8_t)((j & 15u) | (((j + 8) & 15u) << 4));
+    return n_grid;
+}
+
+struct sweep {
+    int type;
+    const char *grid;
+    uint32_t n_grid;
+    uint32_t block_bytes;
+    uint32_t elems_per_block;
+    uint32_t (*fill)(uint8_t *blk, uint32_t base, uint32_t n_grid);
+};
+
+static const struct sweep sweeps[] = {
+    {16, "iq2xxs_grid",   256,  66, 256, sw_iq2_xxs},
+    {17, "iq2xs_grid",    512,  74, 256, sw_iq2_xs},
+    {18, "iq3xxs_grid",   256,  98, 256, sw_iq3_xxs},
+    {21, "iq3s_grid",     512, 110, 256, sw_iq3_s},
+    {22, "iq2s_grid",    1024,  82, 256, sw_iq2_s},
+    {19, "iq1s_grid",    2048,  50, 256, sw_iq1_s},
+    {29, "iq1s_grid",    2048,  56, 256, sw_iq1_m},
+    {20, "kvalues_iq4nl",  16,  18,  32, sw_iq4_nl},
+    {23, "kvalues_iq4nl",  16, 136, 256, sw_iq4_xs},
+    {39, "kvalues_fp4",    16,  17,  32, sw_mxfp4},
+    {40, "kvalues_fp4",    16,  36,  64, sw_nvfp4},
+};
+
+static void grid_sweep(struct verdict *v) {
+    size_t si;
+    printf("sweep delle griglie (OGNI indice di codebook contro la tabella compilata in ggml)\n");
+    for (si = 0; si < sizeof sweeps / sizeof *sweeps; si++) {
+        const struct sweep *s = &sweeps[si];
+        uint64_t before = v->ours + v->ext;
+        uint32_t base = 0, written = 0, blocks = 0;
+        unsigned char blk[136];
+        if (s->block_bytes > sizeof blk) {
+            printf("    %s: blocco da %" PRIu32 " byte troppo grande per il buffer da %zu: "
+                   "sweep NON eseguito\n", s->grid, s->block_bytes, sizeof blk);
+            v->ours++;
+            continue;
+        }
+        while (base < s->n_grid) {
+            uint32_t wrote;
+            memset(blk, 0, sizeof blk);
+            wrote = s->fill(blk, base, s->n_grid);
+            if (wrote == 0) {
+                printf("    %s: il builder ha scritto ZERO indici alla base %" PRIu32
+                       " — sweep interrotto (un giro muto non è un passaggio)\n", s->grid, base);
+                v->ours++;
+                break;
+            }
+            if (wrote > s->n_grid - base) {
+                printf("    %s: il builder ha scritto %" PRIu32 " indici oltre le %" PRIu32
+                       " voci a base %" PRIu32 " — sweep interrotto\n", s->grid, wrote,
+                       s->n_grid - base, base);
+                v->ours++;
+                break;
+            }
+            compare(s->type, blk, s->elems_per_block, s->grid, 0, v);
+            base += wrote;
+            written += wrote;
+            blocks++;
+        }
+        printf("    %-16s tipo %2d: %" PRIu32 "/%" PRIu32 " indici battuti in %" PRIu32
+               " blocchi, %s\n", s->grid, s->type, written, s->n_grid, blocks,
+               (v->ours + v->ext) == before ? "nessun bit divergente" : "DIVERGENZE SOPRA");
+    }
 }
 
 int main(int argc, char **argv) {
-    int i, div = 0, io = 0;
+    struct verdict v;
+    int i, io = 0;
+    memset(&v, 0, sizeof v);
     if (argc < 2) {
         fprintf(stderr, "uso: %s <--synthetic | <file.gguf> [...]>\n", argv[0]);
         return 2;
@@ -349,18 +641,29 @@ int main(int argc, char **argv) {
         argc = 1; /* nessun file: si passa direttamente al verdetto */
     }
     for (i = 2; i < argc; i++) {
-        int r = one(argv[i]);
-        if (r == 2) io = 1;
-        else div |= r;
+        if (one(argv[i], &v) == 2) io = 1;
     }
-    div |= synthetic();
-    div |= f16_exhaustive();
-    div |= coverage_audit();
+    synthetic(&v);
+    grid_sweep(&v);
+    f16_exhaustive(&v);
+    coverage_audit(&v);
     if (io) {
         printf("ESITO: almeno un file NON è stato aperto — nessun verdetto sui bit "
                "(le righe qui sopra dicono quali)\n");
         return 2;
     }
-    printf("%s\n", div ? "ESITO: DIVERGENZE" : "ESITO: nessun bit divergente");
-    return div ? 1 : 0;
+    if (v.ours) {
+        printf("ESITO: %" PRIu64 " DIVERGENZE NOSTRE su %" PRIu64
+               " confronti — lavoro di questo repo\n", v.ours, v.calls);
+        return 1;
+    }
+    if (v.ext) {
+        printf("ESITO: nessun ns. bit divergente su %" PRIu64
+               " confronti, ma %" PRIu64 " disaccordi TRA TESTIMONI (A/B di GMBasic contro "
+               "ggml): bug da aprire nel vault GMBasic, non qui. Chiuso 3 = VERDE PER NOI.\n",
+               v.calls, v.ext);
+        return 3;
+    }
+    printf("ESITO: nessun bit divergente (%" PRIu64 " confronti)\n", v.calls);
+    return 0;
 }
