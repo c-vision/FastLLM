@@ -20,6 +20,7 @@
  * codice, il file e il messaggio; `n_ok` dice dove si è arrivati.
  */
 #include "fmlx/fmlx_cli.h"
+#include "fmlx_cli_internal.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -28,6 +29,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 #define COPY_CHUNK 65536
@@ -126,12 +128,20 @@ static FmlxHfStatus mirror_one(const char *src, const char *dst) {
     return copy_stream(src, dst);
 }
 
+/* Il transport chiama QUI, e l'orologio si prende QUI e non dentro il renderer: il renderer deve
+ * poter essere provato con un tempo FINTO, o «un ridisegno al secondo» si prova solo dormendo — che
+ * non è un test, è un rituale. */
+static void pull_on_bytes(void *pctx, int64_t done, int64_t total_hint) {
+    fmlx_pull_progress_bytes((FmlxPullProgress *)pctx, done, total_hint, (int64_t)time(NULL));
+}
+
 static FmlxHfStatus pull_go(const char *repo_id, const char *revision, const FmlxPullOpts *opts,
                             const FmlxHfTransport *t, FmlxPullReport *rep_out, FILE *log) {
     FmlxPullReport scratch;
     FmlxPullOpts d;
     FmlxHfFetchOpts fo;
     FmlxHfManifest m;
+    FmlxPullProgress prog;
     FmlxHfStatus s = FMLX_HF_OK;
     char root[FMLX_HF_PATH_MAX], repo_dir[FMLX_HF_PATH_MAX], snap[FMLX_HF_PATH_MAX];
     char dst_root[FMLX_HF_PATH_MAX], src[FMLX_HF_PATH_MAX], dst[FMLX_HF_PATH_MAX];
@@ -148,6 +158,14 @@ static FmlxHfStatus pull_go(const char *repo_id, const char *revision, const Fml
     }
     memset(rep, 0, sizeof *rep);
     fo = d.fetch;
+    /* Su un terminale la riga di avanzamento SOSTITUISCE quella per-file; su tutto il resto (pipe,
+     * log, `$( )`) non c'è nessun `\r` e resta il comportamento di sempre. `log == NULL` è il
+     * `--quiet`, che non è un terminale: è il silenzio. */
+    fmlx_pull_progress_init(&prog, log, log ? isatty(fileno(log)) : 0);
+    if (fmlx_pull_progress_inplace(&prog)) {
+        fo.on_bytes = pull_on_bytes;
+        fo.bytes_ctx = &prog;
+    }
     if (!t) t = fmlx_hf_transport_curl(); /* NULL = il transport di sistema, non "nessun transport" */
 
     if (!repo_id || !*repo_id) {
@@ -199,13 +217,20 @@ static FmlxHfStatus pull_go(const char *repo_id, const char *revision, const Fml
 
         memset(&ref, 0, sizeof ref);
         if (m.files[i].size >= 0) rep->bytes_declared += m.files[i].size;
+        fmlx_pull_progress_begin(&prog, i + 1, m.n, rel, m.files[i].size, (int64_t)time(NULL));
         s = fmlx_hf_download_with(repo_id, m.commit, rel, &fo, t, &ref);
         if (s != FMLX_HF_OK) {
+            /* La riga aperta va chiusa PRIMA del messaggio: un errore che compare in mezzo a una
+             * barra a metà schermo è illeggibile, e su un terminale resterebbe scritta. */
+            fmlx_pull_progress_abort(&prog);
             fail_lane(rep, s, rel);
             break;
         }
         rep->n_ok++;
-        if (log) fprintf(log, "  [%zu/%zu] %s  %" PRId64 " byte\n", i + 1, m.n, rel, ref.size);
+        if (fmlx_pull_progress_inplace(&prog))
+            fmlx_pull_progress_end(&prog, ref.size, (int64_t)time(NULL));
+        else if (log)
+            fprintf(log, "  [%zu/%zu] %s  %" PRId64 " byte\n", i + 1, m.n, rel, ref.size);
     }
 
     /* 3) il ramo, scritto solo quando tutto il commit è a posto: `refs/<revision>` è ciò che rende

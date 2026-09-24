@@ -128,6 +128,19 @@ struct FmlxHfFetchOpts {
      * con N = byte già nel `.incomplete`, quindi un 30 GB fermi al 90% riparte dal 90%. */
     int stall_timeout_s;
     int stall_retries;
+    /* Avanzamento del SINGOLO file, chiamato dal transport DOPO che i byte sono stati scritti su
+     * `fd`: `done` è la posizione nel file (ciò che già c'era dalla ripresa + i byte nuovi),
+     * `total_hint` è la lunghezza dichiarata per il file intero — lo stesso `limit` passato a
+     * `get`, quindi -1 se il server non l'ha detto.
+     *
+     * Sta sul trasporto e non nella lane per un motivo preciso: l'unico numero che non mente è
+     * quello dei byte che HO MESSO SU DISCO, e il posto dove si scrive è dentro la callback del
+     * corpo. Una lane che segnalasse "al 40%" in base ai byte *richiesti* racconterebbe un
+     * andamento che non ha misurato — ed è il tipo di barra che fa da prova a un download che non
+     * c'è. Nulla qui può far fallire un download: la callback ritorna void, e un rendering sbagliato
+     * lascia i byte giusti. */
+    void (*on_bytes)(void *pctx, int64_t done, int64_t total_hint);
+    void *bytes_ctx;
 };
 
 /* Stato del transport libcurl di sistema. Init/finalize NON sono richiesti: `acquire` crea

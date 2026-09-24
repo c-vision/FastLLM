@@ -11,6 +11,9 @@
  *     contatori sarebbe una speranza, non un fatto);
  *  c) `--dest` è un HARDLINK degli stessi byte, mai un symlink, e le directory annidate esistono;
  *  d) un fallimento a metà FERMA il pull e NON lascia uno specchio a metà né un ref scritto.
+ *  e) l'avanzamento: su un terminale UNA riga che si riscrive, su tutto il resto nessun carattere
+ *     di controllo. Sono due decisioni diverse (quando disegnare / se disegnare) e hanno due prove
+ *     diverse — i casi in fondo al file.
  *
  * I valori esadecimali qui sotto non sono inventati: `git hash-object` e `shasum -a 256` sui due
  * corpi, misurati su questa macchina. Il test costruisce il cache con le regole della lane hf
@@ -18,14 +21,17 @@
  * maskerebbero un bug del primo.
  */
 #include "fmlx/fmlx_cli.h"
+#include "fmlx_cli_internal.h" /* il renderer si prova DA SOLO, con l'orologio in mano */
 
 #include <errno.h>
+#include <fcntl.h>
 #include <ftw.h>
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <util.h> /* openpty: provare che la decisione `isatty` èpresa sul FILE giusto */
 #include <unistd.h>
 
 static int checks, failures;
@@ -78,7 +84,8 @@ static size_t N_ENTRIES = sizeof ENTRIES / sizeof ENTRIES[0];
 
 static char MANIFEST[FMLX_HF_PATH_MAX];
 static FmlxHfStatus buf_status; /* != OK: la richiesta del manifesto fallisce COSI' */
-static int n_buf, n_meta, n_get;
+static int n_buf, n_meta, n_get, n_configure, n_ticks;
+static FmlxHfFetchOpts GIVEN; /* le opzioni della chiamata, come le vede il transport */
 static char last_meta_url[FMLX_HF_PATH_MAX];
 
 static void build_manifest(void) {
@@ -145,15 +152,38 @@ static FmlxHfStatus fake_get(void *c, const char *url, const char *tok, int64_t 
         ssize_t w = write(fd, e->body + off, strlen(e->body) - (size_t)off);
         if (w < 0) return FMLX_HF_ERR_IO;
         off += w;
+        /* Il contratto di `on_bytes`, nella forma esatta in cui lo onora `body_cb`: DOPO la write,
+         * con la POSIZIONE NEL FILE (quindi `off`, che parte da `from`) e la promessa del file
+         * intero. Un finto che non la chiama lascia il renderer provato solo a mano. */
+        if (GIVEN.on_bytes) {
+            n_ticks++;
+            GIVEN.on_bytes(GIVEN.bytes_ctx, off, limit);
+        }
     }
     *written = off - from;
     return FMLX_HF_OK;
 }
 
-static void fake_reset(void) { n_buf = n_meta = n_get = 0; buf_status = FMLX_HF_OK; }
+/* `configure` non è un ornamento: è il CANALE con cui le opzioni della chiamata arrivano al
+ * transport (il watchdog, e adesso l'hook di avanzamento). Un finto che lo lascia NULL prova meno
+ * della realtà, perché il `pull` cabla l'hook esattamente lì dentro. */
+static void fake_configure(void *c, const FmlxHfFetchOpts *o) {
+    (void)c;
+    n_configure++;
+    /* Copia INTEGRA, anche a vuoto: `GIVEN` deve raccontare le opzioni di QUESTA chiamata, non
+     * l'ultima che ne aveva. È lo stesso obbligo che il transport vero documenta in `Ctx`. */
+    memset(&GIVEN, 0, sizeof GIVEN);
+    if (o) GIVEN = *o;
+}
+
+static void fake_reset(void) {
+    n_buf = n_meta = n_get = n_configure = n_ticks = 0;
+    buf_status = FMLX_HF_OK;
+    memset(&GIVEN, 0, sizeof GIVEN);
+}
 
 /* Ordine dei campi: ctx, meta, get, configure, get_buf. */
-static const FmlxHfTransport VT = {NULL, fake_meta, fake_get, NULL, fake_buf};
+static const FmlxHfTransport VT = {NULL, fake_meta, fake_get, fake_configure, fake_buf};
 
 /* ---- il palco: un cache per caso, costruito e cancellato qui ---- */
 static char BASE[FMLX_HF_PATH_MAX];
@@ -390,6 +420,259 @@ static void case_null_report(void) {
     CK_ST(fmlx_pull_with(REPO, "main", &o, &VT, NULL, NULL), FMLX_HF_OK);
 }
 
+/* ---- l'avanzamento: due livelli, perché sono DUE decisioni ----
+ *
+ *  · QUANDO disegnare (il renderer: throttling, velocità, eta, cosa non inventare) si prova qui
+ *    dentro con l'OROLOGIO FINTO. Con `time(NULL)` dentro, «un ridisegno al secondo» si proverebbe
+ *    solo dormendo un secondo per ogni asserzione.
+ *  · SE disegnare (la scelta `isatty` sul FILE* del log) vive nel `pull`, e si prova con un vero
+ *    terminale finto — una pty — e con un non-terminale vero — un `open_memstream`.
+ *
+ * L'uno non prova l'altro: un renderer perfetto che non viene mai invocato, e un invocatore che
+ * invoca il renderer su una pipe, sono due errori che sembrano lo stesso verde.
+ */
+static char *RB;
+static size_t RB_N;
+
+static FILE *rb_file(void) {
+    RB = NULL;
+    RB_N = 0;
+    return open_memstream(&RB, &RB_N);
+}
+
+/* `open_memstream` scrive il terminatore solo su fflush/fclose. */
+static char *rb_end(FILE *f) {
+    fclose(f);
+    if (!RB) RB = strdup("");
+    return RB;
+}
+
+static int count_ch(const char *s, char c) {
+    int k = 0;
+    for (; s && *s; s++)
+        if (*s == c) k++;
+    return k;
+}
+
+/* Il k-esimo ridisegno, senza il `\r` e senza gli spazi di cancellazione: la riga COME LA VEDE
+ * chi guarda, non come l'ha messa il buffer. */
+static char *seg(const char *s, int k) {
+    static char out[700];
+    int line = -1, i, j = 0;
+
+    for (i = 0; s[i]; i++) {
+        if (s[i] == '\r') {
+            line++;
+            /* `j` SI AZZERA SOLO sul segmento chiesto: rimetterlo a zero a ogni `\r` cancellava
+             * ciò che era stato copiato, e la riga 0 usciva vuota da ogni asserzione. */
+            if (line == k) j = 0;
+            continue;
+        }
+        if (s[i] == '\n') break;
+        if (line == k && j < (int)sizeof out - 1) out[j++] = s[i];
+    }
+    out[j] = '\0';
+    while (j > 0 && out[j - 1] == ' ') out[--j] = '\0';
+    return out;
+}
+
+/* La lunghezza GREZZA del k-esimo ridisegno, padding compreso. `seg` sfoltisce gli spazi perché
+ * serve alle asserzioni sul testo; questa serve a parlare del padding, che QUEGLI spazi è. */
+static int seg_len(const char *s, int k) {
+    int line = -1, i, start = -1, len = 0;
+
+    for (i = 0; s[i] && s[i] != '\n'; i++) {
+        if (s[i] == '\r') {
+            if (line == k) break;
+            line++;
+            if (line == k) start = i + 1;
+            continue;
+        }
+    }
+    if (start < 0) return -1;
+    for (len = 0; start + len < i; len++)
+        ;
+    return len;
+}
+
+static void case_progress_disegna(void) {
+    FmlxPullProgress p;
+    FILE *f;
+    char *s;
+
+    /* Il filo principale: begin, un tick nello STESSO secondo (non deve disegnare), un tick al
+     * secondo dopo (UN ridisegno), end. Tre `\r` e un solo `\n`. */
+    f = rb_file();
+    fmlx_pull_progress_init(&p, f, 1);
+    fmlx_pull_progress_begin(&p, 1, 3, "model-00001-of-00004.safetensors", 1000, 100);
+    fmlx_pull_progress_bytes(&p, 100, 1000, 100);
+    fmlx_pull_progress_bytes(&p, 500, 1000, 101);
+    fmlx_pull_progress_end(&p, 1000, 101);
+    s = rb_end(f);
+    CK(count_ch(s, '\r') == 3, "ridisegni=%d attesi 3 (begin, il tick del secondo dopo, end):\n%s",
+       count_ch(s, '\r'), s);
+    CK(count_ch(s, '\n') == 1, "a capo=%d: la riga di un file deve chiudersi UNA volta\n%s",
+       count_ch(s, '\n'), s);
+    CK(strstr(seg(s, 0), "[1/3]") != NULL && strstr(seg(s, 0), "model-00001") != NULL,
+       "la prima riga non nomina file e posizione:\n%s", seg(s, 0));
+    /* Al primo disegno non c'è velocità: un campione solo non ha un denominatore, e "0 B/s" è il
+     * modo in cui una CLI insegna a non fidarsi delle sue cifre. */
+    CK(strstr(seg(s, 0), "/s") == NULL, "la velocità al primo campione:\n%s", seg(s, 0));
+    CK(strstr(seg(s, 1), "50%") != NULL, "il tick del secondo dopo non dice mezzo:\n%s", seg(s, 1));
+    CK(strstr(seg(s, 2), "100%") != NULL, "l'ultima foto non dice tutto finito:\n%s", seg(s, 2));
+    CK(strstr(seg(s, 1), "/s") != NULL, "col secondo campione la velocità manca:\n%s", seg(s, 1));
+    /* I ridisegni non accorciano MAI: il padding cancella ciò che era più lungo, e senza questa
+     * regola sotto una riga da 90 colonne resterebbero 30 caratteri di un file finito. */
+    {
+        int l0 = seg_len(s, 0), l1 = seg_len(s, 1), l2 = seg_len(s, 2);
+        CK(l0 > 0 && l1 >= l0 && l2 >= l1,
+           "righe che si accorciano, padding perduto: %d %d %d", l0, l1, l2);
+    }
+
+    /* Ripresa: il primo campione fissa il BASE, e la velocità si calcola da lì. 900 byte che
+     * c'erano già non sono 900 byte/s: senza la sottrazione questa riga direbbe 950. */
+    f = rb_file();
+    fmlx_pull_progress_init(&p, f, 1);
+    fmlx_pull_progress_begin(&p, 2, 3, "model-00002-of-00004.safetensors", 1000, 100);
+    fmlx_pull_progress_bytes(&p, 900, 1000, 100);
+    fmlx_pull_progress_bytes(&p, 950, 1000, 101);
+    s = rb_end(f);
+    /* Lo SPAZIO prima del numero è parte dell'asserzione: "50 byte/s" sta anche dentro "950
+     * byte/s", e senza lo spazio questo controllo è sopravvissuto alla mutazione che azzera il
+     * base — cioè un controllo verde che non prova niente. */
+    CK(strstr(seg(s, 1), " 50 byte/s") != NULL,
+       "la ripresa conta come merito di adesso (atteso 50 byte/s):\n%s", seg(s, 1));
+
+    /* Nessuna lunghezza dichiarata: nessun segno di percentuale e nessuna barra. I byte sì, che
+     * sono un fatto; la percentuale sarebbe un'invenzione. */
+    f = rb_file();
+    fmlx_pull_progress_init(&p, f, 1);
+    fmlx_pull_progress_begin(&p, 3, 3, "pezzo.bin", -1, 100);
+    fmlx_pull_progress_bytes(&p, 400, -1, 101);
+    s = rb_end(f);
+    CK(strchr(seg(s, 1), '%') == NULL, "una percentuale inventata senza promessa del server:\n%s",
+       seg(s, 1));
+    CK(strstr(seg(s, 1), "[--") == NULL, "la barra senza totale:\n%s", seg(s, 1));
+    CK(strstr(seg(s, 1), "400 byte") != NULL, "i byte mancherebbero:\n%s", seg(s, 1));
+
+    /* Un server che ha dichiarato MENO di quanto ha mandato: la barra si ferma, non va oltre. */
+    f = rb_file();
+    fmlx_pull_progress_init(&p, f, 1);
+    fmlx_pull_progress_begin(&p, 1, 1, "x", 1000, 100);
+    fmlx_pull_progress_bytes(&p, 1500, 1000, 101);
+    s = rb_end(f);
+    CK(strstr(seg(s, 1), "100%") != NULL && strstr(seg(s, 1), "150%") == NULL,
+       "la barra oltre il cento:\n%s", seg(s, 1));
+
+    /* abort: si va a capo, e BASTA. Riscrivere la riga direbbe una cosa diversa da quella che
+     * l'utente ha visto, e il messaggio d'errore del chiamante deve arrivare sulla riga dopo. */
+    f = rb_file();
+    fmlx_pull_progress_init(&p, f, 1);
+    fmlx_pull_progress_begin(&p, 1, 2, "meta.json", 1000, 100);
+    fmlx_pull_progress_bytes(&p, 500, 1000, 101);
+    fmlx_pull_progress_abort(&p);
+    s = rb_end(f);
+    CK(count_ch(s, '\r') == 2 && count_ch(s, '\n') == 1, "abort ha riscritto la riga:\n%s", s);
+    CK(s[strlen(s) - 1] == '\n', "la riga abortita non è chiusa a capo:\n%s", s);
+
+    /* IL NON-TERMINALE: qui dentro non esce un byte. È la regola 1 del renderer, ed è la stessa
+     * asserzione fatta a monte (`case_progress_pipe`) da un'altra parte del confine. */
+    f = rb_file();
+    fmlx_pull_progress_init(&p, f, 0);
+    fmlx_pull_progress_begin(&p, 1, 2, "meta.json", 1000, 100);
+    fmlx_pull_progress_bytes(&p, 500, 1000, 101);
+    fmlx_pull_progress_end(&p, 1000, 101);
+    fmlx_pull_progress_abort(&p);
+    s = rb_end(f);
+    CK(RB_N == 0, "su un non-tty il renderer ha scritto %zu byte:\n%s", RB_N, s);
+    CK(fmlx_pull_progress_inplace(&p) == 0, "inplace dice il contrario di tty=0");
+}
+
+/* Il `pull` completo su un non-terminale (memstream): nessuna riga di controllo, e le righe
+ * per-file di sempre restano dove erano. `n_ticks == 0` è l'altra metà della prova: l'hook non è
+ * nemmeno offerto al transport, quindi non è che si offre e si finge di non vederlo. */
+static void case_progress_pipe(void) {
+    FmlxPullOpts o;
+    FmlxPullReport rep;
+    char *buf;
+    size_t n = 0;
+    FILE *log = open_memstream(&buf, &n);
+
+    fresh("progress-pipe");
+    opts_for(&o);
+    memset(&rep, 0, sizeof rep);
+    CK_ST(fmlx_pull_with(REPO, "main", &o, &VT, &rep, log), FMLX_HF_OK);
+    fclose(log);
+    if (!buf) buf = strdup("");
+    buf[n] = '\0';
+    CK(strchr(buf, '\r') == NULL, "la pipe ha ricevuto un ritorno carrello:\n%s", buf);
+    CK(strstr(buf, "  [1/2] config.json  7 byte\n") != NULL,
+       "la riga per-file classica è sparita:\n%s", buf);
+    CK(strstr(buf, "  [2/2] weights/model.safetensors  4 byte\n") != NULL,
+       "manca la seconda riga:\n%s", buf);
+    CK(n_ticks == 0, "su un non-tty l'hook è stato offerto lo stesso: %d tick", n_ticks);
+    CK(n_configure == 2, "configure=%d: due file, il manifesto non chiede un GET a fd", n_configure);
+    free(buf);
+}
+
+/* E il terminale VERO: una pty. È l'unico modo di provare che la decisione è presa sul FILE*
+ * giusto — `isatty` su un fd diverso, o peggio su stdout sempre, darebbe lo stesso verde qui
+ * sopra. Se la pty non si può aprire il test lo DICE come fallimento: un salto silenzioso
+ * lascerebbe la regola scoperta con l'aria di provata. */
+static void case_progress_pty(void) {
+    FmlxPullOpts o;
+    FmlxPullReport rep;
+    int m = -1, sl = -1;
+    struct winsize ws;
+    char buf[4096];
+    size_t got = 0;
+    FILE *log;
+
+    fresh("progress-pty");
+    memset(&ws, 0, sizeof ws);
+    ws.ws_col = 80;
+    ws.ws_row = 24;
+    if (openpty(&m, &sl, NULL, NULL, &ws) != 0) {
+        CK(0, "openpty: %s — senza terminale finto la scelta `isatty` resta NON provata",
+           strerror(errno));
+        return;
+    }
+    opts_for(&o);
+    memset(&rep, 0, sizeof rep);
+    log = fdopen(sl, "w");
+    if (!log) {
+        CK(0, "fdopen della pty: %s", strerror(errno));
+        close(m);
+        close(sl);
+        return;
+    }
+    /* Il master si mette in NON-BLOCKING PRIMA di scrivere: dopo che lo schiavo è chiuso un master
+     * non restituisce più niente, e «non ho letto» somiglierebbe a «non ha scritto» — che è il
+     * genere di verde-muto che fa passare un regresso. */
+    fcntl(m, F_SETFL, O_NONBLOCK);
+    CK_ST(fmlx_pull_with(REPO, "main", &o, &VT, &rep, log), FMLX_HF_OK);
+    fflush(log); /* lo stdio su terminale è line-buffered: l'ultima riga è ancora nel buffer */
+    for (;;) {
+        ssize_t r = read(m, buf + got, sizeof buf - 1 - got);
+        if (r <= 0) break;
+        got += (size_t)r;
+        if (got + 1 >= sizeof buf) break;
+    }
+    buf[got] = '\0';
+    fclose(log);
+    close(m);
+    CK(n_ticks >= 2, "sul terminale l'hook non è mai arrivato al transport: %d tick", n_ticks);
+    CK(strchr(buf, '\r') != NULL, "su un terminale VERO nessun ridisegno:\n%s", buf);
+    CK(strstr(buf, "[1/2]") != NULL && strstr(buf, "config.json") != NULL,
+       "la riga del terminale non nomina il primo file:\n%s", buf);
+    CK(strstr(buf, "[2/2]") != NULL, "il secondo file non ha una riga sua:\n%s", buf);
+    /* LA STESSA stringa che `case_progress_pipe` esige presente qui deve essere ASSENTE: le due
+     * modalità sono alternative, non sovrapposte — una riga per-file sotto la barra sarebbe il
+     * doppio log che l'utente non ha chiesto. */
+    CK(strstr(buf, "  [1/2] config.json  7 byte\n") == NULL,
+       "barra E riga per-file insieme (doppio log):\n%s", buf);
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) {
         printf("uso: %s <dir-di-lavoro>\n", argv[0]);
@@ -416,6 +699,9 @@ int main(int argc, char **argv) {
     case_mismatch_stops_everything();
     case_manifest_refused();
     case_null_report();
+    case_progress_disegna();
+    case_progress_pipe();
+    case_progress_pty();
 
     printf("test_pull: %d verifiche, %d fallimenti\n", checks, failures);
     return failures ? 1 : 0;

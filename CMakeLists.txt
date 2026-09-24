@@ -181,9 +181,11 @@ add_test(NAME serve COMMAND test_serve ${CMAKE_CURRENT_BINARY_DIR}/work-serve)
 # Un file per verbo, non uno: `pull` è una lane con un report e delle regole sui path, `models` è
 # una tabella letta da disco, l'argv è una terza cosa che cambia con motivi diversi (una bandiera
 # nuova contro un ordine di download). Il `main` sta da solo perché è l'unica parte NON provabile
-# in-process.
+# in-process. `fmlx_pull_progress.c` è il QUARTO motivo: il disegno di una riga che si riscrive ha
+# una sua severità (orologio, throttling, che cosa non stampare su una pipe) che non c'entra niente
+# con l'ordine dei byte nel cache, e sta in un file che si prova da solo.
 add_library(fmlx_cli STATIC src/cli/fmlx_pull.c src/cli/fmlx_models.c src/cli/fmlx_cli.c
-                            src/cli/fmlx_serve.c)
+                            src/cli/fmlx_pull_progress.c src/cli/fmlx_serve.c)
 target_include_directories(fmlx_cli PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 # `fmlx_serve` tra le dipendenze PUBBLICHE: il verbo c'è solo se il loop c'è, e un `serve` che
 # compilasse senza il socket sarebbe il "comando che risponde di sì" che il piano vieta.
@@ -195,6 +197,10 @@ target_link_libraries(fastmlx PRIVATE fmlx_cli)
 # Il `pull` contro un server finto: cache reale su disco, byte finti, zero rete.
 add_executable(test_pull tests/cli/test_pull.c)
 target_link_libraries(test_pull PRIVATE fmlx_cli)
+# `src/cli` in più sul path: il renderer di avanzamento si prova anche da solo, e il suo header è
+# INTERNO — non è API della libreria, ed è esattamente la ragione per cui sta in `src` e non in
+# `include`.
+target_include_directories(test_pull PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/cli)
 add_test(NAME pull COMMAND test_pull ${CMAKE_CURRENT_BINARY_DIR}/work-cli-pull)
 
 # L'argv, il dispatch e la tabella di `models`: canali, bandiere rifiutate, verbi non ancora cablati.

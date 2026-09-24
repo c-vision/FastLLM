@@ -56,6 +56,8 @@ void fmlx_cli_usage(FILE *out) {
             "  --offline              mai rete: se manca un file, errore\n"
             "  --repair             permesso di sostituire un blob che non verifica\n"
             "  --quiet              niente righe di progresso\n"
+            "                       Su terminale il progresso e' UNA riga che si riscrive; su pipe o\n"
+            "                       log una riga per file, senza nessun carattere di controllo.\n"
             "  -h, --help             questo testo\n"
             "\n"
             "per models:\n"

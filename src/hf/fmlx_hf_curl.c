@@ -97,6 +97,13 @@ typedef struct {
     int saw_status;
     long long xfer_now;  /* dlnow+ulnow dell'ultimo giro di callback: -1 = mai visto */
     time_t xfer_at;      /* a che ora quel progresso è arrivato */
+    /* Avanzamento: gli stessi due campi che `configure` legge dalle opzioni della chiamata, tenuti
+     * QUI perché la callback di curl arriva sul corpo e non ha il contesto della chiamata. Sono
+     * azzerati a OGNI configure, anche quando la chiamata non ne dà: un puntatore vecchio punterebbe
+     * una `FmlxPullProgress` di un pull finito (memoria libera), ed è il genere di errore che si
+     * vede una volta ogni mille download. */
+    void (*on_bytes)(void *pctx, int64_t done, int64_t total_hint);
+    void *bytes_ctx;
 } Ctx;
 
 static void meta_reset(FmlxHfMeta *m) {
@@ -253,6 +260,12 @@ static size_t body_cb(char *ptr, size_t size, size_t nitems, void *ud) {
         off += (size_t)w;
         c->written += (int64_t)w;
     }
+    /* Il numero segnalato è la POSIZIONE NEL FILE, non i byte di questo chunk: chi disegna una
+     * barra deve poterla sommare a ciò che c'era già. Dopo un `range_reset` però la ripresa non
+     * esiste più (il temporaneo è stato tagliato a zero qui sopra), e sommare `from` darebbe una
+     * barra oltre il 100% su un file che riparte dal capo. */
+    if (c->on_bytes)
+        c->on_bytes(c->bytes_ctx, (c->range_reset ? 0 : c->from) + c->written, c->limit);
     return len;
 }
 
@@ -607,6 +620,9 @@ static void curl_configure(void *ctx_, const FmlxHfFetchOpts *opts) {
     Ctx *c = (Ctx *)ctx_;
     pthread_mutex_lock(&c->mu);
     c->stall_timeout_s = (opts && opts->stall_timeout_s > 0) ? opts->stall_timeout_s : 60;
+    /* Assegnati SEMPRE, anche a NULL: vedi i campi in `Ctx`. */
+    c->on_bytes = opts ? opts->on_bytes : NULL;
+    c->bytes_ctx = opts ? opts->bytes_ctx : NULL;
     pthread_mutex_unlock(&c->mu);
 }
 

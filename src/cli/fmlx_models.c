@@ -38,6 +38,7 @@
  */
 #include "fmlx/fmlx_cli.h"
 #include "fmlx/fmlx_hf.h"
+#include "fmlx_cli_internal.h" /* fmlx_cli_fmt_bytes: la formattazione è UNA, chi la usa sono due */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -50,7 +51,7 @@
 #define MARKER_AMBIGUOUS " [?]"
 #define NAME_MIN_WIDTH 24
 
-static void fmt_bytes(int64_t b, char *out, size_t n) {
+void fmlx_cli_fmt_bytes(int64_t b, char *out, size_t n) {
     static const char *const unit[] = {"byte", "kB", "MB", "GB", "TB", "PB"};
     size_t k = 0;
     double v;
@@ -134,7 +135,7 @@ static void print_row(const FmlxHfRepo *r, int64_t now, size_t wname, FILE *out)
 
     snprintf(name, sizeof name, "%s%s%s", r->repo_id,
              r->refs_only ? MARKER_REFS_ONLY : "", r->ambiguous_name ? MARKER_AMBIGUOUS : "");
-    fmt_bytes(r->bytes, dim, sizeof dim);
+    fmlx_cli_fmt_bytes(r->bytes, dim, sizeof dim);
     fmt_age(r->mtime, now, age, sizeof age);
     if (r->n_refs > shown) snprintf(refcol, sizeof refcol, "%zu*", r->n_refs);
     else snprintf(refcol, sizeof refcol, "%zu", r->n_refs);
@@ -236,7 +237,7 @@ FmlxCliStatus fmlx_models_exec(const FmlxCliArgs *a, FILE *out, FILE *err) {
 
     {
         char t[32];
-        fmt_bytes(total, t, sizeof t);
+        fmlx_cli_fmt_bytes(total, t, sizeof t);
         /* Il conteggio della riga finale è quello dei **match**, non quello del cache: dire "3 repo,
          * 1.5 kB" sotto una tabella di una riga sola sarebbe il modo in cui un filtro si spaccia per
          * l'elenco completo. E il filtro si NOMINA, perché "1 repo" senza dire 1 di cosa non è

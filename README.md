@@ -19,8 +19,8 @@ da Hugging Face). Piano completo: `AiWiki/01-Projects/FastMLX/Piani/(open) - Fas
 | `src/server/fmlx_api*.c` — router + adapter OpenAI/Anthropic sopra il codec | **esiste, compilato, testato** (151 verifiche). Non c'è ancora un motore sotto: la generazione è attaccata al confine `FmlxApiNext`, che il test copre con un doppio scriptato |
 | `src/server/fmlx_serve_respond.c` + `fmlx_serve.c` — il server: `/v1/models`, `/health`, il 501 per ogni rotta che genera, e il loop TCP | **esiste, compilato, testato, provato su socket vero** (161 verifiche: framing, `bind` rifiutato e arresto su segnale + uno smoke del binario con `curl` vero). Il motore non c'è e **non serve per provarlo** |
 | `src/lane_mlx/` — motore MLX estratto da GMBasic | non scritto. **D2 non blocca il "come"**: i prerequisiti per compilarlo sono già su questa macchina (verificato 2026-09-22: 28 header in `GMBasic/libs/mlx-deps/mlx-c-src/mlx/c/*.h`, più `libmlx.a` 31 MB e `libmlxc.a` 1,0 MB in `libs/mlx-deps/precompiled/darwin-arm64`). D2 decide solo **chi possiede** il motore |
-| `src/cli/fmlx_pull.c` + `fmlx_cli.c` — `fastmlx pull`, il dispatch e gli esiti | **esiste, compilato, testato, provato sul server vero** (48 + 156 verifiche; pull reale `sshleifer/tiny-gpt2`: 9/9 file, 9 blob il cui nome è il loro hash, snapshot riletto da `hf_probe`) |
-| `src/cli/fmlx_models.c` + `src/hf/fmlx_hf_catalog.c` — `fastmlx models` / `list` | **esiste, compilato, testato, provato sul cache vero di questa macchina** (103 + 156 verifiche; 23 repo letti in 0,01 s, 3.675.292.998 byte che coincidono con un conteggio di inode fatto a parte con `find`+`stat`) |
+| `src/cli/fmlx_pull.c` + `fmlx_pull_progress.c` + `fmlx_cli.c` — `fastmlx pull`, l'avanzamento, il dispatch e gli esiti | **esiste, compilato, testato, provato sul server vero** (77 + 190 verifiche, di cui 3 piani distinti per la barra: renderer con orologio in mano + terminale finto `openpty` + pipe; pull reale `sshleifer/tiny-gpt2`: 9/9 file, 9 blob il cui nome è il loro hash, snapshot riletto da `hf_probe`) |
+| `src/cli/fmlx_models.c` + `src/hf/fmlx_hf_catalog.c` — `fastmlx models` / `list` | **esiste, compilato, testato, provato sul cache vero di questa macchina** (103 + 190 verifiche; 23 repo letti in 0,01 s, 3.675.292.998 byte che coincidono con un conteggio di inode fatto a parte con `find`+`stat`) |
 | `src/cli/fmlx_serve.c` — `fastmlx serve` | **esiste, compilato, testato, provato**: risolve host/porta/chiave (flag > ambiente > default, piano §14) e passa tutto al loop. `--cache` vale anche qui: `pull`, `models` e `serve` guardano LO STESSO disco |
 | `src/cli/` — `run\|chat\|ps\|cp\|rm\|doctor` | **non collegati, e lo dicono**: `fmlx_cli_exec` ritorna `NOT_WIRED` nominando il pezzo che manca (motore / registro delle sessioni / chi scrive nel cache) ed esce 2. Il parser delle bandiere invece **esiste**, ed è provato per i 6 verbi rimasti — e una bandiera che il verbo non legge è un errore, non un'opzione ignorata |
 
@@ -506,8 +506,34 @@ iniziato e mai rinominato non è mai lo specchio di qualcosa. Un `stat` con stes
 mirror idempotente (il secondo `pull` non tocca niente), e il `link=2` misurato con `ls -la` sui tre
 file LFS è la prova che non c'è una copia da 2.5 MB per ciascuno.
 
-**Un errore ferma tutto, senza lasciare pezzi.** Al primo fallimento: nessun mirror, nessun ref, `FmlxPullReport.error_*` compilato con la causa e il file, esito `FAILED`. Copiare i file già scaricati
-prima di sapere se il nono esiste vorrebbe dire consegnare uno snapshot parziale che sembra completo.
+**L'avanzamento: UNA riga che si riscrive, ma solo dove `\r` vuol dire qualcosa**
+(`src/cli/fmlx_pull_progress.c`). Su un terminale il `pull` disegna
+`[3/20] model-00002…safetensors  42% [##########----------] 4.1 GB/ 9.8 GB  137 MB/s  eta 42s` e la
+riscrive **al massimo una volta al secondo**: a 500 MB/s la callback del corpo gira migliaia di volte,
+e scrivere al terminale a ogni giro è più lento del download che si sta mostrando. Su tutto il resto
+— pipe, log, `$( )`, `--quiet` — **non esce un solo carattere di controllo**: le righe per-file di
+prima restano dov'erano, perché in un file un `\r` non è "torna indietro", è "sovrascrivi ciò che
+chi legge sta leggendo".
+
+I numeri sono misurati o non ci sono: velocità ed eta compaiono dal **secondo** campione (con un
+campione solo il denominatore è zero, e "0 B/s" è il modo in cui una CLI insegna a non fidarsi delle
+sue cifre); senza una lunghezza dichiarata dal server non si disegna nessuna percentuale, si scrivono
+i byte; `done` oltre la promessa ferma la barra al 100%, non la fa esplodere; e nella **ripresa** i
+byte che c'erano già sono il `base`, non merito di adesso — 900 byte già sul disco con 50 nuovi in un
+secondo danno 50 byte/s, non 950. Il `total` che la barra usa è quello **risposto dal server**
+(`limit` del GET), non solo quello del manifesto. L'hook arriva al transport con
+`FmlxHfFetchOpts.on_bytes`, chiamato da `body_cb` **dopo** la `write()`: l'unico numero onesto è
+quello dei byte che ho messo su disco, e una barra basata sui byte *richiesti* racconterebbe un
+andamento che nessuno ha misurato.
+
+La prova di questa roba è su **tre piani distinti**, perché sono tre decisioni diverse: il renderer
+si prova da solo con l'**orologio in mano** (un `now` passato come parametro — con `time(NULL)`
+dentro, «una riga al secondo» si proverebbe dormendo); il `pull` su un **non-terminale vero**
+(`open_memstream`) asserisce che non c'è `\r` E che l'hook non è nemmeno offerto al transport; e il
+`pull` su un **terminale vero finto** (`openpty`) asserisce che il `\r` arriva, che la riga nomina il
+file, e che la riga per-file di prima NON c'è. Il `seg()` del test ha un trucco che vale la pena
+dire: la sua prima versione azzerava il contatore a ogni `\r` e quindi restituiva sempre la riga
+vuota — sei asserzioni rosse che sembravano sei bug del renderer, ed erano un bug del test.
 
 **Il dispatch:** `fmlx_cli_parse` non sa nulla dei motori e `fmlx_cli_exec` non sa nulla delle
 bandiere; il primo produce `FmlxCliArgs`, il secondo mappa gli esiti su exit code (`OK`→0,
@@ -540,10 +566,32 @@ parse passa, e a parlare è il dispatch con l'unica cosa vera oggi: manca il mot
 risolve lo snapshot scritto da `pull` con **`verifica=ok` su tutte le entry** — il cache che
 scriviamo è leggibile dal lettore con cui abbiamo verificato il cache di `huggingface_hub`.
 
+**Il terminale vero, per la prima volta** (`script -q log ./build/fastmlx pull sshleifer/tiny-gpt2
+--cache <work>`, pty allocato, 2026-09-24): **34 caratteri `\r`** su nove file, e la riga che a un
+occhio distratto sembra sbagliata è quella che conferma tutto — `[3/9] flax_model.msgpack 3%
+[#---…] 16.4 kB/412 kB` è l'UNICO frame «di mezzo» di tutto il download: gli altri otto file danno il
+frame iniziale allo 0% e quello finale al 100%, perché finiscono **prima del secondo campione**. Che
+non compaia né `MB/s` né `eta` qui non è un buco: è la regola «un campione non è un andamento»
+applicata da un server che risponde in meno di un secondo. La prova speculare, stessa macchina un
+minuto dopo: lo STESSO `pull` con stdout redirect su file → **zero `\r` in 610 byte**, nove righe
+per-file.
+
+**Ciò che il terminale vero ha fatto vedere e il test non guardava**: quando l'ultimo chunk capita in
+un **secondo diverso** da quello del campione precedente (`[6/9]`, `[8/9]`), il corpo disegna il 100% e
+`end()` lo ridisegna — due frame **identici e consecutivi**, ~70 byte dove l'occhio legge una riga
+sola. Non mente, non costa nulla su un terminale e non è un errore di incorniciatura (il `\n` di
+chiusura resta uno), ma è rumore di byte: misurato qui invece di ri-scoprirlo fra sei mesi.
+
 **Cosa NON è misurato qui**: la via di fallback `copy_stream` (hardlink impossibile) non è mai
-stata eseguita — il test gira su un singolo filesystem; la riga di avanzamento in-place (stile
-Ollama) non è implementata; i 6 verbi non collegati non hanno ancora un motore da nominare davvero,
-nominano il pezzo.
+stata eseguita — il test gira su un singolo filesystem; lo **specchio `--dest`** non ha ancora una
+riga sua (l'avanzamento esiste per il download, e il mirror resta una riga finale); il `time(NULL)`
+che `pull_on_bytes` passa all'hook è **rilettura d'orologio non provata** — il test inietta il proprio
+`now`, quindi «il tempo si aggiorna a ogni campione» è una scelta leggibile nel sorgente, non un
+comportamento asserito; e la riga di `curl_configure` che copia l'hook **anche quando è NULL** non è
+provata dai test del `pull`, perché girano sul transport finto — ciò che è provato è il contratto
+(l'hook arriva al transport con i numeri giusti: `mut_hookwire` diventa rosso se non lo si cabla),
+non il campo azzarato che protegge dal puntatore vecchio; i 6 verbi non collegati non hanno ancora un motore da
+nominare davvero, nominano il pezzo.
 
 ## `fastmlx models` / `list` — il catalogo locale (`src/hf/fmlx_hf_catalog.c` + `src/cli/fmlx_models.c`)
 
@@ -585,6 +633,29 @@ e il messaggio di rifiuto dell'argomento posizionale stampava `fastmlx: :` con i
 al test perché l'asserzione guardava solo il frammento finale: ora si asserisce anche il nome del
 verbo, per esteso.
 
+**`models <filtro>`: tre forme, e lo zero che parla.** `org/nome` si confronta con l'id intero,
+`nome` secco con la parte dopo l'ultimo `/` (e se due org hanno lo stesso modello la tabella le stampa
+tutte e due — non si sceglie noi quale "era quello che volevi"), `org/` + asterisco finale è il
+prefisso. L'asterisco altrove è `USAGE` (exit 2) e lo si decide **prima** di aprire il cache: un
+argomento illegale non è "gira lo stesso e vedi cosa esce". Zero match **con** filtro è `FAILED`
+(exit 1) con stdout **vuoto** e stderr che nomina il filtro — la convenzione di `grep`, e il motivo è
+che uno script fa `fastmlx models x >/dev/null && ...`: se "non c'è" esce 0, lo script mente. La riga
+di riepilogo conta i **match** e dice anche il totale del cache, perché "3 su 23" e "3" sono due
+informazioni diverse.
+
+Il `*` in mezzo a una stringa non è un glob: non c'è espansione della shell dentro `argv`, e
+`fastmlx models '*mm*'` significa ciò che significa un `*` che non sta in coda — cioè un errore, non
+una scorciatoia. Quattro controlli negativi costruiti sul sorgente copiato fuori dal tree: allargare
+il match del nudo (`strstr` al posto del confronto della coda) → 2 rossi; accettare l'asterisco in
+mezzo → 5 rossi (è il controllo che vale di più: quasi nessuno lo scrive, tutti però ci cascano);
+restituire `OK` su zero match → 2 rossi, uno per ramo (`--quiet` ha un `return` suo, prima della
+tabella, e la prima versione del test ne colpiva solo uno); sommare i byte del cache intero invece che
+dei match → 1 rosso. **Quest'ultimo è morto solo sull'asserzione `zz/` + asterisco** (7 byte contro
+1.5 kB): con `org/nome` il totale filtrato e quello del cache si *renderizzano* uguali — 1503 su 1510
+diventano entrambi "1.5 kB" — e il test che lo asseriva sarebbe stato verde per motivi falsi. C'è una
+riga nel test che lo dice, perché il punto non è che la formattazione nasconda un bug: è che qualcuno
+lo riscopra tra sei mesi e non lo chiami "coperto".
+
 ## Build e test
 
 ```sh
@@ -593,7 +664,11 @@ cmake --build build          # -Wall -Wextra -Werror
 ctest --test-dir build --output-on-failure   # 14 suite, nessuna tocca la rete (1,4 s)
 ./build/fmlx_gguf_inspect <file.gguf>   # testata, tipi, allineamento, coda di byte
 ./build/fastmlx pull <org>/<repo> [--revision R] [--dest D] [--cache C]   # lo snapshot nel cache
-./build/fastmlx models [--cache C] [--quiet]   # cosa c'è già nel cache, senza rete (`list` = alias)
+                                         # su un terminale: UNA riga che si riscrive; su pipe o log:
+                                         # una riga per file; `--quiet`: niente
+./build/fastmlx models [<filtro>] [--cache C] [--quiet]   # cosa c'è già nel cache, senza rete
+                                         # (`list` = alias; `org/nome`, `nome`, `org/`+asterisco;
+                                         #  nessun match = uscita 1)
 ./build/fastmlx serve [--host I] [--port N] [--cache C] [--max-body N] [--once]
                                          # /v1/models + /health VERI, 501 su tutto il resto;
                                          # l'auth è SOLO FASTMLX_API_KEY (vuota = nessuna)

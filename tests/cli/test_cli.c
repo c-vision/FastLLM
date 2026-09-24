@@ -740,6 +740,16 @@ static void case_aiuto(void) {
      * shell e nei processi altrui, la stessa ragione di HF_TOKEN. */
     CK(b && strstr(b, "FASTMLX_API_KEY") != NULL, "l'aiuto non dice come si passa la chiave");
     CK(b && strstr(b, "HF_TOKEN") != NULL, "l'aiuto non dice come si passa il token");
+    /* Il filtro e la sua regola d'uscita stanno qui dentro, non solo nel sorgente: chi digita
+     * `models xyz` e riceve 1 deve poter leggere PERCHÉ senza aprire `fmlx_models.c`. */
+    CK(b && strstr(b, "[<filtro>]") != NULL, "l'aiuto non nomina il filtro di `models`");
+    CK(b && strstr(b, "uscita 1") != NULL, "l'aiuto non dice che zero match sono un fallimento");
+    /* E la politica dell'avanzamento: un carattere di controllo che arriva in una pipe è ciò che
+     * l'utente legge come sporcizia, quindi il contratto si dichiara prima che si scopra. */
+    CK(b && strstr(b, " UNA riga che si riscrive") != NULL,
+       "l'aiuto non dice come il `pull` segna l'avanzamento");
+    CK(b && strstr(b, "senza nessun carattere di controllo") != NULL,
+       "l'aiuto non dice che su pipe/log non ci sono `\\r`");
     free(b);
 }
 
