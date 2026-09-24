@@ -13,22 +13,52 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
---------------------------------------------------------------------------------
-THIRD-PARTY ATTRIBUTIONS (Apache-2.0, Section 4)
---------------------------------------------------------------------------------
+================================================================================
+NOTICE — attribuzioni e obbligazioni (Apache-2.0, Section 4)
+================================================================================
+Questo file e' l'UNICA fonte di attribuzione del progetto (Apache-2.0, Sez. 4).
+Ogni eventuale elenco duplicato (es. LICENSES.md) e' stato unificato qui.
 
-This product includes or derives from software developed by third parties:
-
-  * ds4                - MIT License - Copyright (c) 2026 The ds4.c authors
-  * ggml               - MIT License - Copyright (c) 2023-2026 The ggml authors
-  * DeepSeek           - MIT License - Copyright (c) 2023 DeepSeek
-  * MLX / mlx-lm       - MIT License - Copyright (c) 2023 Apple Inc.
-  * gguflib            - (vedi il suo LICENSE nel repo di origine)
-
-Each notice above is retained per the terms of the respective license.
+=> Regola: nessun file sorgente di terze parti deve entrare nel repo senza che
+   la sua licenza sia elencata qui e il testo integrale sia presente in LICENSE*.
 
 --------------------------------------------------------------------------------
+A. CODICE CONSUMATO / DERIVATO (attribuzione richiesta)
+--------------------------------------------------------------------------------
+  * ds4 (antirez/ds4)            - MIT  - Copyright (c) 2026 The ds4.c authors
+    Tavola dei tipi GGUF e dimensioni dei blocchi (letti come reference).
+  * ggml / llama.cpp             - MIT  - Copyright (c) 2023-2026 The ggml authors
+    Formule dei dequant (verificate contro 4 implementazioni, non copiate);
+    codebook IQ2 (iq2xxs_grid, ksigns) e griglie IQ = DATA COPYING -> il testo
+    MIT integrale va incluso prima di qualunque distribuzione.
+  * DeepSeek                     - MIT  - Copyright (c) 2023 DeepSeek
+  * MLX / mlx-c / mlx-lm (Apple)- MIT  - Copyright (c) 2023 Apple Inc.
+  * gguflib (antirez/gguf-tools) - MIT  - funzione `gguf_q*_to_float` + tavola
+    `gguf_tensor_type_features` usate SOLO a tempo di verifica (nessun byte
+    copiato). Gguflib e' anche linkata DENTRO libmlx.a (via FetchContent MLX).
+  * oMLX (jundot/omlx)           - Apache-2.0 - kernel Metal `oq_a8*` (via
+    GMBasic/native/gmb_metal_oq_a8/), NON ancora presi in FastLLM.
+  * huggingface_hub              - Apache-2.0 - contratto del cache/download
+    (LETTO dal disco, nessun modello o file di cache copiato nel repo).
 
-Original author: Gaetano Minardi
-Notifications: gmbasic@maxxcom.it
+--------------------------------------------------------------------------------
+B. OBBLIGAZIONI CHE SCATTANO ALLA DISTRIBUZIONE
+--------------------------------------------------------------------------------
+  - Il repo e' PRIVATO e non redistribuisce nulla: gli obblighi sono registrati,
+    non ancora adempiuti. La decisione "distribuzione" (binario privato vs
+    pacchetto) determina COME si adempiono, non SE.
+  - Prima di distribuire: includere i testi MIT di ds4/ggml/DeepSeek/MLX/gguflib
+    e il testo Apache-2.0 di oMLX, e questo NOTICE.
+  - La provenienza dettagliata (file:riga) sta nei commenti del codice e nei test.
+
+--------------------------------------------------------------------------------
+C. NOTA DI METODO (vale anche fuori da qui)
+--------------------------------------------------------------------------------
+  Una citazione `file:riga` senza il percorso COMPLETO del file non e' una prova:
+  con due installazioni della stessa libreria allo stesso numero di versione, la
+  riga giusta letta sulla copia sbagliata sembra smentire se stessa.
+
+--------------------------------------------------------------------------------
+Original author / sole maintainer: Gaetano Minardi
+Notifications (CLA): gmbasic@maxxcom.it
 END OF NOTICE
