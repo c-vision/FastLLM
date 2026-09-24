@@ -18,6 +18,7 @@ da Hugging Face). Piano completo: `AiWiki/01-Projects/FastMLX/Piani/(open) - Fas
 | `src/server/fmlx_http.c` — codec HTTP/1.1: framing richiesta, testata risposta, SSE | **esiste, compilato, testato** (127 verifiche byte-esatte) |
 | `src/server/fmlx_api*.c` — router + adapter OpenAI/Anthropic sopra il codec | **esiste, compilato, testato** (151 verifiche). Non c'è ancora un motore sotto: la generazione è attaccata al confine `FmlxApiNext`, che il test copre con un doppio scriptato |
 | `src/server/fmlx_serve_respond.c` + `fmlx_serve.c` — il server: `/v1/models`, `/health`, il 501 per ogni rotta che genera, e il loop TCP | **esiste, compilato, testato, provato su socket vero** (163 verifiche: framing, `bind` rifiutato e arresto su segnale + uno smoke del binario con `curl` vero). Il motore non c'è e **non serve per provarlo** |
+| `include/mlxengine.h` + `src/engine/mlxengine.c` — **MLXEngine, il deliverable ①**: l'ABI del motore come libreria condivisa (`libmlxengine.1.dylib`, 20 simboli `mlxengine_*`) | **esiste, compilato, testato** (192 verifiche). Copre il lettore GGUF e il dequant; i pesi packed, la cache KV, l'attenzione, il MoE e la generazione NON ci sono ancora ed è il punto d'ingresso loro e del numero d'ABI. Prova di fedeltà del confine: la stessa fixture aperta due volte — attraverso l'ABI e dalla parte di dentro — e i bit confrontati. C'è anche un consumatore esterno vero (`tools/engine_abi_probe.c`: un header e una dylib, niente sorgenti) provato su 6 GGUF reali |
 | `src/lane_mlx/` — motore MLX estratto da GMBasic | non scritto. **D2 non blocca il "come"**: i prerequisiti per compilarlo sono già su questa macchina (verificato 2026-09-22: 28 header in `GMBasic/libs/mlx-deps/mlx-c-src/mlx/c/*.h`, più `libmlx.a` 31 MB e `libmlxc.a` 1,0 MB in `libs/mlx-deps/precompiled/darwin-arm64`). D2 decide solo **chi possiede** il motore |
 | `src/cli/fmlx_pull.c` + `fmlx_pull_progress.c` + `fmlx_cli.c` — `fastmlx pull`, l'avanzamento, il dispatch e gli esiti | **esiste, compilato, testato, provato sul server vero** (102 + 214 verifiche, di cui 3 piani distinti per la barra: renderer con orologio in mano + terminale finto `openpty` + pipe; pull reale `sshleifer/tiny-gpt2`: 9/9 file, 9 blob il cui nome è il loro hash, snapshot riletto da `hf_probe`) |
 | `src/cli/fmlx_models.c` + `src/hf/fmlx_hf_catalog.c` — `fastmlx models` / `list` | **esiste, compilato, testato, provato sul cache vero di questa macchina** (139 + 214 verifiche; 27 repo letti in <0,01 s, 3.675.292.998 byte su 76 inode che coincidono con un conteggio di inode fatto a parte con `find`+`stat`; **la riga `[!]` di un repo che non si è potuto aprire è una classe, non un'assenza** — vedi sotto) |
@@ -110,6 +111,49 @@ non è una copia — lo script **ricalcola i 16 valori dai bit E2M1** della spec
 (`derived_e2m1_doubled`, e il check è stato verificato capace di andare rosso); le cinque griglie
 IQ del lotto C hanno **una sola** sorgente, e lì la prova non è il confronto fra copie: è lo sweep
 eseguito indice per indice. Licenza MIT ggml: vedi `LICENSES.md`.
+
+## MLXEngine — l'ABI del motore (`include/mlxengine.h`, `libmlxengine.1.dylib`)
+
+Il deliverable ① del piano esiste da oggi come **oggetto linkerabile**, non come nome di sezione:
+`add_library(mlxengine SHARED)` produce `libmlxengine.1.0.0.dylib` con i symlink
+`libmlxengine.1.dylib` e `libmlxengine.dylib`, e esporta **venti simboli `mlxengine_*`**
+(`nm -gU` li elenca; nessuno `fmlx_*` esce dalla statica che sta sotto — l'ABI è l'unica
+superficie, ed è precisamente il punto per cui una dylib non è un header in un'altra cartella).
+
+Cosa copre oggi: il lettore GGUF e il dequant. **Non** i pesi packed, la cache KV, l'attenzione,
+il MoE, la generazione: quelli entrano qui con lo stesso numero d'ABI (`MLXENGINE_ABI_VERSION 1`)
+e un gate di parità per ciascuno. Sulla superficie valgono tre idee ferme:
+
+- **i codici del file non sono i codici della chiamata.** Sotto i 32 ci sono quelli del formato
+  (`FmlxGgufStatus`, citato e non duplicato), dal 64 quelli d'uso (`MLXENGINE_ERR_*`). Confonderli
+  fa fare la cosa opposta a chi ha torto in uno dei due casi: correggere il programma, o
+  riscrivere byte che erano perfetti.
+- **`at` conta gli elementi, non i byte**, e una finestra che cade in mezzo a un blocco è
+  rifiutata (`ERR_MISALIGNED`): gli indici di un blocco condividono la scala, quindi mezzo blocco
+  non ha valori corretti da dare. È la ragione per cui questa funzione esiste invece di un
+  `memcpy`. E è la ragione per cui esiste `mlxengine_tensor_block_vals`: senza il numero del
+  blocco, un chiamante che non ha i ns. sorgenti non può calcolarsi una richiesta legale —
+  gli resterebbe «ho chiesto 8 pesi di un Q4_K e mi ha detto no», che è un errore dell'ABI
+  travestito da errore del file.
+- **aprire non materializza**: la mappatura è `PROT_READ|MAP_PRIVATE`, i pesi restano su disco e il
+  SO li porta in RAM se e quando si leggono — lo swap su disco nello spirito di `mlx-lm`, e
+  l'unico modo di aprire un file da ~90 GB. Non c'è una bandiera `swap: on/off` proprio perché
+  non esiste l'alternativa da nascondere.
+
+`test_engine` (192 verifiche) si comporta da chiamante esterno: costruisce la fixture col writer e,
+per provare la **fedeltà del confine**, apre lo stesso file due volte — una attraverso l'ABI, una
+dalla parte di dentro — e confronta i bit della finestra centrale. Un ① che «sembra uguale» non
+prova niente; la differenza di due float sì.
+
+Fuori dal progetto, `tools/engine_abi_probe.c` è un consumatore che ha **solo** `mlxengine.h` e la
+dylib (la riga di compilazione è nel file, e non passa da CMake apposta). È lui che ha trovato il
+buco: `fmlx_ggml_type` non esce dalla libreria, quindi un programma esterno non poteva sapere il
+blocco di un tipo e non aveva modo di costruire una richiesta accettabile — da lì
+`mlxengine_tensor_block_vals`, al suo posto fra i venti simboli. Il probe stampa i pesi
+**solo** quando l'esito è OK per la stessa ragione: dopo un rifiuto `dst` contiene i byte di prima,
+e chi li stampa li crederà pesi. Sui 6 GGUF reali di questa macchina (`~/ai/Models/gguf`, da
+`mmproj-Qwen2.5-Omni-3B-Q8_0` a `qwen2.5-omni-3b-Q4_K_M`, tipi 0/1/8/12/14/30, blocchi 1/32/256)
+dà 6 puliti, 0 non aperti, 0 in contraddizione.
 
 ## La lane HF (cache) oggi
 
@@ -782,7 +826,7 @@ mesi, perché il valore atteso è quasi sempre uguale.
 ```sh
 cmake -S . -B build
 cmake --build build          # -Wall -Wextra -Werror
-ctest --test-dir build --output-on-failure   # 16 suite, 2761 verifiche, nessuna tocca la rete (2,9 s; 4,3–4,7 nella finestra contesa)
+ctest --test-dir build --output-on-failure   # 17 suite, 2953 verifiche, nessuna tocca la rete (2,87–3,01 s misurati quattro volte di fila; 4,3–4,7 nella finestra contesa del 24/09)
 ./build/fmlx_gguf_inspect <file.gguf>   # testata, tipi, allineamento, coda di byte
 ./build/fastmlx pull <org>/<repo> [--revision R] [--dest D] [--cache C]   # lo snapshot nel cache
                                          # su un terminale: UNA riga che si riscrive; su pipe o log:
