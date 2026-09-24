@@ -116,7 +116,11 @@ int fmlx_hf_ensure_parent(const char *path) {
 
 /* ---- validazione ---- */
 
-static int is_hex_lower(const char *s, size_t len) {
+/* Non-static da quando l'audit deve rispondere alla STESSA domanda: `resolve_ref` accetta una
+ * revisione come commit SOLO se sono 40 esadecimali minuscoli, quindi un verificatore che ammettesse
+ * anche il maiuscolo guarderebbe directory che il `pull` non raggiungerebbe mai — e il `doctor`
+ * direbbe «a posto» su uno snapshot che la lane download non sa caricare. */
+int fmlx_hf_is_hex_lower(const char *s, size_t len) {
     for (size_t i = 0; i < len; i++) {
         char c = s[i];
         if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return 0;
@@ -160,8 +164,8 @@ int fmlx_hf_name_is_safe(const char *name) {
 FmlxHfHashKind fmlx_hf_blob_hash_kind(const char *blob_name) {
     if (!blob_name || !*blob_name) return FMLX_HF_HASH_NONE;
     size_t n = strlen(blob_name);
-    if (n == 40 && is_hex_lower(blob_name, n)) return FMLX_HF_HASH_GIT_BLOB;
-    if (n == 64 && is_hex_lower(blob_name, n)) return FMLX_HF_HASH_SHA256;
+    if (n == 40 && fmlx_hf_is_hex_lower(blob_name, n)) return FMLX_HF_HASH_GIT_BLOB;
+    if (n == 64 && fmlx_hf_is_hex_lower(blob_name, n)) return FMLX_HF_HASH_SHA256;
     return FMLX_HF_HASH_NONE;
 }
 
@@ -361,7 +365,7 @@ static int read_ref_file(const char *path, char *sha_out, size_t sha_len) {
     if (n == 0) return -1;
     buf[n] = '\0';
     while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r' || buf[n - 1] == ' ' || buf[n - 1] == '\t')) buf[--n] = '\0';
-    if (n != 40 || !is_hex_lower(buf, n)) return -1;
+    if (n != 40 || !fmlx_hf_is_hex_lower(buf, n)) return -1;
     if (sha_len < 41) return -1;
     memcpy(sha_out, buf, 41);
     return 0;
@@ -371,7 +375,7 @@ FmlxHfStatus fmlx_hf_resolve_ref(const char *repo_dir, const char *revision, cha
     if (sha_len < 41) return fmlx_hf_fail(FMLX_HF_ERR_BUF_SMALL, "serve spazio per 40 hex + NUL");
     if (!revision || !*revision) return fmlx_hf_fail(FMLX_HF_ERR_REVISION, "revisione vuota");
     size_t rn = strlen(revision);
-    if (rn == 40 && is_hex_lower(revision, rn)) {
+    if (rn == 40 && fmlx_hf_is_hex_lower(revision, rn)) {
         memcpy(sha_out, revision, 41);
         return FMLX_HF_OK;
     }

@@ -21,6 +21,15 @@
 /* --- il formatore di dimensioni (definito in fmlx_models.c) --- */
 void fmlx_cli_fmt_bytes(int64_t b, char *out, size_t n);
 
+/* --- il filtro per repo (definito in fmlx_models.c) -------------------------------------------
+ *
+ * Due verbi fanno la stessa domanda — `models qwen` e `doctor qwen` — e se le due semantiche
+ * divergono, l'utente impara che il filtro è una cosa di cui non fidarsi. Le TRE forme (solo la `*`
+ * finale è ammessa, `nome` = ultima parte dell'id, `org/nome` = id intero, tutto case-insensitive)
+ * stanno quindi in un posto solo, con le ragioni scritte dove sono state trovate. */
+int fmlx_cli_filter_shape_ok(const char *f);
+int fmlx_cli_filter_match(const char *f, const char *id);
+
 /* --- l'avanzamento del `pull` (definito in fmlx_pull_progress.c) -----------------------------
  *
  * Una riga sola per file, che si RISCRIVE da sola con `\r` quando lo schermo è un terminale, e che

@@ -243,6 +243,62 @@ FmlxHfStatus fmlx_hf_catalog(const char *cache_root, FmlxHfRepo *out, size_t cap
  * rotto"). */
 FmlxHfStatus fmlx_hf_catalog_repo(const char *cache_root, const char *repo_id, FmlxHfRepo *out);
 
+/* ---- audit di integrità (il `doctor` di §10.2): legge, e NON ripara ----
+ *
+ * La domanda a cui risponde è una sola, ed è quella che `models` NON può fare: `models` dice cosa
+ * il cache *contiene*, qui si chiede se ciò che contiene **è ciò che promette**. Un blob si chiama
+ * come l'hash che deve avere (64 hex = SHA256, 40 hex = git blob id — misurato, vedi l'intestazione
+ * di questo header), quindi uno snapshot è verificabile byte per byte senza rete e senza server.
+ *
+ * DUE livelli, non uno, perché due sono le azioni che il chiamante può compiere:
+ *  - `is_problem = 1` è **corruzione**: l'hash non torna, il blob puntato non c'è, il symlink non è
+ *    nella forma consentita. Il `doctor` esce fallito, e la cura è un `pull --repair`.
+ *  - `is_problem = 0` è una **nota**: un ref che punta un commit mai scaricato, un `.incomplete`
+ *    lasciato da un download interrotto, dei blob che nessuno snapshot richiama, o — il caso più
+ *    importante — **zero file verificabili** in un repo che di file ne ha. Non è rotto, ma tacere
+ *    «non ho potuto verificare niente» sarebbe il risultato silenzioso che il piano vieta.
+ *
+ * Gli errori DURI (radice assente, repo che non esiste) NON diventano finding: sono il codice di
+ * ritorno di `fmlx_hf_audit_repo`, perché "non c'è" e "c'è ed è rotto" sono due consigli diversi.
+ * `findings[]` trattiene i primi FMLX_HF_AUDIT_FINDING_MAX; `n_problems`/`n_notes` sono il numero
+ * VERO, come `n_refs` nel catalogo: truncare in silenzio è proprio ciò che non si fa.
+ */
+#define FMLX_HF_AUDIT_REL_MAX 1024 /* il path relativo dentro il repo (uno annidato è lungo) */
+#define FMLX_HF_AUDIT_MSG_MAX 256
+#define FMLX_HF_AUDIT_FINDING_MAX 32
+
+typedef struct {
+    char rel[FMLX_HF_AUDIT_REL_MAX]; /* cosa: path nel repo, o "refs/<nome>" / "blobs/<nome>" */
+    char rev[FMLX_HF_CATALOG_REF_MAX]; /* la revisione di provenienza; "" se non legata a una rev */
+    FmlxHfStatus code; /* la CLASSE: mai dedurla dal testo. `OK` = fatto senza codice d'errore */
+    int is_problem;                    /* 1 corruzione, 0 nota */
+    char msg[FMLX_HF_AUDIT_MSG_MAX];
+} FmlxHfFinding;
+
+typedef struct {
+    char repo_id[FMLX_HF_CATALOG_NAME_MAX];
+    size_t n_refs, n_snaps;
+    size_t n_files;      /* entry di UNO snapshot contate (symlink e file regolari) */
+    size_t n_links;      /* quelle nella forma ../../blobs/<nome> */
+    size_t n_plain;      /* file regolari dentro lo snapshot: nessun blob, niente da verificare */
+    size_t n_verifiable; /* il cui nome PROMETTE un hash */
+    size_t n_verified;   /* e l'hash TORNA */
+    size_t n_blobs;      /* file DISTINCT in blobs/ (come nel catalogo: due hardlink = uno) */
+    size_t n_orphan_blobs; /* blob che nessuno snapshot richiama */
+    size_t n_partial;    /* <etag>.incomplete: un download fermo a metà */
+    size_t n_lock;       /* residui di .lock per questo repo: normali, misurato */
+    size_t n_noexist;    /* marker .no_exist: un fatto, non un problema */
+    size_t n_problems, n_notes;
+    int64_t bytes_hashed;
+    int64_t bytes_orphan;
+    FmlxHfFinding findings[FMLX_HF_AUDIT_FINDING_MAX];
+} FmlxHfAudit;
+
+/* Verifica UN repo. `cache_root == NULL` = `fmlx_hf_cache_root()`. `*out` viene AZZERATA sempre.
+ * Ritorna OK se l'audit è stato COMPLETATO (anche con problemi dentro `findings`);
+ * `ERR_NO_REPO`/`ERR_NO_CACHE`/`ERR_IO` se l'audit non ha potuto girare. */
+FmlxHfStatus fmlx_hf_audit_repo(const char *cache_root, const char *repo_id, FmlxHfAudit *out);
+
 /* Messaggio dell'ultimo fallimento di questa lane (NULL se nessuno). Posseduto dal caller?
  * No: valida fino alla prossima chiamata di questa lane. */
 const char *fmlx_hf_last_error(void);

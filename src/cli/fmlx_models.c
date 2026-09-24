@@ -101,7 +101,7 @@ static size_t refs_shown(const FmlxHfRepo *r) {
  * si può scrivere la sequenza `org/` + asterisco letterale: aprirebbe un commento nel commento, e
  * `-Wcomment` la blocca — il che è il modo gentile in cui il compilatore avvisa che la forma è
  * ambigua anche per un lettore di carne.) */
-static int filter_shape_ok(const char *f) {
+int fmlx_cli_filter_shape_ok(const char *f) {
     const char *star = strchr(f, '*');
     size_t len;
 
@@ -116,7 +116,7 @@ static int filter_shape_ok(const char *f) {
  * `f == NULL` (nessun filtro) matcha tutto, e il check sta PRIMA di `strlen`: la prima versione
  * leggeva `strlen(f)` sulla riga sopra e andava in segfault sul caso più comune — quello senza
  * filtro. Lo ha trovato il test, non la lettura. */
-static int filter_match(const char *f, const char *id) {
+int fmlx_cli_filter_match(const char *f, const char *id) {
     const char *tail;
     size_t len;
 
@@ -160,7 +160,7 @@ FmlxCliStatus fmlx_models_exec(const FmlxCliArgs *a, FILE *out, FILE *err) {
     /* La forma si valuta PRIMA di leggere il disco: un filtro con la `*` in mezzo non è "nessun
      * repo", è un filtro che nessuno può leggere, e dirlo dopo aver scansito il cache farebbe
      * perdere anche il tempo. */
-    if (filt && !filter_shape_ok(filt)) {
+    if (filt && !fmlx_cli_filter_shape_ok(filt)) {
         fprintf(err,
                 "fastmlx models: filtro '%s' non ammesso (le forme sono org/nome, nome, org/*)\n",
                 filt);
@@ -193,7 +193,7 @@ FmlxCliStatus fmlx_models_exec(const FmlxCliArgs *a, FILE *out, FILE *err) {
 
     if (a->quiet) { /* una riga per repo: niente da parsare */
         for (i = 0; i < n; i++) {
-            if (!filter_match(filt, v[i].repo_id)) continue;
+            if (!fmlx_cli_filter_match(filt, v[i].repo_id)) continue;
             fprintf(out, "%s\n", v[i].repo_id);
             kept++;
         }
@@ -205,7 +205,7 @@ FmlxCliStatus fmlx_models_exec(const FmlxCliArgs *a, FILE *out, FILE *err) {
 
     for (i = 0; i < n; i++) {
         size_t len;
-        if (!filter_match(filt, v[i].repo_id)) continue;
+        if (!fmlx_cli_filter_match(filt, v[i].repo_id)) continue;
         kept++;
         len = strlen(v[i].repo_id);
         if (v[i].refs_only) {
@@ -230,7 +230,7 @@ FmlxCliStatus fmlx_models_exec(const FmlxCliArgs *a, FILE *out, FILE *err) {
     fprintf(out, "%-*s  %-7s %9s %5s %4s  %s\n", (int)wname, "NOME", "TIPO", "DIM", "BLOB", "REF",
             "MODIFICATO");
     for (i = 0; i < n; i++) {
-        if (!filter_match(filt, v[i].repo_id)) continue;
+        if (!fmlx_cli_filter_match(filt, v[i].repo_id)) continue;
         print_row(&v[i], (int64_t)time(NULL), wname, out);
     }
     if (n == 0) fprintf(out, "(nessun repo)\n");

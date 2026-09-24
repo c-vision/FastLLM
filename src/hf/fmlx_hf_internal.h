@@ -29,6 +29,12 @@ FmlxHfStatus fmlx_hf_pjoin(char *out, size_t n, const char *a, const char *b);
  * fonti ostili: il nome letto da un symlink (locate) e l'etag dato dal server (fetch). */
 int fmlx_hf_name_is_safe(const char *name);
 
+/* Solo cifre esadecimali MINUSCOLE, per `len` caratteri (NON guarda il NUL). È la STESSA domanda
+ * che `resolve_ref` fa quando decide se una revisione è già un commit, e per questo sta in un posto
+ * solo: un audit che ammettesse anche il maiuscolo guarderebbe directory che il download non
+ * raggiunge, e il «tutto a posto» del doctor non varrebbe più niente. */
+int fmlx_hf_is_hex_lower(const char *s, size_t len);
+
 /* Come fmlx_hf_url, ma con l'endpoint esplicito: è il template in un posto solo, così
  * FmlxHfFetchOpts.endpoint non introduce mai una seconda copia della formato. */
 FmlxHfStatus fmlx_hf_url_with(const char *endpoint, const char *repo_id, const char *revision,

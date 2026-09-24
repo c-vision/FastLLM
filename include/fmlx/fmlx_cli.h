@@ -95,6 +95,16 @@ typedef struct {
  * `out`/`err` separate come per il `pull`: l'elenco è dato, i problemi no. */
 FmlxCliStatus fmlx_models_exec(const FmlxCliArgs *a, FILE *out, FILE *err);
 
+/* ---- doctor ---- */
+
+/* Verifica l'integrità dei repo che il filtro sceglie, hashando i blob. Come `models` non prende
+ * un transport: legge solo il disco, e la rete non c'è nemmeno da falsificare. L'uscita è la parte
+ * che conta per uno script: `FAILED` vuol dire «c'è una corruzione» (o «un repo non ho potuto
+ * guardarlo»), mentre le NOTE non la muovono — un `.incomplete` lasciato a metà download è un fatto.
+ * Con `a->quiet` restano SOLO le righe di PROBLEMA su stdout, più il messaggio d'errore su stderr:
+ * il silenzio in `--quiet` deve voler dire una cosa sola, «non c'è niente di rotto». */
+FmlxCliStatus fmlx_doctor_exec(const FmlxCliArgs *a, FILE *out, FILE *err);
+
 /* ---- serve ---- */
 
 /* Il `serve` da terminale: risolve host/port/chiave (flag > ambiente > default, piano §14),

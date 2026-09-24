@@ -184,9 +184,12 @@ static void case_bandiere_rifiutate(void) {
  * NOT_WIRED sarebbe comunque il codice "giusto" per la lista sbagliata).
  * `serve` è uscito dalla lista per lo stesso motivo, ma con un sintomo diverso: ora è cablato, e
  * chiamarlo qui NON darebbe NOT_WIRED — si siederebbe su `accept` in attesa di un client che non
- * arriva, che è il modo in cui un test diventa un blocco da uccidere a mano. */
+ * arriva, che è il modo in cui un test diventa un blocco da uccidere a mano. `doctor` è uscito
+ * infine con un TERZO sintomo: legge il disco e scrive su `out`, e tenerlo qui avrebbe chiesto
+ * NOT_WIRED su una cache che sa aprire — verde per il motivo sbagliato. Le sue prove stanno in
+ * `test_doctor.c`. */
 static void case_motori_non_collegati(void) {
-    static const char *const verbs[] = {"run", "chat", "ps", "doctor", "cp", "rm"};
+    static const char *const verbs[] = {"run", "chat", "ps", "cp", "rm"};
     size_t i;
     char first[FMLX_HF_PATH_MAX];
     int distinct = 0;
@@ -213,9 +216,10 @@ static void case_motori_non_collegati(void) {
         free(outb);
         free(errb);
     }
-    /* Sei verbi, almeno TRE messaggi diversi: è la prova che il testo dipende dal verbo e non è
+    /* Cinque verbi, almeno TRE messaggi diversi: è la prova che il testo dipende dal verbo e non è
      * una stringa sola ripetuta. */
-    CK(distinct >= 3, "messaggi distinti=%d su 6 verbi", distinct);
+    CK(distinct >= 3, "messaggi distinti=%d su %d verbi", distinct,
+       (int)(sizeof verbs / sizeof verbs[0]));
 }
 
 /* ---- serve ---- */
@@ -417,7 +421,7 @@ static void case_models_tabella(void) {
     CK(strncmp(msg, "serve:", 6) == 0, "il verbo non è nominato per esteso: '%s'", msg);
     /* Due filtri non vogliono dire niente: il secondo è un errore, non un AND implicito. */
     CK_PARSE(FMLX_CLI_USAGE, "fastmlx", "models", "mm/uno", "mm/ue");
-    CK(strstr(msg, "troppo argomenti posizionali") != NULL, "due filtri accettati: '%s'", msg);
+    CK(strstr(msg, "troppi argomenti posizionali") != NULL, "due filtri accettati: '%s'", msg);
     /* Il filtro arriva DAVVERO all'exec: `a->repo` è lo stesso campo che legge `pull`, e un parse
      * che lo riempie per un verbo e lo dimentica per l'altro si vede solo qui. */
     CK_PARSE(FMLX_CLI_OK, "fastmlx", "models", "mm/uno");

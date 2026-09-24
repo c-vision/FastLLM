@@ -22,7 +22,8 @@ da Hugging Face). Piano completo: `AiWiki/01-Projects/FastMLX/Piani/(open) - Fas
 | `src/cli/fmlx_pull.c` + `fmlx_pull_progress.c` + `fmlx_cli.c` — `fastmlx pull`, l'avanzamento, il dispatch e gli esiti | **esiste, compilato, testato, provato sul server vero** (102 + 190 verifiche, di cui 3 piani distinti per la barra: renderer con orologio in mano + terminale finto `openpty` + pipe; pull reale `sshleifer/tiny-gpt2`: 9/9 file, 9 blob il cui nome è il loro hash, snapshot riletto da `hf_probe`) |
 | `src/cli/fmlx_models.c` + `src/hf/fmlx_hf_catalog.c` — `fastmlx models` / `list` | **esiste, compilato, testato, provato sul cache vero di questa macchina** (103 + 190 verifiche; 23 repo letti in 0,01 s, 3.675.292.998 byte che coincidono con un conteggio di inode fatto a parte con `find`+`stat`) |
 | `src/cli/fmlx_serve.c` — `fastmlx serve` | **esiste, compilato, testato, provato**: risolve host/porta/chiave (flag > ambiente > default, piano §14) e passa tutto al loop. `--cache` vale anche qui: `pull`, `models` e `serve` guardano LO STESSO disco |
-| `src/cli/` — `run\|chat\|ps\|cp\|rm\|doctor` | **non collegati, e lo dicono**: `fmlx_cli_exec` ritorna `NOT_WIRED` nominando il pezzo che manca (motore / registro delle sessioni / chi scrive nel cache) ed esce 2. Il parser delle bandiere invece **esiste**, ed è provato per i 6 verbi rimasti — e una bandiera che il verbo non legge è un errore, non un'opzione ignorata |
+| `src/hf/fmlx_hf_audit.c` + `src/cli/fmlx_doctor.c` — `fastmlx doctor`: gli byte del cache sono quelli che promettono | **esiste, compilato, testato, provato sul cache vero** (163 + 49 verifiche; 23 repo, 71 entry, 71 verificate, **0 problemi**, 15 note in 1,4 s, e `--quiet` esce 0). Verifica con la STESSA `fmlx_hf_verify` del `pull`: un verdetto scritto a parte sarebbe verde qui e rosso al download |
+| `src/cli/` — `run\|chat\|ps\|cp\|rm` | **non collegati, e lo dicono**: `fmlx_cli_exec` ritorna `NOT_WIRED` nominando il pezzo che manca (motore / registro delle sessioni / chi scrive nel cache) ed esce 2. Il parser delle bandiere invece **esiste**, ed è provato per i 5 verbi rimasti — e una bandiera che il verbo non legge è un errore, non un'opzione ignorata |
 
 Qui sotto c'è solo ciò che compila davvero. Nessuna cartella vuota "perché il piano la prevede".
 L'enumerazione di ciò che MLX/caricatore loader GGUF sanno davvero fare, con i `file:riga` della
@@ -619,7 +620,7 @@ non asserita** — il test inietta il proprio `now` (è il motivo per cui il ren
 campione; la riga di `curl_configure` che copia l'hook **anche quando è NULL** non è provata dai test
 del `pull`, perché girano sul transport finto — ciò che è provato è il contratto (l'hook arriva al
 transport con i numeri giusti: `mut_hookwire` diventa rosso se non lo si cabla), non il campo azzarato
-che protegge dal puntatore vecchio; i 6 verbi non collegati non hanno ancora un motore da
+che protegge dal puntatore vecchio; i 5 verbi non collegati non hanno ancora un motore da
 nominare davvero, nominano il pezzo.
 
 ## `fastmlx models` / `list` — il catalogo locale (`src/hf/fmlx_hf_catalog.c` + `src/cli/fmlx_models.c`)
@@ -685,12 +686,59 @@ diventano entrambi "1.5 kB" — e il test che lo asseriva sarebbe stato verde pe
 riga nel test che lo dice, perché il punto non è che la formattazione nasconda un bug: è che qualcuno
 lo riscopra tra sei mesi e non lo chiami "coperto".
 
+## `fastmlx doctor` — gli byte SONO quelli che promettono (`src/hf/fmlx_hf_audit.c` + `src/cli/fmlx_doctor.c`)
+
+Terzo verbo vivo, e il complemento di `models`: quello legge i **nomi**, qui si hashano i **byte**.
+`models` può dire «ho 9 file, 4.2 GB» anche se un blob è troncato a metà da un `kill -9` o se uno
+symlink punta il nome sbagliato — perché guarda i nomi. Il punto del file è che la verifica è la
+**stessa funzione** che usa il `pull` (`fmlx_hf_locate` + `fmlx_hf_verify`, nessuna copia): un
+verdetto scritto a parte sarebbe verde qui e rosso al download, e a quel punto nessuno dei due vale
+più niente.
+
+**Due ordini, perché «fastmlx doctor && echo ok» resti leggibile.** Un `PROBLEMA` (un hash che non
+torna, un blob che non c'è, un symlink che punta fuori, un ref che non si risolve) muove l'uscita a
+1; una **nota** no: un `.incomplete` lasciato da un download interrotto, un ref che punta un commit
+mai scaricato, una directory che non è un commit, i marker `.no_exist` sono **fatti**, non guasti —
+far fallire lo script per quelli insegnerebbe a ignorare il codice d'uscita. `--quiet` stampa SOLO i
+PROBLEMA: niente intestazioni, niente riepilogo, niente note, e il silenzio continua a voler dire una
+cosa sola. Zero match con un filtro è `FAILED` **anche in `--quiet`**, dove dello schermo non arriva
+niente e il codice d'uscita è la parte che un script legge: «ho controllato tutto e va bene» detto
+senza aver controllato niente è la bugia peggiore che un verificatore può dire.
+
+**Il tetto dei verdetti (32) è della lane, e qui si nomina.** `dump_findings` stampa le righe che ha e
+aggiunge `(9 verdetti in più non elencati: 40 problemi, 1 note)` — quaranta problemi in trentadue righe
+senza quella riga è il modo in cui un report sembra completo. Contatore e stampa sono due cose separate
+di proposito: i numeri totali non dipendono mai dallo spazio del array.
+
+**Il danno non si tocca.** Questo verbo NON cancella, NON ripara, NON tocca mtime: la cura di un hash
+che non torna è `pull --repair`, che ha già il permesso esplicito di sostituire un blob. Due verbi che
+scrivono dove l'altro legge sarebbe un `rm` senza invocarlo. E «non ho potuto guardare» non è mai
+«a posto»: l'audit impossibile esce **fallito** con la sua riga.
+
+**Ciò che ha detto il cache vero** (23 repo, 71 entry, 71 verificate, **0 problemi**, 15 note,
+1 entry che non è un repo, in 1,4 s): tutte le note sono lo stesso fatto — `refs/main` che punta un
+commit di cui non esiste lo snapshot, o repo con `0 snapshot`. È così che si distingue «mancherà» da
+«perso». Il verificatore ha anche un caso suo: un nome che *promette* un hash (64 o 40 esadecimali)
+che questa lane non sa verificare NON è un problema — è contato, poi **decontato** dai verificabili con
+una nota, perché dire «1 verificabile su 1» di un file che non si poteva verificare sarebbe un verde
+rubato.
+
+**Provato a mutare**: 9 mutanti, e il più caro è `verifica_saltata` — togliere la chiamata a
+`fmlx_hf_verify` e contare il blob come buono. Quattro asserzioni diventano rosse, distribuite su due
+suite: l'hashing non è decorazione, e se salta il pezzo che costa il test se ne accorge. Gli altri tre
+che contano sono `colonna_orfani_byte`, `colonna_regolari_lock` e `colonna_no_exist`: ciascuno sposta
+UNA colonna della riga di riepilogo sul campo sbagliato (`bytes_hashed` in posto a `bytes_orphan`,
+`n_links` in posto a `n_plain`, `n_noexist` in posto a `n_lock`) e ciascuno spegne esattamente la sua
+asserzione. Sono i numeri che la lane non può provare: lì si asseriscono i contatori della struttura,
+qui il fatto che la riga li STAMPA — e un `%zu` che legge il campo accanto passa inosservato per
+mesi, perché il valore atteso è quasi sempre uguale.
+
 ## Build e test
 
 ```sh
 cmake -S . -B build
 cmake --build build          # -Wall -Wextra -Werror
-ctest --test-dir build --output-on-failure   # 14 suite, nessuna tocca la rete (1,4 s)
+ctest --test-dir build --output-on-failure   # 16 suite, nessuna tocca la rete (3,5 s)
 ./build/fmlx_gguf_inspect <file.gguf>   # testata, tipi, allineamento, coda di byte
 ./build/fastmlx pull <org>/<repo> [--revision R] [--dest D] [--cache C]   # lo snapshot nel cache
                                          # su un terminale: UNA riga che si riscrive; su pipe o log:
@@ -698,6 +746,9 @@ ctest --test-dir build --output-on-failure   # 14 suite, nessuna tocca la rete (
 ./build/fastmlx models [<filtro>] [--cache C] [--quiet]   # cosa c'è già nel cache, senza rete
                                          # (`list` = alias; `org/nome`, `nome`, `org/`+asterisco;
                                          #  nessun match = uscita 1)
+./build/fastmlx doctor [<filtro>] [--cache C] [--quiet]   # hashà i byte del cache: 0 = nessun
+                                         # problema, 1 = PROBLEMA (o audit impossibile, o zero match),
+                                         # 2 = argv; NON cancella e NON ripara: la cura è `pull --repair`
 ./build/fastmlx serve [--host I] [--port N] [--cache C] [--max-body N] [--once]
                                          # /v1/models + /health VERI, 501 su tutto il resto;
                                          # l'auth è SOLO FASTMLX_API_KEY (vuota = nessuna)

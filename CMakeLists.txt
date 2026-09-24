@@ -38,7 +38,8 @@ target_link_libraries(fmlx_gguf_inspect PRIVATE fmlx_gguf)
 # `fmlx_hf_catalog.c` sta QUI e non nella lane download perché non tocca la rete e non scrive:
 # guarda cosa c'è sul disco. Le sue regole di conteggio vengono dal cache REALE di questa
 # macchina (34 directory, due radici), non dall'idea di come dovrebbe essere.
-add_library(fmlx_hf STATIC src/hf/fmlx_hf_cache.c src/hf/fmlx_hf_hash.c src/hf/fmlx_hf_catalog.c)
+add_library(fmlx_hf STATIC src/hf/fmlx_hf_cache.c src/hf/fmlx_hf_hash.c src/hf/fmlx_hf_catalog.c
+                           src/hf/fmlx_hf_audit.c)
 target_include_directories(fmlx_hf PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
                                   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/hf)
 
@@ -52,6 +53,13 @@ add_test(NAME hf_cache COMMAND test_hf_cache ${CMAKE_CURRENT_BINARY_DIR}/work)
 add_executable(test_hf_catalog tests/hf/test_hf_catalog.c)
 target_link_libraries(test_hf_catalog PRIVATE fmlx_hf)
 add_test(NAME hf_catalog COMMAND test_hf_catalog ${CMAKE_CURRENT_BINARY_DIR}/work-catalog)
+
+# L'audit hashà DAVVERO i byte: le fixture sono cache finti ma con gli hash veri (vettori da
+# `git hash-object` / `shasum`, li stessi di `test_hf_cache.c`), perché un verificatore provato su
+# nomi casuali non ha mai verificato niente.
+add_executable(test_hf_audit tests/hf/test_hf_audit.c)
+target_link_libraries(test_hf_audit PRIVATE fmlx_hf)
+add_test(NAME hf_audit COMMAND test_hf_audit ${CMAKE_CURRENT_BINARY_DIR}/work-audit)
 
 # Guarda il cache HF reale (sola lettura, nessuna rete): il controllo sul mondo vero.
 add_executable(hf_probe tools/hf_probe.c)
@@ -183,9 +191,12 @@ add_test(NAME serve COMMAND test_serve ${CMAKE_CURRENT_BINARY_DIR}/work-serve)
 # nuova contro un ordine di download). Il `main` sta da solo perché è l'unica parte NON provabile
 # in-process. `fmlx_pull_progress.c` è il QUARTO motivo: il disegno di una riga che si riscrive ha
 # una sua severità (orologio, throttling, che cosa non stampare su una pipe) che non c'entra niente
-# con l'ordine dei byte nel cache, e sta in un file che si prova da solo.
+# con l'ordine dei byte nel cache, e sta in un file che si prova da solo. `fmlx_doctor.c` è il
+# QUINTO: `models` legge i NOMI, `doctor` verifica gli hash sui byte, e la differenza è un ordine di
+# grandezza di costo — due verbi nello stesso file avrebbero indotto l'uno a pagare il lavoro
+# dell'altro.
 add_library(fmlx_cli STATIC src/cli/fmlx_pull.c src/cli/fmlx_models.c src/cli/fmlx_cli.c
-                            src/cli/fmlx_pull_progress.c src/cli/fmlx_serve.c)
+                            src/cli/fmlx_pull_progress.c src/cli/fmlx_serve.c src/cli/fmlx_doctor.c)
 target_include_directories(fmlx_cli PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 # `fmlx_serve` tra le dipendenze PUBBLICHE: il verbo c'è solo se il loop c'è, e un `serve` che
 # compilasse senza il socket sarebbe il "comando che risponde di sì" che il piano vieta.
@@ -209,3 +220,10 @@ add_test(NAME pull COMMAND test_pull ${CMAKE_CURRENT_BINARY_DIR}/work-cli-pull)
 add_executable(test_cli tests/cli/test_cli.c)
 target_link_libraries(test_cli PRIVATE fmlx_cli)
 add_test(NAME cli COMMAND test_cli ${CMAKE_CURRENT_BINARY_DIR}/work-cli)
+
+# Il `doctor` da CLI: i CANALI e l'uscita, non l'algoritmo (che è di `test_hf_audit`). Serve un cache
+# con hash VERI, quindi anche qui il work directory è su disco: `fmlx_hf_verify` apre file, e un
+# transport finto non ha niente da dire a un verbo che non tocca la rete.
+add_executable(test_doctor tests/cli/test_doctor.c)
+target_link_libraries(test_doctor PRIVATE fmlx_cli)
+add_test(NAME doctor COMMAND test_doctor ${CMAKE_CURRENT_BINARY_DIR}/work-cli-doctor)

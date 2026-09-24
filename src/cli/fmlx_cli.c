@@ -43,6 +43,8 @@ void fmlx_cli_usage(FILE *out) {
             "  models, list [<filtro>] cosa c'e' gia' nel cache, senza rete; <filtro> = org/nome,\n"
             "                         nome (l'ultima parte dell'id) o org/*\n"
             "  serve                  espone /v1/models e /health; ogni rotta che genera risponde 501\n"
+            "  doctor [<filtro>]      hasha i blob del cache e dice se SONO quelli promessi;\n"
+            "                         legge e basta: non cancella e non ripara\n"
             "\n"
             "per pull:\n"
             "  --revision <ref>       ramo o commit (default: main)\n"
@@ -74,11 +76,19 @@ void fmlx_cli_usage(FILE *out) {
             "  --once                 serve UNA richiesta e esce (per gli smoke test)\n"
             "  --quiet                niente riepilogo finale su stdout (i log restano su stderr)\n"
             "\n"
+            "per doctor:\n"
+            "  <filtro>               gli STESSI tre modi di `models` (org/nome, nome, org/*);\n"
+            "                         nessuno = tutto il cache\n"
+            "  --cache <dir>          radice del cache (default: quella di Hugging Face)\n"
+            "  --quiet                SOLO le righe di PROBLEMA: nessun riepilogo, nessuna nota.\n"
+            "                         Uscita: 0 = niente corruzione, 1 = problemi o repo non\n"
+            "                         audibili, 2 = argv. Le note non muovono l'uscita.\n"
+            "\n"
             "ascolta e risponde DAVVERO a /v1/models e /health; ogni rotta che genera risponde 501.\n"
             "L'auth viene SOLO da FASTMLX_API_KEY (vuota = nessuna): una bandiera finirebbe in argv.\n"
             "\n"
             "in attesa del motore (rispondono un errore esplicito, mai un risultato finto):\n"
-            "  run, chat, ps, cp, rm, doctor\n"
+            "  run, chat, ps, cp, rm\n"
             "\n"
             "il token si passa SOLO con la variabile d'ambiente HF_TOKEN.\n");
 }
@@ -91,8 +101,6 @@ static const char *missing_piece(const char *verb) {
     if (!strcmp(verb, "ps")) return "manca il registro delle sessioni, che non esiste fuori dal motore";
     if (!strcmp(verb, "cp") || !strcmp(verb, "rm"))
         return "manca chi scrive/cancella nel cache al di fuori del percorso di download";
-    if (!strcmp(verb, "doctor"))
-        return "manca la ricognizione (quale lane, quale ramo, quale budget) da esporre";
     return "il comando non esiste in questa versione";
 }
 
@@ -199,7 +207,7 @@ FmlxCliStatus fmlx_cli_parse(int argc, char **argv, FmlxCliArgs *out, char *msg,
                 verb_seen = 1;
                 continue;
             }
-            if (repo_seen) return fail(out, msg, msg_len, "troppo argomenti posizionali: %s", a);
+            if (repo_seen) return fail(out, msg, msg_len, "troppi argomenti posizionali: %s", a);
             snprintf(out->repo, sizeof out->repo, "%s", a);
             repo_seen = 1;
             continue;
@@ -297,12 +305,14 @@ FmlxCliStatus fmlx_cli_parse(int argc, char **argv, FmlxCliArgs *out, char *msg,
      * dice due cose e ne fa una, e chi legge l'output non ha modo di sapere quale delle due è
      * saltata. Le bandiere condivise (`--quiet`, `--cache`) non stanno in nessun insieme.
      *
-     * LA REGOLA VALE FRA I VERBI CHE HANNO UNA SUPERFICIE DI OPZIONI (pull, models/list, serve).
+     * LA REGOLA VALE FRA I VERBI CHE HANNO UNA SUPERFICIE DI OPZIONI (pull, models/list, serve,
+     * doctor).
      * `fastmlx run --port 8000` non deve sentire «--port non è un'opzione di run»: `run` non ha
      * ancora opzioni, e dire quali NON ha è un'affermazione sul futuro di un verbo che non è scritto.
      * Per quelli la risposta onesta è UNA sola — manca il motore — ed è `NOT_WIRED` nel dispatch. */
     if (verb_seen && (!strcmp(out->verb, "pull") || !strcmp(out->verb, "serve") ||
-                      !strcmp(out->verb, "models") || !strcmp(out->verb, "list"))) {
+                      !strcmp(out->verb, "models") || !strcmp(out->verb, "list") ||
+                      !strcmp(out->verb, "doctor"))) {
         unsigned bad = 0;
         int k;
         if (strcmp(out->verb, "pull")) bad |= F_PULL_ONLY;
@@ -336,6 +346,11 @@ FmlxCliStatus fmlx_cli_exec_with(const FmlxCliArgs *a, const FmlxHfTransport *t,
          * È il motivo per cui il verboso `case_motori_non_collegati` di test_cli.c NON lo copre:
          * un verbo che non tocca la rete non si prova con un transport finto. */
         return fmlx_models_exec(a, out, err);
+    if (!strcmp(a->verb, "doctor"))
+        /* Nemmeno qui il transport viene guardato: l'audit hashà ciò che è già su disco, e una
+         * rete finta non aggiungerebbe nessuna prova — semmai ne toglierebbe, perché il verdetto
+         * dovrebbe dipendere da qualcosa che non c'entra con i byte da controllare. */
+        return fmlx_doctor_exec(a, out, err);
     if (!strcmp(a->verb, "serve"))
         /* Nemmeno qui `t` viene guardato: il `serve` legge il cache da disco e scrive su socket.
          * Passare un transport falso a `serve` non è un test, è un'illusione di test. */
