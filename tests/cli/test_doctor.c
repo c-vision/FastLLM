@@ -292,6 +292,72 @@ static void case_nota_non_fallisce(void) {
     cap_free(&c);
 }
 
+/* ---- il repo che il filesystem rifiuta ---- */
+
+/* Il ramo che, prima di questa correzione, NON POTEVA accendersi: `fmlx_hf_catalog_repo` rispondeva
+ * `ERR_NO_REPO` anche per `EACCES`, e il `doctor` lo leggeva come «non scaricato» — il consiglio
+ * `pull` dato su una directory che di `pull` non ha bisogno. Ora i due codici sono distinti e
+ * `AUDIT IMPOSSIBILE` è la forma stampata di quella distinzione: un PROBLEMA che muove l'uscita.
+ *
+ * Due cose che solo questo caso prova. La prima è il canale: l'impossibilità di guardare finisce su
+ * `err` (non è un verdetto sul cache, è il verbale di chi non ha potuto guardarlo) mentre il nome
+ * del repo resta nell'elenco su `out`. La seconda è `--quiet`, che deve togliere l'elenco e NON il
+ * PROBLEMA: `doctor --quiet || die` continua a dover dire perché è toccato. */
+static void case_impossibile(void) {
+    FmlxCliArgs a;
+    Cap c;
+    FmlxCliStatus s;
+    char mdir[FMLX_HF_PATH_MAX * 2];
+
+    if (geteuid() == 0) {
+        printf("  (root: nessun chmod frena nessuno: caso del repo murato saltato)\n");
+        return;
+    }
+    wipe(at("hub"));
+    build_repo("buono", "org", 0, 0);
+    build_repo("murato", "org", 0, 0);
+    /* Il path da murare NON si scrive a memoria: `fmlx_hf_repo_dir` è LA regola (id -> directory) di
+     * questa lane, e un `models--org--murato` ricopiato qui sarebbe il modo in cui il caso murerebbe
+     * una directory che non esiste — verde, e senza aver provato niente. */
+    if (fmlx_hf_repo_dir(at("hub"), "org/murato", mdir, sizeof mdir) != FMLX_HF_OK) {
+        printf("  FIXTURE: la regola non compone il path di org/murato\n");
+        failures++;
+        return;
+    }
+    if (chmod(mdir, 0) != 0) {
+        printf("  FIXTURE: chmod su %s: %s\n", mdir, strerror(errno));
+        failures++;
+        return;
+    }
+    s = run(&c, &a, 4, (char *[]){"fastmlx", "doctor", "--cache", (char *)at("hub")});
+    /* La directory resta murata FINO A DOPO il secondo giro: riaprirla qui avrebbe fatto passare il
+     * `--quiet` su un cache sano — verde, e senza aver provato la cosa che serviva. */
+
+    /* «Non ho potuto guardare» NON è «va tutto bene»: esce fallito. */
+    CK(s == FMLX_CLI_FAILED, "un repo che non apre esce %s, atteso fallito",
+       fmlx_cli_status_str(s));
+    CK(HAS(c.out, "org/murato  AUDIT IMPOSSIBILE"), "non nomina il repo non aperto: %s", c.out);
+    CK(HAS(c.err, "PROBLEMA"), "il PROBLEMA non è sul canale d'errore: %s", c.err);
+    CK(HAS(c.err, "non si è potuto aprire"), "consiglia il download invece dei permessi: %s", c.err);
+    CK(!HAS(c.err, "non è nel cache"), "un `EACCES` chiamato «non c'è»: %s", c.err);
+    CK(HAS(c.out, "1 problemi"), "il riepilogo non lo conta: %s", c.out);
+    /* L'altro repo DEVE essere stato audito lo stesso: era questo il difetto, in forma di verbo —
+     * un diritto murato che cancellava il lavoro fatto sugli altri ventidue. */
+    CK(HAS(c.out, "org/buono"), "il repo leggibile non è stato controllato: %s", c.out);
+    CK(HAS(c.out, "2 ok"), "il repo leggibile non ha hashato i suoi due blob: %s", c.out);
+    cap_free(&c);
+
+    /* `--quiet`: via l'elenco, resta il PROBLEMA (sull'`err`, dove stava). */
+    (void)run(&c, &a, 5,
+              (char *[]){"fastmlx", "doctor", "--cache", (char *)at("hub"), "--quiet"});
+    chmod(mdir, 0755); /* il secondo giro è finito: si riapre, un fixture murato non si wipea */
+    CK(!HAS(c.out, "AUDIT IMPOSSIBILE"), "`--quiet` stampa l'elenco: %s", c.out);
+    CK(!HAS(c.out, "org/buono"), "`--quiet` nomina i repo: %s", c.out);
+    CK(HAS(c.err, "PROBLEMA"), "`--quiet` nasconde il problema: %s", c.err);
+    CK(!HAS(c.err, "AUDIT IMPOSSIBILE"), "`--quiet` sposta l'elenco sull'`err`: %s", c.err);
+    cap_free(&c);
+}
+
 static void case_filtro(void) {
     FmlxCliArgs a;
     Cap c;
@@ -440,6 +506,7 @@ int main(int argc, char **argv) {
 
     case_pulito();
     case_corrotto();
+    case_impossibile();
     case_quiet();
     case_nota_non_fallisce();
     case_filtro();

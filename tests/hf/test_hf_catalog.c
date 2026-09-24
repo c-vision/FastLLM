@@ -379,6 +379,183 @@ static void case_uno_solo(void) {
     CK_ST(fmlx_hf_catalog_repo(at("hub"), "org/due", NULL), FMLX_HF_ERR_IO);
 }
 
+/* ---- un repo che il filesystem rifiuta ---- */
+
+/* «La directory C'È, il suo nome è quello di un repo, ma dentro non ci abbiamo guardato»: sono i
+ * tre campi `unreadable`/`unread_part`/`unread_errno`, e stanno in piedi su una distinzione che qui
+ * è tutta: i suoi numeri NON sono «zero», sono «non li sappiamo». Il difetto che questo caso chiude
+ * era un `return` che al primo `chmod 000` si portava dietro anche l'elenco dei repo VIVIBILI e la
+ * riga `AUDIT IMPOSSIBILE` del `doctor`: un `sudo huggingface-cli` che ha creato una directory
+ * `root:700` rendeva invisibili gli altri ventidue modelli.
+ *
+ * Root non può provare questa cosa: con l'euid 0 i controlli di permesso sono saltati, il fixture si
+ * apre lo stesso e il caso sarebbe verde su una premessa falsa. Si DICHIARA saltato. */
+static void case_repo_murato(void) {
+    FmlxHfRepo v[8], one;
+    const FmlxHfRepo *g, *m;
+    size_t n = 0, ign = 99;
+    const char *e;
+
+    if (geteuid() == 0) {
+        printf("  (root: nessun chmod frena nessuno: caso del repo murato saltato)\n");
+        return;
+    }
+    dir("hubC/models--org--buono");
+    put("hubC/models--org--buono/blobs/b1", "12345");
+    dir("hubC/models--org--murato/refs");
+    put("hubC/models--org--murato/refs/main", "x");
+    put("hubC/models--org--murato/blobs/b1", "1234567");
+    if (chmod(at("hubC/models--org--murato"), 0) != 0) {
+        printf("  FIXTURE: chmod su models--org--murato: %s\n", strerror(errno));
+        failures++;
+        return;
+    }
+
+    /* CIÒ CHE HA PRODOTTO IL BUG: il giro non si interrompe. */
+    CK_ST(fmlx_hf_catalog(at("hubC"), v, 8, &n, &ign), FMLX_HF_OK);
+    CK(n == 2, "n=%zu, attesi 2: un repo murato non cancella l'elenco degli altri", n);
+    CK(ign == 0, "ignored=%zu: «non ho aperto» NON è «non è un repo», è un altro conteggio", ign);
+    g = find(v, n, "org/buono");
+    CK(g && g->bytes == 5 && g->n_blobs == 1 && g->unreadable == 0,
+       "il repo leggibile ha perso i suoi numeri: %lld byte", g ? (long long)g->bytes : -1);
+    m = find(v, n, "org/murato");
+    CK(m != NULL, "il repo murato è sparito dall'elenco (il difetto, non un dettaglio)");
+    if (m) {
+        CK(m->unreadable == 1, "unreadable=%d", m->unreadable);
+        CK(strcmp(m->unread_part, "dir") == 0,
+           "unread_part='%s' (atteso 'dir': è la directory del repo che ha rifiutato, non un figlio"
+           " dedotto)", m->unread_part);
+        CK(m->unread_errno == EACCES, "unread_errno=%d (%s), atteso EACCES=%d", m->unread_errno,
+           strerror(m->unread_errno), EACCES);
+        CK(m->bytes == 0 && m->n_blobs == 0 && m->n_refs == 0 && m->mtime == 0,
+           "i campi numerici restano zero (ZERO = «non misurato», ed è `unreadable` a dirlo)");
+        /* Chiamarlo «solo ref» sarebbe il contrario esatto del motivo per cui `refs_only` esiste:
+         * dire 0 byte di un repo che 0 byte non è. Qui a tenerlo spento è il `return` che viene
+         * PRIMA del calcolo (non si arriva a contare); il caso sorello — un `blobs/` murato sopra
+         * dei `refs/` leggibili — è in `case_pezzo_murato`, che è lì apposta per quello. */
+        CK(m->refs_only == 0, "refs_only=%d su un repo NON aperto", m->refs_only);
+        /* Il TIPO invece si sa: viene dal prefisso del nome, e il nome la radice ce l'ha dato. */
+        CK(strcmp(m->kind, "model") == 0, "kind='%s'", m->kind);
+        CK(strcmp(m->dirname, "models--org--murato") == 0, "dirname='%s'", m->dirname);
+        CK(m->ambiguous_name == 0, "ambiguous_name=%d", m->ambiguous_name);
+    }
+
+    /* LA STESSA directory letta da sola: «non ho potuto aprire», NON «non c'è». Il secondo direbbe a
+     * un `pull --repair` di riscrivere byte perfetti, ed è il codice che il `doctor` usa per
+     * decidere fra «scaricalo» e «guardaci i permessi». */
+    CK_ST(fmlx_hf_catalog_repo(at("hubC"), "org/murato", &one), FMLX_HF_ERR_IO);
+    e = fmlx_hf_last_error();
+    CK(e && strstr(e, "potuto aprire") != NULL, "la frase non nomina l'apertura: %s",
+       e ? e : "(null)");
+    CK(e && strstr(e, "Permission denied") != NULL, "la frase non porta l'errno: %s",
+       e ? e : "(null)");
+    CK(one.unreadable == 1, "anche sul fallimento `unreadable` si legge: %d", one.unreadable);
+    CK(strcmp(one.dirname, "models--org--murato") == 0, "il fallimento non nomina il colpevole: '%s'",
+       one.dirname);
+
+    chmod(at("hubC/models--org--murato"), 0755); /* PRIMA di uscire: un fixture murato non si wipea */
+
+    /* La RADICE murata resta FATALE, e con un'altra FRASE: qui non c'è nessuna entry da salvare, e
+     * «non ho potuto guardare niente» che uscisse come «cache vuoto» sarebbe il risultato silenzioso
+     * che questo file combatte da sempre. La distinzione fra «non esiste» e «non apre» decide QUALE
+     * controllo fa perdere tempo all'utente: il path o i permessi. */
+    dir("hubD/models--org--d");
+    put("hubD/models--org--d/blobs/z", "x");
+    if (chmod(at("hubD"), 0) != 0) {
+        printf("  FIXTURE: chmod su hubD: %s\n", strerror(errno));
+        failures++;
+        return;
+    }
+    CK_ST(fmlx_hf_catalog(at("hubD"), v, 8, &n, NULL), FMLX_HF_ERR_NO_CACHE);
+    CK(n == 0, "n=%zu su una radice che non apre, atteso 0", n);
+    e = fmlx_hf_last_error();
+    CK(e && strstr(e, "hubD") != NULL, "la radice non è nominata: %s", e ? e : "(null)");
+    CK(e && strstr(e, "non si è potuto aprire") != NULL,
+       "un `EACCES` sulla radice chiamato «non esiste»: %s", e ? e : "(null)");
+    chmod(at("hubD"), 0755);
+}
+
+/* Il repo SI apre, ma uno dei suoi DUE pezzi no. È l'unico caso in cui `unread_part` serve davvero
+ * — un booleano non bastava perché delle due metà si sa cose diverse:
+ *
+ *  - `refs/` murato, `blobs/` no: i BYTE SONO NOTI (li abbiamo contati), manca il numero delle
+ *    revisioni. Un `unreadable` che azzerasse tutto qui mentirebbe in direzione opposta;
+ *  - `blobs/` murato, `refs/` no: sappiamo quante revisioni ci sono, non quanto occupano;
+ *  - tutti e due murati: vince il PRIMO (`mark_unreadable` non si sovrascrive) perché la prima
+ *    directory che ha detto «no» è già il colpevole giusto, e sovrascriverla racconterebbe una
+ *    sequenza diversa da quella in cui è andata.
+ *
+ * Da soli, questi tre casi sono anche l'unica prova che i rami `refs`/`blobs` di `mark_unreadable`
+ * esistono: il caso del repo intero passa da `"dir"` e non li sfiora nemmeno. */
+static void case_pezzo_murato(void) {
+    FmlxHfRepo v[8];
+    const FmlxHfRepo *sr, *sb, *sd;
+    size_t n = 0;
+
+    if (geteuid() == 0) {
+        printf("  (root: nessun chmod frena nessuno: caso del pezzo murato saltato)\n");
+        return;
+    }
+    dir("hubE/models--org--senfarefs");
+    put("hubE/models--org--senfarefs/refs/main", "x");
+    put("hubE/models--org--senfarefs/blobs/b1", "12345");
+    dir("hubE/models--org--senzablobs/refs");
+    put("hubE/models--org--senzablobs/refs/main", "x");
+    put("hubE/models--org--senzablobs/blobs/b1", "1234567");
+    dir("hubE/models--org--entrambi/refs");
+    put("hubE/models--org--entrambi/refs/main", "x");
+    put("hubE/models--org--entrambi/blobs/b1", "123456789");
+    if (chmod(at("hubE/models--org--senfarefs/refs"), 0) != 0 ||
+        chmod(at("hubE/models--org--senzablobs/blobs"), 0) != 0 ||
+        chmod(at("hubE/models--org--entrambi/refs"), 0) != 0 ||
+        chmod(at("hubE/models--org--entrambi/blobs"), 0) != 0) {
+        printf("  FIXTURE: chmod sui pezzi: %s\n", strerror(errno));
+        failures++;
+    }
+    CK_ST(fmlx_hf_catalog(at("hubE"), v, 8, &n, NULL), FMLX_HF_OK);
+    CK(n == 3, "n=%zu, attesi 3 (nessuno dei tre sparisce)", n);
+
+    sr = find(v, n, "org/senfarefs");
+    CK(sr != NULL, "manca org/senfarefs");
+    if (sr) {
+        CK(sr->unreadable == 1 && strcmp(sr->unread_part, "refs") == 0,
+           "part='%s' unreadable=%d", sr->unread_part, sr->unreadable);
+        CK(sr->unread_errno == EACCES, "errno=%d", sr->unread_errno);
+        /* LA parte che vale: i blob li abbiamo APERTI, quindi i byte si sanno — e un `unreadable`
+         * che li buttasse via sarebbe bugiardo nella direzione opposta. */
+        CK(sr->bytes == 5 && sr->n_blobs == 1, "bytes=%lld n_blobs=%zu (li abbiamo contati)",
+           (long long)sr->bytes, sr->n_blobs);
+        CK(sr->n_refs == 0, "n_refs=%zu (non è zero per il ref: è che `refs/` non ha aperto)",
+           sr->n_refs);
+        CK(sr->refs_only == 0, "refs_only=%d: senza `refs/` non si può affermare «solo ref»",
+           sr->refs_only);
+    }
+
+    sb = find(v, n, "org/senzablobs");
+    CK(sb != NULL, "manca org/senzablobs");
+    if (sb) {
+        CK(sb->unreadable == 1 && strcmp(sb->unread_part, "blobs") == 0,
+           "part='%s' unreadable=%d", sb->unread_part, sb->unreadable);
+        CK(sb->n_refs == 1 && sb->bytes == 0 && sb->n_blobs == 0,
+           "n_refs=%zu bytes=%lld: i ref si sapevano, i byte no", sb->n_refs, (long long)sb->bytes);
+        /* Il `refs/` c'è e i blob NON li abbiamo contati: `refs_only == 1` qui direbbe «occupa
+         * niente» di un repo che occupa 7 byte. È il caso per cui il campo è un CAMPO. */
+        CK(sb->refs_only == 0, "refs_only=%d su un `blobs/` non aperto", sb->refs_only);
+    }
+
+    sd = find(v, n, "org/entrambi");
+    CK(sd != NULL, "manca org/entrambi");
+    if (sd)
+        CK(strcmp(sd->unread_part, "refs") == 0,
+           "part='%s': la seconda directory murata non deve sovrascrivere la prima",
+           sd->unread_part);
+
+    chmod(at("hubE/models--org--senfarefs/refs"), 0755);
+    chmod(at("hubE/models--org--senzablobs/blobs"), 0755);
+    chmod(at("hubE/models--org--entrambi/refs"), 0755);
+    chmod(at("hubE/models--org--entrambi/blobs"), 0755);
+}
+
 /* ---- il cache reale di questa macchina ---- */
 
 /* Perché c'è, e cosa prova che gli altri casi non provano: le fixture le scriviamo noi, quindi non
@@ -403,6 +580,11 @@ static void case_reale(void) {
     for (size_t i = 0; i < n && s == FMLX_HF_OK; i++) {
         FmlxHfRepo one;
         if (strcmp(v[i].kind, "model") != 0) continue; /* dataset/space: id non invertibile qui */
+        /* Un `unreadable` non viola l'invariante: i suoi byte NON sono «la somma dei suoi blob»,
+         * sono «non li sappiamo» — ed è esattamente ciò che il campo dice. Chiamarci
+         * `catalog_repo` sopra significherebbe pretendere che una seconda lettura, con lo STESSO
+         * permesso, riesca dove la prima non è riuscita. */
+        if (v[i].unreadable) continue;
         if (fmlx_hf_catalog_repo(root, v[i].repo_id, &one) != FMLX_HF_OK) {
             printf("  FALLIMENTO reale: '%s' nell'elenco ma catalog_repo dice [%s]\n",
                    v[i].repo_id, fmlx_hf_last_error());
@@ -447,6 +629,8 @@ int main(int argc, char **argv) {
     case_troppi();
     case_non_blob();
     case_uno_solo();
+    case_repo_murato();
+    case_pezzo_murato();
     case_reale();
 
     printf("test_hf_catalog: %d verifiche, %d fallimenti\n", checks, failures);

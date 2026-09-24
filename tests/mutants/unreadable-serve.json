@@ -1,0 +1,12 @@
+[
+ {"name": "M10-filtro-modelli", "src": "src/server/fmlx_serve_respond.c",
+  "sub": [["if (strcmp(r->kind, \"model\") != 0 || r->refs_only || r->unreadable) continue;",
+           "if (strcmp(r->kind, \"model\") != 0 || r->refs_only) continue;"]],
+  "perche": "`/v1/models` è la lista con cui un client SCEGLIE: offrire un repo i cui pesi non si sono potuti aprire è un 500 in anticipo. Ha colpito l'invariante `wrote == c->listed`, non l'asserzione sul corpo: le due lane si controllano a vicenda."},
+ {"name": "M11-bucket-sbagliato", "src": "src/server/fmlx_serve_respond.c",
+  "sub": [["if (buf->repos[i].unreadable) c.unreadable++;", "if (buf->repos[i].unreadable) c.ambiguous++;"]],
+  "perche": "la partizione dei quattro conti: spostato in un bucket diverso il totale torna lo stesso e la diagnosi è sbagliata — è il mutante che prova l'ORDINE del ramo, non la sua presenza."},
+ {"name": "M12-conto-invertito", "src": "src/server/fmlx_serve_respond.c",
+  "sub": [["if (buf->repos[i].unreadable) c.unreadable++;", "if (buf->repos[i].unreadable == 0) c.unreadable++;"]],
+  "perche": "`repos_unreadable` è la chiave con cui `/health` dice quante righe non ha guardato: invertito conta i tre repo sani e chiama illeggibile ciò che è stato letto."}
+]

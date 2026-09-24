@@ -1,0 +1,9 @@
+[
+ {"name": "M13-hard-errors-silenzioso", "src": "src/cli/fmlx_doctor.c",
+  "sub": [["            hard_errors++;\n", "            /* M13: l'impossibilità non conta fra i danni */\n"]],
+  "perche": "«non ho potuto guardare» che esce 0 è il risultato silenzioso: il `doctor` dice a chi lo lancia in uno script che il cache è a posto."},
+ {"name": "M14-listing-sotto-quiet", "src": "src/cli/fmlx_doctor.c",
+  "sub": [["if (!quiet) fprintf(out, \"%s  AUDIT IMPOSSIBILE\\n\", v[i].repo_id);",
+           "fprintf(out, \"%s  AUDIT IMPOSSIBILE\\n\", v[i].repo_id);"]],
+  "perche": "`--quiet` toglie l'elenco, non il problema: se il nome del repo murato sparisce con l'elenco, chi legge l'errore non sa SU COSA guardare i permessi."}
+]

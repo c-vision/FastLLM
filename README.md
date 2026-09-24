@@ -17,12 +17,12 @@ da Hugging Face). Piano completo: `AiWiki/01-Projects/FastMLX/Piani/(open) - Fas
 | `src/json/fmlx_json.c` + `fmlx_jsonw.c` — parser e writer JSON | **esiste, compilato, testato** (327 + 148 verifiche, **e** differenziale contro CPython su 122 record: 8 divergenze dure volute, 0 round-trip — `docs/json-contract.md`) |
 | `src/server/fmlx_http.c` — codec HTTP/1.1: framing richiesta, testata risposta, SSE | **esiste, compilato, testato** (127 verifiche byte-esatte) |
 | `src/server/fmlx_api*.c` — router + adapter OpenAI/Anthropic sopra il codec | **esiste, compilato, testato** (151 verifiche). Non c'è ancora un motore sotto: la generazione è attaccata al confine `FmlxApiNext`, che il test copre con un doppio scriptato |
-| `src/server/fmlx_serve_respond.c` + `fmlx_serve.c` — il server: `/v1/models`, `/health`, il 501 per ogni rotta che genera, e il loop TCP | **esiste, compilato, testato, provato su socket vero** (161 verifiche: framing, `bind` rifiutato e arresto su segnale + uno smoke del binario con `curl` vero). Il motore non c'è e **non serve per provarlo** |
+| `src/server/fmlx_serve_respond.c` + `fmlx_serve.c` — il server: `/v1/models`, `/health`, il 501 per ogni rotta che genera, e il loop TCP | **esiste, compilato, testato, provato su socket vero** (163 verifiche: framing, `bind` rifiutato e arresto su segnale + uno smoke del binario con `curl` vero). Il motore non c'è e **non serve per provarlo** |
 | `src/lane_mlx/` — motore MLX estratto da GMBasic | non scritto. **D2 non blocca il "come"**: i prerequisiti per compilarlo sono già su questa macchina (verificato 2026-09-22: 28 header in `GMBasic/libs/mlx-deps/mlx-c-src/mlx/c/*.h`, più `libmlx.a` 31 MB e `libmlxc.a` 1,0 MB in `libs/mlx-deps/precompiled/darwin-arm64`). D2 decide solo **chi possiede** il motore |
-| `src/cli/fmlx_pull.c` + `fmlx_pull_progress.c` + `fmlx_cli.c` — `fastmlx pull`, l'avanzamento, il dispatch e gli esiti | **esiste, compilato, testato, provato sul server vero** (102 + 190 verifiche, di cui 3 piani distinti per la barra: renderer con orologio in mano + terminale finto `openpty` + pipe; pull reale `sshleifer/tiny-gpt2`: 9/9 file, 9 blob il cui nome è il loro hash, snapshot riletto da `hf_probe`) |
-| `src/cli/fmlx_models.c` + `src/hf/fmlx_hf_catalog.c` — `fastmlx models` / `list` | **esiste, compilato, testato, provato sul cache vero di questa macchina** (103 + 190 verifiche; 23 repo letti in 0,01 s, 3.675.292.998 byte che coincidono con un conteggio di inode fatto a parte con `find`+`stat`) |
+| `src/cli/fmlx_pull.c` + `fmlx_pull_progress.c` + `fmlx_cli.c` — `fastmlx pull`, l'avanzamento, il dispatch e gli esiti | **esiste, compilato, testato, provato sul server vero** (102 + 214 verifiche, di cui 3 piani distinti per la barra: renderer con orologio in mano + terminale finto `openpty` + pipe; pull reale `sshleifer/tiny-gpt2`: 9/9 file, 9 blob il cui nome è il loro hash, snapshot riletto da `hf_probe`) |
+| `src/cli/fmlx_models.c` + `src/hf/fmlx_hf_catalog.c` — `fastmlx models` / `list` | **esiste, compilato, testato, provato sul cache vero di questa macchina** (139 + 214 verifiche; 27 repo letti in <0,01 s, 3.675.292.998 byte su 76 inode che coincidono con un conteggio di inode fatto a parte con `find`+`stat`; **la riga `[!]` di un repo che non si è potuto aprire è una classe, non un'assenza** — vedi sotto) |
 | `src/cli/fmlx_serve.c` — `fastmlx serve` | **esiste, compilato, testato, provato**: risolve host/porta/chiave (flag > ambiente > default, piano §14) e passa tutto al loop. `--cache` vale anche qui: `pull`, `models` e `serve` guardano LO STESSO disco |
-| `src/hf/fmlx_hf_audit.c` + `src/cli/fmlx_doctor.c` — `fastmlx doctor`: gli byte del cache sono quelli che promettono | **esiste, compilato, testato, provato sul cache vero** (163 + 49 verifiche; 23 repo, 71 entry, 71 verificate, **0 problemi**, 15 note in 1,4 s, e `--quiet` esce 0). Verifica con la STESSA `fmlx_hf_verify` del `pull`: un verdetto scritto a parte sarebbe verde qui e rosso al download |
+| `src/hf/fmlx_hf_audit.c` + `src/cli/fmlx_doctor.c` — `fastmlx doctor`: gli byte del cache sono quelli che promettono | **esiste, compilato, testato, provato sul cache vero** (179 + 61 verifiche; 27 repo, 71 entry, 71 verificati, **0 problemi**, 19 note in 1,3 s, e `--quiet` esce 0). Verifica con la STESSA `fmlx_hf_verify` del `pull`: un verdetto scritto a parte sarebbe verde qui e rosso al download |
 | `src/cli/` — `run\|chat\|ps\|cp\|rm` | **non collegati, e lo dicono**: `fmlx_cli_exec` ritorna `NOT_WIRED` nominando il pezzo che manca (motore / registro delle sessioni / chi scrive nel cache) ed esce 2. Il parser delle bandiere invece **esiste**, ed è provato per i 5 verbi rimasti — e una bandiera che il verbo non legge è un errore, non un'opzione ignorata |
 
 Qui sotto c'è solo ciò che compila davvero. Nessuna cartella vuota "perché il piano la prevede".
@@ -407,8 +407,13 @@ libera: un test di framing sarebbe diventato un test di rete.
 `/health` è `degraded` quando fa le due cose che dichiara e non può generare — dire `ok` a chi
 chiede «qui si lavora?» sarebbe bugiardo per omissione, e 503 mentirebbe dall'altra parte. È
 `unavailable` quando **nemmeno il catalogo si legge**: il cache non c'è o `HF_HOME` punta nel posto
-sbagliato. I contatori (`repos_total`/`repos_listed`/`repos_refs_only`/…) arrivano dagli stessi
-campi che stampa `fastmlx models`, non da un secondo conteggio.
+sbagliato. I contatori (`repos_total`/`repos_listed`/`repos_refs_only`/`repos_non_model`/
+`repos_unreadable`/`repos_ambiguous`) arrivano dagli stessi campi che stampa `fastmlx models`, non da
+un secondo conteggio — e i primi cinque sono una **partizione**: `total = listed + refs_only +
+non_model + unreadable`, perché quattro numeri che non sommano al totale sono quattro numeri che
+descrivono quattro conteggi diversi. `repos_unreadable` è contato **prima** del `kind`, che è
+ortogonale (il tipo si ricava dal nome anche quando niente si è aperto); `ambiguous` è una qualità, non
+una classe, e per questo non entra nella somma.
 
 **L'auth viene SOLO da `FASTMLX_API_KEY`**, e non è una bandiera per lo stesso motivo per cui
 `HF_TOKEN` non lo è: una chiave in argv finisce nello storico del terminale e in ogni script che la
@@ -634,7 +639,9 @@ fida di quel numero. Si contano gli **inode distinti** di `blobs/` (due hardlink
 sono un blob), un solo livello di ricorsione perché i blob sono piatti — e ciò che fosse annidato
 NON è un nostro blob. Misurato: la colonna `DIM` della tabella e un
 `find models--*/blobs -type f | xargs stat -f "%z %i" | sort -u -k2` indipendente coincidono a
-**3.675.292.998 byte** su 23 repo.
+**3.675.292.998 byte** — 76 inode distinti su 27 repo, 18 dei quali `[solo ref]` (è per questo che il
+totale in byte non si muove quando il numero di repo sale: le directory nuove non hanno blob, e
+`solo ref` esiste proprio per dire che non è la stessa cosa).
 
 **Tre cose che solo il cache vero di questa macchina potevano dire**, e che sono diventate campi
 della struttura (non note a piè di pagina):
@@ -655,6 +662,36 @@ della struttura (non note a piè di pagina):
 vero**). La ricostruzione `directory → repo id` è la copia della regola di `huggingface_hub`
 (`utils/_cache_manager.py:742-744`: tipo prima del primo `--`, poi ogni `--` → `/`), che è **perdente
 per costruzione**: `ambiguous_name` è la parola che lo dice invece del silenzio.
+
+**`[!]` — un repo che non si è potuto aprire è una riga, non un'assenza.** Un `chmod 000`, o un
+`sudo huggingface-cli` che ha creato `models--org--nome` come `root:700`, una volta faceva questo: la
+directory esisteva, l'`opendir` diceva `EACCES`, e il catalogo **perdeva l'intera lista** perché il
+ramo di errore non distingueva «non c'è» da «non apre» — un diritto murato cancellava il lavoro fatto
+sugli altri ventidue. Oggi la riga resta, è nominata, e dice tre cose: `[!]` in testa, le colonne
+numeriche a **trattini** (`—` = «non so», non «zero»), e in coda il **colpevole** — `non letto dir:
+Permission denied (models--org--murato)`. I campi sono `unreadable`, `unread_part` (`"dir"`, `"refs"`,
+`"blobs"`: la PRIMA directory che ha rifiutato, non l'ultima dedotta) e `unread_errno`.
+
+Delle due metà del repo si sa cose diverse, ed è il motivo per cui `unreadable` è un campo e non
+un `return` anticipato: con `refs/` murato e `blobs/` aperto **i byte si sanno** (li abbiamo contati) e
+manca solo il numero delle revisioni; con `blobs/` murato si sanno le revisioni e non gli byte. La
+somma in testa all'elenco e il riepilogo (`N repo NON LETTI (la somma è solo ciò che ho potuto aprire)`)
+dicono fin dove arriva il numero. `refs_only` non può accendersi su un repo non aperto — ma non per un
+`&& !unreadable` in più, che si è rivelato **codice morto** (un mutante che lo toglie non muoveva
+nemmeno un'asserzione, ed è stato tolto): lo impedisce la catena di `return` prima del calcolo.
+
+`fmlx_hf_catalog_repo` (la lettura del singolo repo, quella che usa il `doctor`) distingue i due codici
+che prima erano uno: `ENOENT` → `ERR_NO_REPO` e la frase «non è nel cache», qualunque altro errno →
+`ERR_IO` e «non si è potuto aprire». Restituire `NO_REPO` su un `EACCES` — com'era — voleva dire
+chiamare «non scaricato» un modello che l'utente HA scaricato, e un `pull --repair` che legge quel
+codice avrebbe ricominciato a scrivere byte perfetti su una directory solo murata. Sulla radice
+l'errore resta **fatale** (`ERR_NO_CACHE`, non c'è nessuna lista da salvare) ma la frase segue
+l'errno: `non esiste` / `non è una directory` / `non si è potuto aprire`, perché la frase decide quale
+controllo fa perdere tempo a chi legge — il path o i permessi. **Provato a mutare**: quindici tentativi
+su quattro lane (8 su `fmlx_hf_catalog.c`, 2 su `fmlx_models.c`, 3 su `fmlx_serve_respond.c`, 2 su
+`fmlx_doctor.c`) e **uno solo è rimasto verde** — il risultato più utile del giro, perché ha detto che
+quel `&& !out->unreadable` non lo guardava nessuno. Gli altri quattordici hanno spento da 1 a 9
+asserzioni a testa, con `ctest` 16/16 verde prima e dopo.
 
 **Due difetti trovati solo girando sul campo**, non sul fixture: la prima `parse_dirname` produceva
 `org/-due` al posto di `org/due` (dopo aver scritto `/` per la coppia copiava anche il secondo `-`)
@@ -713,12 +750,19 @@ di proposito: i numeri totali non dipendono mai dallo spazio del array.
 **Il danno non si tocca.** Questo verbo NON cancella, NON ripara, NON tocca mtime: la cura di un hash
 che non torna è `pull --repair`, che ha già il permesso esplicito di sostituire un blob. Due verbi che
 scrivono dove l'altro legge sarebbe un `rm` senza invocarlo. E «non ho potuto guardare» non è mai
-«a posto»: l'audit impossibile esce **fallito** con la sua riga.
+«a posto»: l'audit impossibile esce **fallito** con la sua riga — `org/murato  AUDIT IMPOSSIBILE` sullo
+stdout (è il nome di SU COSA guardare i permessi) e il `PROBLEMA` con la ragione sul canale d'errore,
+dove stava. `--quiet` toglie l'elenco, **non** il problema: è il contratto che ha costretto a scrivere
+il caso, perché la prima versione del `doctor` zittiva tutto e usciva 0 su un cache che non aveva
+potuto aprire. Un repo murato non cancella gli altri: gli altri ventidue restano auditati e il
+riepilogo li conta lo stesso (`2 ok` accanto a `1 problemi`).
 
-**Ciò che ha detto il cache vero** (23 repo, 71 entry, 71 verificate, **0 problemi**, 15 note,
-1 entry che non è un repo, in 1,4 s): tutte le note sono lo stesso fatto — `refs/main` che punta un
+**Ciò che ha detto il cache vero** (27 repo, 71 entry, 71 verificati, **0 problemi**, 19 note,
+1 entry che non è un repo, in 1,3 s): tutte le note sono lo stesso fatto — `refs/main` che punta un
 commit di cui non esiste lo snapshot, o repo con `0 snapshot`. È così che si distingue «mancherà» da
-«perso». Il verificatore ha anche un caso suo: un nome che *promette* un hash (64 o 40 esadecimali)
+«perso» — e le entry stanno ferme a 71 fra due misure con quattro repo in più: una directory senza
+blob non ha niente da hashare, ed è esattamente il caso che `[solo ref]` (18 righe su 27) esiste per
+dire. Il verificatore ha anche un caso suo: un nome che *promette* un hash (64 o 40 esadecimali)
 che questa lane non sa verificare NON è un problema — è contato, poi **decontato** dai verificabili con
 una nota, perché dire «1 verificabile su 1» di un file che non si poteva verificare sarebbe un verde
 rubato.
@@ -738,7 +782,7 @@ mesi, perché il valore atteso è quasi sempre uguale.
 ```sh
 cmake -S . -B build
 cmake --build build          # -Wall -Wextra -Werror
-ctest --test-dir build --output-on-failure   # 16 suite, nessuna tocca la rete (3,5 s)
+ctest --test-dir build --output-on-failure   # 16 suite, 2761 verifiche, nessuna tocca la rete (4,3–4,7 s)
 ./build/fmlx_gguf_inspect <file.gguf>   # testata, tipi, allineamento, coda di byte
 ./build/fastmlx pull <org>/<repo> [--revision R] [--dest D] [--cache C]   # lo snapshot nel cache
                                          # su un terminale: UNA riga che si riscrive; su pipe o log:
@@ -767,7 +811,9 @@ ricompila e linka il `.o` mutato PRIMA dell'archivio, esegue e dice **quali** ve
 rosse. Un mutante che non muove nulla è riportato come `VERDE-MUTO` e fa uscire 1; uno che si blocca
 (pty piena, `wait`, rete) è riportato come `BLOCCATO` dopo `--timeout` secondi invece di appendere la
 build. I nomi dei mutanti citati in questo file (`mut_hookwire`, `nodedupe`, `doublelog`, …) stanno in
-`build/probe-*/spec.json` e si rieseguono con `--list`.
+`build/probe-*/spec.json` e si rieseguono con `--list`. **Le batterie di questa sessione sono invece
+versionate in `tests/mutants/*.json`** (le quattro `unreadable-*`), e si rilanciano da lì con `--spec`:
+un `rm -rf build` non deve cancellare la prova che un'asserzione è rossa davvero.
 
 Tre sonde toccano il mondo reale, e stanno **fuori da `ctest` di proposito**: la suite deve girare
 su una macchina senza cache e senza rete. `hf_probe` legge il cache HF di questa macchina (sola

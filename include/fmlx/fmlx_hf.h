@@ -215,7 +215,10 @@ typedef struct {
      * lì per dirlo, non per nasconderlo: è ciò che rende il dubbio visibile invece che silenzioso. */
     char repo_id[FMLX_HF_CATALOG_NAME_MAX];
     char dirname[FMLX_HF_CATALOG_NAME_MAX]; /* com'è scritta su disco: mai ricostruire a caso */
-    char kind[8];              /* "model" | "dataset" | "space" */
+    char kind[8];              /* "model" | "dataset" | "space" — si ricava dal PREFISSO del nome,
+                                * quindi è noto anche su un repo `unreadable`: è per questo che il
+                                * server classifica l'illeggibilità PRIMA del tipo (aree ortogonali,
+                                * non una cascata di priorità) */
     char refs[FMLX_HF_CATALOG_REFS_MAX][FMLX_HF_CATALOG_REF_MAX]; /* i NOMI in refs/, non i commit */
     size_t n_refs;             /* il numero VERO di ref, anche se `refs[]` non li contiene tutti */
     size_t n_blobs;            /* file DISTINCT (inode) in blobs/: due hardlink = uno */
@@ -223,6 +226,17 @@ typedef struct {
     int64_t mtime;             /* il più recente fra i blob; 0 se non c'è nessun blob */
     int refs_only;             /* 1 = ha `refs/` ma zero blob: un puntatore, non un modello */
     int ambiguous_name;        /* 1 = più di un "--" dopo il tipo: l'id potrebbe non essere quello vero */
+    /* 1 = la directory C'È e il suo nome è quello di un repo, ma non l'abbiamo potuta aprire
+     * dentro (`chmod 000`, un altro utente, un `sudo huggingface-cli` che l'ha creata `root:700`).
+     * I conteggi sono ZERO non perché il repo sia vuoto ma perché **non l'abbiamo guardato**:
+     * stampare "0 byte" sarebbe il risultato silenzioso che il piano vieta, e infatti `unread_part`
+     * nomina QUALE directory non ha aperto (`"dir"`, `"refs"`, `"blobs"`) e `unread_errno` è l'errno
+     * VERO di quell'open (0 se non c'è). È un CAMPO e non un fallimento del giro intero per una
+     * ragione sola: un repo murato non deve cancellare l'elenco degli altri ventidue — e chi
+     * legge l'elenco deve poter dire quale dei ventitré non ha letto. */
+    int unreadable;
+    int unread_errno;
+    char unread_part[8];
 } FmlxHfRepo;
 
 /* Elenca i repo del cache. `cache_root == NULL` = `fmlx_hf_cache_root()`. Ordine per `repo_id`:
@@ -233,14 +247,21 @@ typedef struct {
  * Cosa NON è un repo: qualunque entry che non sia una directory con un prefisso di tipo noto — le
  * directory `xet/`, i file `version.txt`, `CACHEDIR.TAG`. Vengono ignorate, e `n_ignored_out`
  * (opzionale) le conta: "il cache ha 23 repo e 2 cose che non riconosco" è una frase diversa da
- * "il cache ha 23 repo". */
+ * "il cache ha 23 repo".
+ * LE DUE RADICI di un errore, e non sono la stessa cosa: la **radice** che non apre è fatale
+ * (`ERR_NO_CACHE`) perché senza radice non c'è nessuna lista da stampare; **un repo** che non apre
+ * è un'entry con `unreadable = 1` — saltata nei conteggi e **nominata** — perché un solo `models--x`
+ * murato che cancella l'elenco di tutto il resto è il modo in cui «non ho potuto leggere uno»
+ * diventa «non c'è niente». */
 FmlxHfStatus fmlx_hf_catalog(const char *cache_root, FmlxHfRepo *out, size_t cap, size_t *n_out,
                              size_t *n_ignored_out);
 
 /* Un solo repo, per il `doctor` e per chi deve confermare un id dopo un `pull`. Stesse regole di
  * conteggio. `FMLX_HF_ERR_NO_REPO` se la directory non c'è: un repo che NON abbiamo non è un repo da
  * zero byte, e i due casi devono arrivare al chiamante distinti (l'uno è "scaricalo", l'altro è "è
- * rotto"). */
+ * rotto"). Su `FMLX_HF_ERR_IO` — «c'è ma non apre» — `out` NON è un repo vuoto: porta `unreadable`,
+ * `unread_part`, `unread_errno` e il `dirname`, gli stessi campi che l'elenco avrebbe messo su
+ * quell'entry. Il codice dice il PERCHÉ, il struct dice lo STESSO. */
 FmlxHfStatus fmlx_hf_catalog_repo(const char *cache_root, const char *repo_id, FmlxHfRepo *out);
 
 /* ---- audit di integrità (il `doctor` di §10.2): legge, e NON ripara ----

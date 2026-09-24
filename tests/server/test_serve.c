@@ -86,6 +86,20 @@ static void wipe(const char *path) {
         printf("  ATTENZIONE: wipe di %s incompleto: %s\n", path, strerror(errno));
 }
 
+/* Il path assoluto del fixture: `put` se lo compone da sé, chi deve `chmod` no — e due modi diversi
+ * di dire lo STESSO path sono il motivo per cui un lock si posa sulla directory sbagliata e il caso
+ * resta verde per la ragione sbagliata. UN buffer statico, come negli altri file di test. */
+static const char *at(const char *rel) {
+    static char p[FMLX_HF_PATH_MAX * 2];
+    snprintf(p, sizeof p, "%s/%s", ROOT, rel);
+    return p;
+}
+
+/* Si riapre PRIMA di ogni giro (all'avvio e alla fine): un processo morto con la directory murata
+ * lascia un fixture che nessun `wipe` può rimuovere, e il giro dopo sarebbe tre repo invece di
+ * quattro con tutti i conteggi asseriti che diventano rossi per una ragione fantasima. */
+static void unlock_fixture(void) { (void)chmod(at("hub/models--org--murato"), 0755); }
+
 static void put(const char *rel, const char *body) {
     char p[FMLX_HF_PATH_MAX * 2];
     FILE *f;
@@ -115,8 +129,14 @@ static const char *hub(void) {
     return b;
 }
 
-/* Un cache con le TRE cose che il filtro deve distinguere: un modello vero (con byte suoi), un
- * dataset (non è un modello), un repo di soli ref (non è un modello, per un altro motivo). */
+/* Un cache con le QUATTRO cose che il filtro deve distinguere: un modello vero (con byte suoi), un
+ * dataset (non è un modello), un repo di soli ref (non è un modello, per un altro motivo), e un repo
+ * che il filesystem NON apre — che non è un modello per un terzo motivo, e diverso da tutti: «non lo
+ * so». Il quarto è qui e non solo nella lane perché `/v1/models` è la superficie dove un repo
+ * illeggibile DIVENTA un modello in vendita: un `data: []` con dentro un id che nessun client riesce
+ * a caricare è peggio di un'omissione, ed è per questo che `/health` deve continuare a CONTARLO. */
+static int murated; /* 1 = il quarto repo C'È ed è davvero murato (root non può: vedi sotto) */
+
 static void build_cache(void) {
     put("hub/models--org--uno/refs/main", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
     put("hub/models--org--uno/blobs/peso", "0123456789");
@@ -124,6 +144,22 @@ static void build_cache(void) {
         "{\"model_type\":\"llama\"}");
     put("hub/datasets--org--ds/blobs/tab", "a,b,c");
     put("hub/models--org--rifonly/refs/main", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+    unlock_fixture();
+    /* Root NON può provare questa cosa: con l'euid 0 i controlli di permesso sono saltati, la
+     * directory si aprirebbe lo stesso e il quarto repo diventerebbe un modello in più nell'elenco
+     * — verde per la ragione sbagliata, e `data` con un id in più. Meglio tre casi veri che quattro
+     * di cui uno raccontato. */
+    murated = (geteuid() != 0);
+    if (!murated) {
+        printf("  (root: nessun chmod frena nessuno: il quarto repo non si costruisce)\n");
+        return;
+    }
+    put("hub/models--org--murato/refs/main", "cccccccccccccccccccccccccccccccccccccccc");
+    put("hub/models--org--murato/blobs/peso", "0123456789");
+    if (chmod(at("hub/models--org--murato"), 0) != 0) {
+        printf("  ATTENZIONE: chmod sul repo murato: %s: quarto caso perduto\n", strerror(errno));
+        murated = 0;
+    }
 }
 
 /* ---- il responder visto da un client ---- */
@@ -236,10 +272,17 @@ static void case_models(void) {
     CK(r.ka == 1, "HTTP/1.1 senza `Connection: close` tiene aperto (ka=%d)", r.ka);
     CK(HAS(r_body(&r), "\"object\":\"list\""), "la forma OpenAI: %s", r_body(&r));
     CK(HAS(r_body(&r), "\"id\":\"org/uno\""), "manca il modello: %s", r_body(&r));
-    /* I DUE FILTRI, come negazioni: un dataset e un repo di soli ref non sono modelli. */
+    /* I TRE FILTRI, come negazioni: un dataset, un repo di soli ref e un repo che il filesystem non
+     * apre non sono modelli servibili. Il terzo è la negazione che costa di più lasciare andare:
+     * `/v1/models` è una VETRINA, e un id che nessun client riesce a caricare è peggio di un'assenza
+     * — promette un modello che non c'è (o che c'è, ma non apre: per chi chiama, lo stesso). */
     CK(!HAS(r_body(&r), "org/ds"), "il dataset è nell'elenco: %s", r_body(&r));
     CK(!HAS(r_body(&r), "org/rifonly"), "il repo senza byte è nell'elenco: %s", r_body(&r));
-    CK(count_occ(r_body(&r), "\"id\":") == 1, "un modello due volte: %s", r_body(&r));
+    CK(!HAS(r_body(&r), "org/murato"), "il repo illeggibile è in vendita: %s", r_body(&r));
+    /* UNO, non «uno dei tre»: la negazione di sopra dice che quel nome non c'è, questo dice che
+     * l'elenco non si è allargato. Sotto root (`murated == 0`) il quarto repo non esiste nemmeno e
+     * il conteggio resta uno — è la riga che rende il caso falsificabile in entrambi i giri. */
+    CK(count_occ(r_body(&r), "\"id\":") == 1, "il modello di servizio non è l'unico: %s", r_body(&r));
     CK(HAS(r_body(&r), "\"owned_by\":\"local\""), "owned_by mancante");
     /* `created` è l'mtime del blob — un fatto del disco, non un orologio e non zero. */
     CK(HAS(r_body(&r), "\"created\":1"), "created deve essere l'mtime (1.7e9), non 0: %s",
@@ -267,11 +310,23 @@ static void case_health(void) {
     CK(HAS(r_body(&r), "\"engine\":\"not_wired\""), "la lane del motore deve dirsi scoperta");
     CK(HAS(r_body(&r), "\"catalog\":\"ready\""), "%s", r_body(&r));
     CK(HAS(r_body(&r), "\"auth\":\"disabled\""), "senza chiave deve dire disabled");
-    /* I CONTI dei filtrati: filtrare non vuol dire tacere. */
-    CK(HAS(r_body(&r), "\"repos_total\":3"), "totale: %s", r_body(&r));
+    /* I CONTI dei filtrati: filtrare non vuol dire tacere. La partizione deve TORNARE — 1 elencato,
+     * 1 dataset, 1 solo-ref, 1 illeggibile fanno 4 — perché `repos_unreadable` è la quarta classe e
+     * se una di esse perde il suo conteggio è il TOTALE a ricominciare a dire un'altra cosa. Sotto
+     * root la quarta classe non si costruisce (`murated == 0`) e i numeri sono gli stessi meno uno:
+     * l'aspettativa si COMPONE, non si scrive a mano due volte. */
+    {
+        char want[64];
+        snprintf(want, sizeof want, "\"repos_total\":%d", murated ? 4 : 3);
+        CK(HAS(r_body(&r), want), "totale (%s): %s", want, r_body(&r));
+        snprintf(want, sizeof want, "\"repos_unreadable\":%d", murated ? 1 : 0);
+        CK(HAS(r_body(&r), want), "la quarta classe non è contata (%s): %s", want, r_body(&r));
+    }
     CK(HAS(r_body(&r), "\"repos_listed\":1"), "elencati: %s", r_body(&r));
     CK(HAS(r_body(&r), "\"repos_refs_only\":1"), "refs-only: %s", r_body(&r));
     CK(HAS(r_body(&r), "\"repos_non_model\":1"), "non-model: %s", r_body(&r));
+    /* `listed` NON conta l'illeggibile: è il numero dei modelli che il server si propone di servire,
+     * e un +1 lì dentro sarebbe la prova che il filtro di `/v1/models` è un `if` in meno. */
     CK(HAS(r_body(&r), hub()), "la radice del cache deve leggersi in /health");
     ck_length(&r);
     fmlx_serve_buf_free(&b);
@@ -1025,6 +1080,7 @@ int main(int argc, char **argv) {
     }
     setvbuf(stdout, NULL, _IONBF, 0); /* un crash deve dire QUALE sezione, non niente */
     snprintf(ROOT, sizeof ROOT, "%s", argv[1]);
+    unlock_fixture(); /* un giro morto a directory murata non è wipeabile: si riapre prima di pulire */
     wipe(ROOT);
     build_cache();
 
@@ -1043,6 +1099,7 @@ int main(int argc, char **argv) {
     case_no_perm();
     case_stop_signal();
 
+    unlock_fixture();
     wipe(ROOT);
     printf("test_serve: %d verifiche, %d fallite\n", checks, failures);
     return failures ? 1 : 0;

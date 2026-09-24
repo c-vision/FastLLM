@@ -49,6 +49,9 @@
 
 #define MARKER_REFS_ONLY " [solo ref]"
 #define MARKER_AMBIGUOUS " [?]"
+#define MARKER_UNREADABLE " [!]" /* `[!]` e non una parola: la colonna NOME è l'unica con lo spazio
+                                  * per il MOTIVO (vedi `print_row`), e un marker lungo sposterebbe
+                                  * l'allineamento di tutta la tabella per colpa di una riga. */
 #define NAME_MIN_WIDTH 24
 
 void fmlx_cli_fmt_bytes(int64_t b, char *out, size_t n) {
@@ -129,12 +132,30 @@ int fmlx_cli_filter_match(const char *f, const char *id) {
 }
 
 static void print_row(const FmlxHfRepo *r, int64_t now, size_t wname, FILE *out) {
-    char name[FMLX_HF_CATALOG_NAME_MAX + sizeof MARKER_REFS_ONLY + sizeof MARKER_AMBIGUOUS + 8];
+    char name[FMLX_HF_CATALOG_NAME_MAX + sizeof MARKER_REFS_ONLY + sizeof MARKER_AMBIGUOUS +
+              sizeof MARKER_UNREADABLE + 8];
     char dim[32], age[32], refcol[24];
     size_t shown = refs_shown(r);
 
-    snprintf(name, sizeof name, "%s%s%s", r->repo_id,
-             r->refs_only ? MARKER_REFS_ONLY : "", r->ambiguous_name ? MARKER_AMBIGUOUS : "");
+    snprintf(name, sizeof name, "%s%s%s%s", r->repo_id, r->refs_only ? MARKER_REFS_ONLY : "",
+             r->ambiguous_name ? MARKER_AMBIGUOUS : "", r->unreadable ? MARKER_UNREADABLE : "");
+    /* `unread_part` è sempre una delle tre parole del produttore (`"dir"`, `"refs"`, `"blobs"`),
+     * quindi non può essere vuoto: se lo fosse, il trattino finale direbbe «non letto: Error 0 -»
+     * e la riga sarebbe peggiore del silenzio che vuole sostituire. Il `%s` di coda copre il caso.
+     *
+     * IL CASO DURO: i numeri di un repo che non abbiamo potuto aprire NON sono zero. Zero vuol
+     * dire «ho guardato e non c'è»; qui non c'è un numero da mettere, e metterci `0 byte` sarebbe
+     * il consiglio sbagliato dato con la faccia giusta — chi ha 40 GB liberi leggerebbe «liberabili»
+     * su una directory che non ha nemmeno potuto aprire. Le colonne numeriche diventano un trattino
+     * e il MOTIVO va in coda, dove c'è spazio e dove non rompe l'allineamento di nessuno. */
+    if (r->unreadable) {
+        fprintf(out, "%-*s  %-7s %9s %5s %4s  %s %s: %s (%s)\n", (int)wname, name,
+                r->kind[0] ? r->kind : "?", "—", "—", "—", "non letto",
+                r->unread_part[0] ? r->unread_part : "dentro",
+                r->unread_errno ? strerror(r->unread_errno) : "nessun errno registrato",
+                r->dirname);
+        return;
+    }
     fmlx_cli_fmt_bytes(r->bytes, dim, sizeof dim);
     fmt_age(r->mtime, now, age, sizeof age);
     if (r->n_refs > shown) snprintf(refcol, sizeof refcol, "%zu*", r->n_refs);
@@ -147,9 +168,9 @@ FmlxCliStatus fmlx_models_exec(const FmlxCliArgs *a, FILE *out, FILE *err) {
     FmlxHfRepo *v;
     const char *given, *filt;
     char root[FMLX_HF_PATH_MAX] = "";
-    size_t i, n = 0, ignored = 0, wname = NAME_MIN_WIDTH, kept = 0;
+    size_t i, n = 0, ignored = 0, wname = NAME_MIN_WIDTH, kept = 0, notread = 0;
     int64_t total = 0;
-    int any_refs_only = 0, any_ambiguous = 0;
+    int any_refs_only = 0, any_ambiguous = 0, any_unreadable = 0;
     FmlxHfStatus s;
 
     if (!a) return FMLX_CLI_USAGE;
@@ -216,6 +237,11 @@ FmlxCliStatus fmlx_models_exec(const FmlxCliArgs *a, FILE *out, FILE *err) {
             len += sizeof MARKER_AMBIGUOUS - 1;
             any_ambiguous = 1;
         }
+        if (v[i].unreadable) {
+            len += sizeof MARKER_UNREADABLE - 1;
+            any_unreadable = 1;
+            notread++; /* i SUOI byte non li sappiamo: la somma qui sotto è «ciò che ho letto» */
+        }
         if (len > wname) wname = len;
         total += v[i].bytes;
     }
@@ -249,13 +275,23 @@ FmlxCliStatus fmlx_models_exec(const FmlxCliArgs *a, FILE *out, FILE *err) {
          * che tace su ciò che salta è il modo in cui "non ho trovato niente" diventa
          * "non c'è niente". */
         if (ignored) fprintf(out, "  (%zu entry che non sono un repo)", ignored);
+        /* La riga finale NON deve poter dire «23 repo, 3.7 GB» quando uno di quei ventitré non
+         * l'abbiamo aperto: la somma è «ciò che ho letto», e senza questa frase un script che
+         * confronta il numero con `du` trova una differenza e non sa da dove viene. Il conteggio sta
+         * QUI e non solo nel marker di riga perché il marker si perde se la tabella si filtra. */
+        if (notread) fprintf(out, "  %zu repo NON LETTI (la somma è solo ciò che ho potuto aprire)",
+                             notread);
         fprintf(out, "\n");
     }
-    if (any_refs_only || any_ambiguous) {
+    if (any_refs_only || any_ambiguous || any_unreadable) {
         fprintf(out, "note:");
         if (any_refs_only) fprintf(out, " [solo ref] = solo il puntamento al commit, nessun byte");
         if (any_ambiguous) fprintf(out, "%s [?] = il nome contiene \"--\": l'id puo' non essere invertibile",
                                    any_refs_only ? "," : "");
+        if (any_unreadable)
+            fprintf(out, "%s [!] = directory presente ma NON apribile: i trattini sono «non so», "
+                         "non «zero»",
+                    (any_refs_only || any_ambiguous) ? "," : "");
         fprintf(out, "\n");
     }
     free(v);

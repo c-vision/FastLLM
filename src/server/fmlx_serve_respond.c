@@ -220,7 +220,7 @@ static int dialect_of(const FmlxHttpReq *req) {
 typedef struct {
     FmlxHfStatus st;
     char root[FMLX_HF_PATH_MAX];
-    size_t total, listed, refs_only, non_model, ambiguous;
+    size_t total, listed, refs_only, non_model, ambiguous, unreadable;
 } Cat;
 
 /* Legge il cache. `buf->repos` è l'array del chiamante: qui non si mallocà, e il tetto di ciò che
@@ -250,7 +250,15 @@ static Cat load_catalog(const FmlxServeOpts *o, FmlxServeBuf *buf) {
     c.total = n; /* il numero VERO anche sull'errore: vedi il commento sopra */
     if (c.st != FMLX_HF_OK) return c;
     for (size_t i = 0; i < n; i++) {
-        if (strcmp(buf->repos[i].kind, "model") != 0) c.non_model++;
+        /* Il flag viene PRIMA di tutto, e non per eleganza di ordine: `unreadable` è ORTOGONALE alle
+         * altre tre classi (il `kind` si ricava dal NOME della directory, quindi si conosce anche
+         * quando non si è potuto aprire niente). Mischiato fra i tre finirebbe contato come
+         * `non_model` o come `refs_only` — due diagnosi che danno un consiglio diverso da quello
+         * giusto, cioè «guarda i permessi» invece di «non è scaricato». Il totale dei quattro
+         * conti deve poter essere letto come una partizione: `total = listed + refs_only +
+         * non_model + unreadable` (+ `ambiguous`, che non è una classe ma una qualità). */
+        if (buf->repos[i].unreadable) c.unreadable++;
+        else if (strcmp(buf->repos[i].kind, "model") != 0) c.non_model++;
         else if (buf->repos[i].refs_only) c.refs_only++;
         else c.listed++;
         if (buf->repos[i].ambiguous_name) c.ambiguous++;
@@ -265,7 +273,11 @@ static Cat load_catalog(const FmlxServeOpts *o, FmlxServeBuf *buf) {
  *  - `dataset`/`space`: la lane hf li distingue per prefisso di directory, e un dataset in mezzo
  *    ai modelli è una voce che un client proverà a usare;
  *  - i repo `refs_only`: hanno i ref e ZERO blob — sono puntatori, non byte. Non c'è nulla da
- *    servire, e nasconderlo qui è il motivo per cui il `models` da terminale li marca.
+ *    servire, e nasconderlo qui è il motivo per cui il `models` da terminale li marca;
+ *  - i repo `unreadable`: la directory c'è ma non l'abbiamo potuta aprire (un `chmod 000`, un altro
+ *    utente). Il `kind` lo sappiamo dal NOME, ma se ha dei byte NO — e un id che esce qui è un id
+ *    che un client proverà a generare, con un `created` che è 0 perché non l'abbiamo letto. Escluso
+ *    e CONTATO, come gli altri due.
  * Ogni esclusione è CONTATA in `/health`: filtrare non vuol dire tacere. Un cache che c'è e non
  * ha modelli risponde `data: []` (verità); un cache irraggiungibile risponde 500 (colpa).
  *
@@ -288,7 +300,7 @@ static FmlxServeSt body_models(FmlxServeBuf *buf, const Cat *c, int ka, size_t *
         fmlx_jsonw_arr_begin(&jw) == FMLX_JSON_OK) {
         for (size_t i = 0; i < c->total; i++) {
             const FmlxHfRepo *r = &buf->repos[i];
-            if (strcmp(r->kind, "model") != 0 || r->refs_only) continue;
+            if (strcmp(r->kind, "model") != 0 || r->refs_only || r->unreadable) continue;
             if (fmlx_jsonw_obj_begin(&jw) || fmlx_jsonw_key(&jw, "id") ||
                 fmlx_jsonw_cstr(&jw, r->repo_id) || fmlx_jsonw_key(&jw, "object") ||
                 fmlx_jsonw_cstr(&jw, "model") || fmlx_jsonw_key(&jw, "created") ||
@@ -369,6 +381,8 @@ static FmlxServeSt body_health(FmlxServeBuf *buf, const Cat *c, int auth_on, int
          fmlx_jsonw_i64(&jw, (int64_t)c->refs_only) == FMLX_JSON_OK &&
          fmlx_jsonw_key(&jw, "repos_non_model") == FMLX_JSON_OK &&
          fmlx_jsonw_i64(&jw, (int64_t)c->non_model) == FMLX_JSON_OK &&
+         fmlx_jsonw_key(&jw, "repos_unreadable") == FMLX_JSON_OK &&
+         fmlx_jsonw_i64(&jw, (int64_t)c->unreadable) == FMLX_JSON_OK &&
          fmlx_jsonw_key(&jw, "repos_ambiguous") == FMLX_JSON_OK &&
          fmlx_jsonw_i64(&jw, (int64_t)c->ambiguous) == FMLX_JSON_OK &&
          fmlx_jsonw_obj_end(&jw) == FMLX_JSON_OK && fmlx_jsonw_obj_end(&jw) == FMLX_JSON_OK &&

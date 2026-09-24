@@ -1,0 +1,9 @@
+[
+ {"name": "M8-notread-conto", "src": "src/cli/fmlx_models.c",
+  "sub": [["            notread++; /* i SUOI byte non li sappiamo: la somma qui sotto è «ciò che ho letto» */\n",
+           "            /* M8: il conteggio dei non letti è sparito */\n"]],
+  "perche": "il riepilogo è ciò che dice che la somma in cima NON è il cache: senza il conteggio dei non letti mentisce."},
+ {"name": "M9-riga-piatta", "src": "src/cli/fmlx_models.c",
+  "sub": [["    if (r->unreadable) {", "    if (r == NULL) {"]],
+  "perche": "le colonne a trattini e il MOTIVO in coda: senza quel ramo un repo non aperto stampa 0 byte e 0 blob come se fosse vuoto."}
+]

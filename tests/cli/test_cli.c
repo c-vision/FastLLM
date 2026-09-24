@@ -15,12 +15,14 @@
  */
 #include "fmlx/fmlx_cli.h"
 
+#include <errno.h>
 #include <ftw.h>
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h> /* geteuid: un `chmod 000` non frena root, e il caso del repo murato sarebbe falso */
 
 static int checks, failures;
 
@@ -688,6 +690,121 @@ static void case_models_senza_cache(void) {
     free(errb);
 }
 
+/* ---- un repo che il filesystem rifiuta ---- */
+
+/* Tre modi di dire la STESSA cosa — «questi byte non li abbiamo guardati» — e ognuno sparisce per
+ * conto suo se il codice degenera: il marker `[!]` sulla riga, i trattini al posto dei numeri, il
+ * conteggio «N repo NON LETTI» nella riga finale. Il primo se lo perde chi filtra la tabella, il
+ * secondo se lo perde chi ha fretta di stampare `0 byte`, il terzo se lo perde chi somma e basta. La
+ * riga finale è quella che conta per uno script: `du` dice un numero, `models` deve poter dire QUANTO
+ * di quel numero non è misurato — senza che nessuno debba leggere la colonna NOME. */
+static void case_models_murato(void) {
+    FmlxCliArgs a;
+    char msg[256], *outb = NULL, *errb = NULL, line[1024];
+    size_t on = 0, en = 0;
+    FILE *out, *err;
+
+    if (geteuid() == 0) {
+        printf("  (root: nessun chmod frena nessuno: caso del repo murato saltato)\n");
+        return;
+    }
+    /* Si riapre PRIMA di tutto: se un giro precedente è crashato a directory murata, il `wipe`
+     * dell'avvio non ci è potuto entrare e il fixture di quest'anno sarebbe sporco. */
+    (void)chmod(at("mur/models--org--murato"), 0755);
+    dir("mur/models--org--buono");
+    put_bytes("mur/models--org--buono/blobs/b1", 100);
+    dir("mur/models--org--murato/refs");
+    put_bytes("mur/models--org--murato/refs/main", 40);
+    put_bytes("mur/models--org--murato/blobs/b1", 7);
+    if (chmod(at("mur/models--org--murato"), 0) != 0) {
+        printf("  FIXTURE: chmod sul repo murato: %s\n", strerror(errno));
+        failures++;
+        return;
+    }
+
+    CK_PARSE(FMLX_CLI_OK, "fastmlx", "models", "--cache", at("mur"));
+    out = open_memstream(&outb, &on);
+    err = open_memstream(&errb, &en);
+    CK_ST(fmlx_cli_exec_with(&a, &DEAD, out, err), FMLX_CLI_OK);
+    fclose(out);
+    fclose(err);
+    if (outb) outb[on] = '\0';
+    if (errb) errb[en] = '\0';
+    /* L'elenco COMPLETO non è un fallimento: «uno non l'ho aperto» è una riga della tabella, non un
+     * codice d'uscita — e `en == 0` tiene pulito chi legge stdout in un pipe. */
+    CK(en == 0, "il repo murato ha scritto sull'errore: %s", errb ? errb : "(vuoto)");
+    CK(HAS(outb, "2 repo"), "l'elenco si è fermato a uno:\n%s", outb ? outb : "(vuoto)");
+
+    CK(row_with(outb, "org/buono", line, sizeof line) != NULL, "manca il repo leggibile:\n%s",
+       outb ? outb : "(vuoto)");
+    CK(HAS(line, "100 byte"), "il leggibile ha perso i suoi numeri: %s", line);
+    CK(!HAS(line, "[!]"), "il marker è sul repo che apre: %s", line);
+
+    CK(row_with(outb, "org/murato", line, sizeof line) != NULL, "il repo murato non è in lista:\n%s",
+       outb ? outb : "(vuoto)");
+    CK(HAS(line, "[!]"), "manca il marker [!]: %s", line);
+    CK(HAS(line, "—"), "le colonne numeriche non sono trattini: %s", line);
+    /* Il `0 byte` è LA bugia di questo caso: direbbe «liberabili» di una directory che non abbiamo
+     * potuto aprire, ed è il motivo per cui i tre numeri diventano un trattino. */
+    CK(!HAS(line, "byte"), "la riga di un non-letto stampa una dimensione: %s", line);
+    CK(!HAS(line, "[solo ref]"), "un murato con i ref marcati «solo ref»: %s", line);
+    CK(HAS(line, "non letto dir: Permission denied"), "il motivo non è nominato: %s", line);
+    CK(HAS(line, "models--org--murato"), "il colpevole non è il dirname: %s", line);
+    CK(HAS(line, "model"), "il TIPO si sa anche così (viene dal prefisso): %s", line);
+    free(outb);
+    free(errb);
+
+    /* La somma è «ciò che ho letto»: 100 byte, non 107. Se il `notread` si perdesse, uno script
+     * confronta 100 con il `du` e non sa da dove viene la differenza. */
+    out = open_memstream(&outb, &on);
+    err = open_memstream(&errb, &en);
+    CK_PARSE(FMLX_CLI_OK, "fastmlx", "models", "--cache", at("mur"));
+    CK_ST(fmlx_cli_exec_with(&a, &DEAD, out, err), FMLX_CLI_OK);
+    fclose(out);
+    fclose(err);
+    if (outb) outb[on] = '\0';
+    CK(HAS(outb, "100 byte in"), "la riga finale somma anche il non letto:\n%s",
+       outb ? outb : "(vuoto)");
+    CK(HAS(outb, "1 repo NON LETTI"), "la riga finale non confessa: %s", outb ? outb : "(vuoto)");
+    CK(HAS(outb, "[!] ="), "nessuna legenda del marker: %s", outb ? outb : "(vuoto)");
+    free(outb);
+    free(errb);
+
+    /* Il FILTRO non deve poter nascondere la confessione: `[!]` si perde con la riga se si filtra
+     * l'altro repo, e un totale senza quella frase è il cache presentato come i match. */
+    out = open_memstream(&outb, &on);
+    err = open_memstream(&errb, &en);
+    CK_PARSE(FMLX_CLI_OK, "fastmlx", "models", "--cache", at("mur"), "murato");
+    CK_ST(fmlx_cli_exec_with(&a, &DEAD, out, err), FMLX_CLI_OK);
+    fclose(out);
+    fclose(err);
+    if (outb) outb[on] = '\0';
+    CK(HAS(outb, "1 repo che matchano"), "il filtro conta i repo del cache: %s",
+       outb ? outb : "(vuoto)");
+    CK(HAS(outb, "1 repo NON LETTI"), "il filtro nasconde la confessione: %s",
+       outb ? outb : "(vuoto)");
+    CK(HAS(outb, "2 repo nel cache"), "il filtro non dice quanti erano: %s", outb ? outb : "(vuoto)");
+    free(outb);
+    free(errb);
+
+    /* `--quiet`: l'id C'È, e la lista è una lista di repo. Il fallimento arriva dopo, quando ci si
+     * prova a lavorare — ed è il codice DISTINTO di `catalog_repo` («non si è potuto aprire», non
+     * «non è nel cache»), che è ciò che il caso della lane va a provare. */
+    out = open_memstream(&outb, &on);
+    err = open_memstream(&errb, &en);
+    CK_PARSE(FMLX_CLI_OK, "fastmlx", "models", "--cache", at("mur"), "--quiet");
+    CK_ST(fmlx_cli_exec_with(&a, &DEAD, out, err), FMLX_CLI_OK);
+    fclose(out);
+    fclose(err);
+    if (outb) outb[on] = '\0';
+    CK(HAS(outb, "org/murato\n"), "`--quiet` ha perso il repo murato: %s", outb ? outb : "(vuoto)");
+    CK(!HAS(outb, "["), "`--quiet` stampa decorazioni: %s", outb ? outb : "(vuoto)");
+    free(outb);
+    free(errb);
+
+    chmod(at("mur/models--org--murato"), 0755); /* si riapre: un fixture murato non si wipea */
+}
+
 /* L'errore va sul canale d'errore, il progresso su stdout: in un pipe `fastmlx pull … | wc -l`
  * deve contare i file, non le lamentele. */
 static void case_canali(void) {
@@ -792,6 +909,7 @@ int main(int argc, char **argv) {
     case_models_quiet();
     case_models_filtro();
     case_models_senza_cache();
+    case_models_murato();
     case_canali();
     case_aiuto();
 
