@@ -5,12 +5,15 @@
  *  1. SU UN NON-TTY NON ESCA NIENTE. Il terminale è l'unico posto dove `\r` significa "torna
  *     indietro"; in una pipe, in un log e in `$( )` vuol dire "sovrascrivi la riga che stai
  *     leggendo", e chi riapre il file si trova un caratterino invisibile ogni 100 ms. Il chiamante
- *     in quel caso stampa la propria riga per-è-file (esistente da prima) e qui non si muove nulla.
+ *     in quel caso stampa la propria riga per-file (esistente da prima) e qui non si muove nulla.
  *
  *  2. UN RIDISEGNO AL SECONDO, non uno per chunk. A 500 MB/s la callback di curl gira migliaia di
  *     volte al secondo: scrivere al terminale a ogni giro è più lento del download stesso, ed è il
  *     modo in cui una UI diventa il collo di bottiglia di ciò che mostra. L'ultima foto invece si
- *     scrive SEMPRE (`end`), perché "si è fermato al 40%" stampato per ultimo è una bugia.
+ *     scrive SEMPRE (`end`), perché "si è fermato al 40%" stampato per ultimo è una bugia — «sempre»
+ *     significa che il capo riga arriva sempre, non che si riscrivono byte identici: due frame
+ *     UGUALI di fila sono rumore, e il terminale vero del 2026-09-24 li ha mostrati (l'ultimo chunk
+ *     di un file capitava nello stesso secondo in cui `end` ridisegna la stessa riga).
  *
  *  3. I NUMERI SONO MISURATI O NON CI SONO. Velocità ed eta compaiono solo dal SECONDO campione in
  *     poi: al primo giro il denominatore dell'operazione è zero, e "0 B/s, eta inf" è il modo in cui
@@ -106,11 +109,13 @@ static void draw(FmlxPullProgress *p, int64_t done, int64_t total, int64_t now) 
     /* Il padding cancella ciò che la riga precedente aveva di più lungo: senza, il resto di una
      * riga da 90 colonne resta sullo schermo sotto una da 60. */
     used = strlen(body);
+    if (p->drew && !strcmp(body, p->last_body)) return; /* la STESSA foto è già a schermo */
     fputc('\r', p->out);
     fputs(body, p->out);
     if (used < (size_t)p->wide)
         for (i = used; i < (size_t)p->wide; i++) fputc(' ', p->out);
     if ((int)used > p->wide) p->wide = (int)used;
+    snprintf(p->last_body, sizeof p->last_body, "%s", body);
     p->drew = 1;
 }
 
@@ -135,6 +140,8 @@ void fmlx_pull_progress_begin(FmlxPullProgress *p, size_t idx, size_t nfiles, co
     p->done = 0;
     p->last_t = now;
     p->wide = 0;
+    p->drew = 0; /* ogni file è una riga nuova: il confronto «stessa foto» riparte da zero */
+    p->last_body[0] = '\0';
     p->open = 1;
     draw(p, 0, p->total, now);
 }

@@ -19,7 +19,7 @@ da Hugging Face). Piano completo: `AiWiki/01-Projects/FastMLX/Piani/(open) - Fas
 | `src/server/fmlx_api*.c` — router + adapter OpenAI/Anthropic sopra il codec | **esiste, compilato, testato** (151 verifiche). Non c'è ancora un motore sotto: la generazione è attaccata al confine `FmlxApiNext`, che il test copre con un doppio scriptato |
 | `src/server/fmlx_serve_respond.c` + `fmlx_serve.c` — il server: `/v1/models`, `/health`, il 501 per ogni rotta che genera, e il loop TCP | **esiste, compilato, testato, provato su socket vero** (161 verifiche: framing, `bind` rifiutato e arresto su segnale + uno smoke del binario con `curl` vero). Il motore non c'è e **non serve per provarlo** |
 | `src/lane_mlx/` — motore MLX estratto da GMBasic | non scritto. **D2 non blocca il "come"**: i prerequisiti per compilarlo sono già su questa macchina (verificato 2026-09-22: 28 header in `GMBasic/libs/mlx-deps/mlx-c-src/mlx/c/*.h`, più `libmlx.a` 31 MB e `libmlxc.a` 1,0 MB in `libs/mlx-deps/precompiled/darwin-arm64`). D2 decide solo **chi possiede** il motore |
-| `src/cli/fmlx_pull.c` + `fmlx_pull_progress.c` + `fmlx_cli.c` — `fastmlx pull`, l'avanzamento, il dispatch e gli esiti | **esiste, compilato, testato, provato sul server vero** (77 + 190 verifiche, di cui 3 piani distinti per la barra: renderer con orologio in mano + terminale finto `openpty` + pipe; pull reale `sshleifer/tiny-gpt2`: 9/9 file, 9 blob il cui nome è il loro hash, snapshot riletto da `hf_probe`) |
+| `src/cli/fmlx_pull.c` + `fmlx_pull_progress.c` + `fmlx_cli.c` — `fastmlx pull`, l'avanzamento, il dispatch e gli esiti | **esiste, compilato, testato, provato sul server vero** (102 + 190 verifiche, di cui 3 piani distinti per la barra: renderer con orologio in mano + terminale finto `openpty` + pipe; pull reale `sshleifer/tiny-gpt2`: 9/9 file, 9 blob il cui nome è il loro hash, snapshot riletto da `hf_probe`) |
 | `src/cli/fmlx_models.c` + `src/hf/fmlx_hf_catalog.c` — `fastmlx models` / `list` | **esiste, compilato, testato, provato sul cache vero di questa macchina** (103 + 190 verifiche; 23 repo letti in 0,01 s, 3.675.292.998 byte che coincidono con un conteggio di inode fatto a parte con `find`+`stat`) |
 | `src/cli/fmlx_serve.c` — `fastmlx serve` | **esiste, compilato, testato, provato**: risolve host/porta/chiave (flag > ambiente > default, piano §14) e passa tutto al loop. `--cache` vale anche qui: `pull`, `models` e `serve` guardano LO STESSO disco |
 | `src/cli/` — `run\|chat\|ps\|cp\|rm\|doctor` | **non collegati, e lo dicono**: `fmlx_cli_exec` ritorna `NOT_WIRED` nominando il pezzo che manca (motore / registro delle sessioni / chi scrive nel cache) ed esce 2. Il parser delle bandiere invece **esiste**, ed è provato per i 6 verbi rimasti — e una bandiera che il verbo non legge è un errore, non un'opzione ignorata |
@@ -576,21 +576,50 @@ applicata da un server che risponde in meno di un secondo. La prova speculare, s
 minuto dopo: lo STESSO `pull` con stdout redirect su file → **zero `\r` in 610 byte**, nove righe
 per-file.
 
-**Ciò che il terminale vero ha fatto vedere e il test non guardava**: quando l'ultimo chunk capita in
+**Il telaio duplicato, chiuso il giorno stesso in cui è stato visto**: quando l'ultimo chunk capita in
 un **secondo diverso** da quello del campione precedente (`[6/9]`, `[8/9]`), il corpo disegna il 100% e
-`end()` lo ridisegna — due frame **identici e consecutivi**, ~70 byte dove l'occhio legge una riga
-sola. Non mente, non costa nulla su un terminale e non è un errore di incorniciatura (il `\n` di
-chiusura resta uno), ma è rumore di byte: misurato qui invece di ri-scoprirlo fra sei mesi.
+`end()` lo ridisegnava — due frame **identici e consecutivi**, ~70 byte dove l'occhio legge una riga
+sola. Non mentiva, non costava nulla su un terminale, ma era rumore di byte; ora `draw()` confronta il
+corpo con quello già a schermo e salta il ridisegno. Il caso è `case_progress_stessa_foto`: tre blocchi
+per tre forme diverse (foto duplicata → 2 `\r` e non 3; file già nel cache, zero chunk → 1 `\r`;
+quattro numeri diversi → 4 `\r`, perché un dedupe troppo avido è peggio di niente).
+Mutanti: `nodedupe` (toglie il confronto) e `prefix` (confronta solo 12 byte) — il primo rende rosse
+2 verifiche, il secondo 13.
 
-**Cosa NON è misurato qui**: la via di fallback `copy_stream` (hardlink impossibile) non è mai
-stata eseguita — il test gira su un singolo filesystem; lo **specchio `--dest`** non ha ancora una
-riga sua (l'avanzamento esiste per il download, e il mirror resta una riga finale); il `time(NULL)`
-che `pull_on_bytes` passa all'hook è **rilettura d'orologio non provata** — il test inietta il proprio
-`now`, quindi «il tempo si aggiorna a ogni campione» è una scelta leggibile nel sorgente, non un
-comportamento asserito; e la riga di `curl_configure` che copia l'hook **anche quando è NULL** non è
-provata dai test del `pull`, perché girano sul transport finto — ciò che è provato è il contratto
-(l'hook arriva al transport con i numeri giusti: `mut_hookwire` diventa rosso se non lo si cabla),
-non il campo azzarato che protegge dal puntatore vecchio; i 6 verbi non collegati non hanno ancora un motore da
+**La copia dei byte di `--dest`, eseguita per la prima volta da un test.** `link()` rende `EXDEV` solo
+su due volumi diversi, e su questa macchina non succede mai: il ramo di fallback non era mai stato
+percorso da nessun test. Ora `fmlx_pull_copy_stream` è chiamata diretta (era `static`, ora è nella
+header interna della CLI — che è il posto giusto per una funzione che serve a due file della stessa
+lane e non a chi usa la libreria): 132 072 byte scritti a mano con la coda storta, e si asserisce che
+i byte sono **gli stessi**, che il `.fmlx-part` non resta (né dopo un successo né dopo una copia
+interrotta — il `src` che è una directory fa fallire il `read` DENTRO il loop, che è l'unico modo di
+arrivare all'`unlink`), e che l'hook di avanzamento è partito con il numero giusto: `t0 ≥ 0`,
+`done == 132072`, `total == 132072` anche se il `begin` aveva mentito di proposito. Non si asserisce
+sul TESTO disegnato perché qui l'orologio è quello vero. Mutanti: `nohook` (stacca la chiamata),
+`chunk` (conta il chunk invece del cumulato), `nostsize` (non legge la `stat`), `keeptmp` (non
+cancella il temporaneo) — che rendono rosse, rispettivamente, 3, 1, 1, 1 verifiche.
+
+**Lo specchio ha una riga sua, sul terminale:** `specchio → <dir>` una volta sola prima dei ridisegni
+di `[i/n]`, e le righe per-file restano solo dove c'erano prima (pipe e log). `case_progress_pty` ora
+passa `--dest` e verifica entrambe le metà: la riga c'è, `"  specchio …"` NO. Mutanti:
+`noannounce` (toglie l'annuncio) e `doublelog` (le stampa entrambe): 1 verifica rossa ciascuno.
+
+**Un fatto sulla pty, che ha quasi impedito di scoprirne un altro.** Il buffer del driver di una pty è
+dell'ordine del kilobyte: il caso girava a 898 byte di output, e i ~170 byte del mutante `doublelog`
+l'hanno **bloccato** — un test che si impalla invece di fallire, cioè il modo peggiore di sbagliare.
+Ora il master lo drena un figlio che scrive su file, e il padre chiude lo schiavo prima del
+`waitpid`: è quello, non un tempo di attesa, a dire al drenatore che è finita. Con questa forma
+`doublelog` è diventato rosso come doveva.
+
+**Cosa NON è misurato qui**: il **trigger** della copia (`link()` → `EXDEV`, cache e `--dest` su due
+volumi) resta non eseguito — la funzione sì, il ramo che la sceglie no, e su una macchina con un solo
+volume non è provabile; il `time(NULL)` che `pull_on_bytes` passa all'hook è **rilettura d'orologio
+non asserita** — il test inietta il proprio `now` (è il motivo per cui il renderer si prova), e
+`copy_stream` al massimo prova che *un* orologio è stato preso (`t0 ≥ 0`), non che ne rilegge uno per
+campione; la riga di `curl_configure` che copia l'hook **anche quando è NULL** non è provata dai test
+del `pull`, perché girano sul transport finto — ciò che è provato è il contratto (l'hook arriva al
+transport con i numeri giusti: `mut_hookwire` diventa rosso se non lo si cabla), non il campo azzarato
+che protegge dal puntatore vecchio; i 6 verbi non collegati non hanno ancora un motore da
 nominare davvero, nominano il pezzo.
 
 ## `fastmlx models` / `list` — il catalogo locale (`src/hf/fmlx_hf_catalog.c` + `src/cli/fmlx_models.c`)
@@ -678,6 +707,16 @@ HF_HUB_CACHE=work/probe-cache ./build/hf_fetch_probe <org>/<repo> [<rev>] [<file
 ./build/hf_manifest_probe <org>/<repo> [<rev>]
                                          # UNA richiesta di metadati: lista i file, zero byte di modello
 ```
+
+**Verde che prova qualcosa.** Un'asserzione che non è mai stata vista rossa può essere verde perché
+il codice è giusto, o perché non guarda niente: da fuori sono lo stesso colore. `tools/mut_prove.py`
+è il pezzo che chiude il conto — copia il sorgente toccato in `build/probe-<tag>/`, applica UNA
+sostituzione letterale (se combacia zero o due volte si ferma: un mutante ambiguo non è una prova),
+ricompila e linka il `.o` mutato PRIMA dell'archivio, esegue e dice **quali** verifiche sono diventate
+rosse. Un mutante che non muove nulla è riportato come `VERDE-MUTO` e fa uscire 1; uno che si blocca
+(pty piena, `wait`, rete) è riportato come `BLOCCATO` dopo `--timeout` secondi invece di appendere la
+build. I nomi dei mutanti citati in questo file (`mut_hookwire`, `nodedupe`, `doublelog`, …) stanno in
+`build/probe-*/spec.json` e si rieseguono con `--list`.
 
 Tre sonde toccano il mondo reale, e stanno **fuori da `ctest` di proposito**: la suite deve girare
 su una macchina senza cache e senza rete. `hf_probe` legge il cache HF di questa macchina (sola

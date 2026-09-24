@@ -14,6 +14,9 @@
  *  e) l'avanzamento: su un terminale UNA riga che si riscrive, su tutto il resto nessun carattere
  *     di controllo. Sono due decisioni diverse (quando disegnare / se disegnare) e hanno due prove
  *     diverse — i casi in fondo al file.
+ *  f) LA COPIA dei byte di `--dest`, eseguita diretta: il ramo che la invoca (`link` che rende
+ *     `EXDEV`) non esiste su questa macchina, e senza la chiamata diretta nessun test avrebbe mai
+ *     eseguito il codice che sposta i byte di un modello.
  *
  * I valori esadecimali qui sotto non sono inventati: `git hash-object` e `shasum -a 256` sui due
  * corpi, misurati su questa macchina. Il test costruisce il cache con le regole della lane hf
@@ -31,7 +34,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-#include <util.h> /* openpty: provare che la decisione `isatty` èpresa sul FILE giusto */
+#include <sys/wait.h> /* fork/waitpid: il drenatore della pty, vedi `case_progress_pty` */
+#include <util.h> /* openpty: provare che la decisione `isatty` è presa sul FILE giusto */
 #include <unistd.h>
 
 static int checks, failures;
@@ -588,6 +592,145 @@ static void case_progress_disegna(void) {
     CK(fmlx_pull_progress_inplace(&p) == 0, "inplace dice il contrario di tty=0");
 }
 
+/* LA STESSA FOTO NON SI RIDISEGNA. Il caso non è inventato: è ciò che si è misurato sul terminale
+ * vero col server vero. L'ultimo chunk di un file arriva in un secondo DIVERSO da quello del
+ * penultimo, il ridisegno lo porta al 100%, e `end` — che ha gli STESSI numeri — ne disegnava un
+ * secondo identico. Su una riga che si riscrive l'utente vede un «100%» che trema, e in un log sono
+ * byte doppi per ogni file. Il numero contato è la prova: senza il dedupe sono 3, non 2. */
+static void case_progress_stessa_foto(void) {
+    FmlxPullProgress p;
+    FILE *f;
+    char *s;
+
+    f = rb_file();
+    fmlx_pull_progress_init(&p, f, 1);
+    fmlx_pull_progress_begin(&p, 3, 9, "flax_model.msgpack", 1000, 100);
+    fmlx_pull_progress_bytes(&p, 1000, 1000, 101); /* l'ultimo chunk: disegna il 100% */
+    fmlx_pull_progress_end(&p, 1000, 101);         /* la STESSA foto, un istante dopo */
+    s = rb_end(f);
+    CK(count_ch(s, '\r') == 2, "la foto duplicata è ancora a schermo: %d ridisegni, attesi 2\n%s",
+       count_ch(s, '\r'), s);
+    CK(count_ch(s, '\n') == 1, "a capo=%d: la riga di un file si chiude UNA volta\n%s",
+       count_ch(s, '\n'), s);
+    CK(strstr(seg(s, 1), "100%") != NULL, "l'unica foto finale non dice finito:\n%s", seg(s, 1));
+
+    /* Un file già nel cache: zero chunk, zero callback. `begin` disegna lo zero, `end` ha lo stesso
+     * corpo perché non c'è nessuna misura in mezzo: una riga, non due. */
+    f = rb_file();
+    fmlx_pull_progress_init(&p, f, 1);
+    fmlx_pull_progress_begin(&p, 1, 1, "config.json", 7, 200);
+    fmlx_pull_progress_end(&p, 0, 203);
+    s = rb_end(f);
+    CK(count_ch(s, '\r') == 1 && count_ch(s, '\n') == 1,
+       "il file senza chunk ridisegna la stessa riga: %d ritorno carrello\n%s", count_ch(s, '\r'), s);
+
+    /* IL ROVESCIO, che è la parte che conta: un numero DIVERSO non deve mai essere inghiottito. Un
+     * dedupe fatto male — confronta un prefisso, o non azzera il memorizzato a ogni `begin` — ferma
+     * la barra e il test sopra resta verde: è questo blocco che lo impedisce. */
+    f = rb_file();
+    fmlx_pull_progress_init(&p, f, 1);
+    fmlx_pull_progress_begin(&p, 1, 1, "peso.bin", 1000, 300);
+    fmlx_pull_progress_bytes(&p, 500, 1000, 301);
+    fmlx_pull_progress_bytes(&p, 900, 1000, 302);
+    fmlx_pull_progress_end(&p, 1000, 303);
+    s = rb_end(f);
+    CK(count_ch(s, '\r') == 4, "quattro foto diverse, ridisegni=%d:\n%s", count_ch(s, '\r'), s);
+    CK(strstr(seg(s, 2), "90%") != NULL, "il novanta per cento è stato inghiottito:\n%s", seg(s, 2));
+    CK(strstr(seg(s, 3), "100%") != NULL, "mancata l'ultima foto:\n%s", seg(s, 3));
+}
+
+/* LA COPIA, ESEGUITA DAVVERO (caso f in testa al file). Si guarda lo STATO del renderer e non il
+ * testo disegnato: `copy_stream` prende l'orologio VERO da sé — stessa regola della lane download,
+ * dove il tempo si prende alla fonte e non dentro il renderer — e un conto dei ridisegni dipenderebbe
+ * da quanto impiega la scrittura su disco, cioè da ciò che questa macchina fa mentre un'altra AI la
+ * usa. `t0`, `done` e `total` non dipendono dal tempo: dicono che l'hook è partito, che l'ultima
+ * cifra è il file INTERO e non l'ultimo chunk, e che la promessa viene dalla `stat` del sorgente. A
+ * questo serve il `total_hint` bugiardo del `begin`: se la copia non portasse la sua lunghezza, la
+ * barra resterebbe incollata a 999999. */
+static void case_copy_stream(void) {
+    FmlxPullProgress p;
+    char src[FMLX_HF_PATH_MAX], dst[FMLX_HF_PATH_MAX], dir[FMLX_HF_PATH_MAX], tmp[FMLX_HF_PATH_MAX];
+    char missing[FMLX_HF_PATH_MAX], dst2[FMLX_HF_PATH_MAX];
+    const size_t n = 65536 * 2 + 1000; /* più di un chunk, con la coda STORTA: due rami di read */
+    unsigned char *a, *b;
+    size_t i, got = 0;
+    struct stat st;
+    FILE *f, *log;
+
+    fresh("copy-stream");
+    snprintf(dir, sizeof dir, "%s/out", ROOT);
+    if (fmlx_hf_mkdir_p(dir) != 0) {
+        CK(0, "fixture mkdir %s: %s", dir, strerror(errno));
+        return;
+    }
+    a = malloc(n);
+    b = malloc(n);
+    if (!a || !b) {
+        CK(0, "fixture malloc di %zu byte", n);
+        free(a);
+        free(b);
+        return;
+    }
+    for (i = 0; i < n; i++) a[i] = (unsigned char)(i * 31 + 7);
+    snprintf(src, sizeof src, "%s/src.bin", ROOT);
+    f = fopen(src, "wb");
+    if (!f || fwrite(a, 1, n, f) != n) {
+        CK(0, "fixture %s", src);
+        if (f) fclose(f);
+        free(a);
+        free(b);
+        return;
+    }
+    fclose(f);
+
+    snprintf(dst, sizeof dst, "%s/peso.bin", dir);
+    log = rb_file();
+    fmlx_pull_progress_init(&p, log, 1);
+    fmlx_pull_progress_begin(&p, 1, 1, "peso.bin", 999999, 100); /* mente di proposito, vedi sopra */
+    CK_ST(fmlx_pull_copy_stream(src, dst, &p), FMLX_HF_OK);
+    fclose(log);
+
+    CK(stat(dst, &st) == 0, "la copia non esiste: %s: %s", dst, strerror(errno));
+    CK(stat(dst, &st) == 0 && (size_t)st.st_size == n, "la copia misura %lld byte, attesi %zu",
+       (long long)st.st_size, n);
+    f = fopen(dst, "rb");
+    if (f) {
+        got = fread(b, 1, n, f);
+        fclose(f);
+    }
+    CK(got == n && memcmp(a, b, n) == 0,
+       "i byte copiati NON sono gli stessi: %zu su %zu%s", got, n, got == n ? "" : " (lunghezza)");
+    snprintf(tmp, sizeof tmp, "%s.fmlx-part", dst);
+    CK(stat(tmp, &st) != 0, "il temporaneo %s è rimasto in giro", tmp);
+
+    CK(p.t0 >= 0, "l'hook non è mai partito durante la copia: t0=%" PRId64, p.t0);
+    CK(p.done == (int64_t)n, "l'ultima cifra della copia è %" PRId64 ", attesi %zu", p.done, n);
+    CK(p.total == (int64_t)n, "la promessa non viene dal sorgente: total=%" PRId64, p.total);
+
+    /* Il sorgente MANCA. La directory di destinazione ESISTE (l'abbiamo creata sopra): se non fosse
+     * così l'ERR_IO arriverebbe dall'open del temporaneo e il controllo passerebbe per il motivo
+     * sbagliato. `prog == NULL` è l'altro ramo: il `--quiet`, che non ha una riga da aggiornare. */
+    snprintf(missing, sizeof missing, "%s/noncix.bin", ROOT);
+    snprintf(dst2, sizeof dst2, "%s/mai.bin", dir);
+    CK_ST(fmlx_pull_copy_stream(missing, dst2, NULL), FMLX_HF_ERR_IO);
+    CK(stat(dst2, &st) != 0, "%s è stata creata pur per un sorgente mancante", dst2);
+    snprintf(tmp, sizeof tmp, "%s.fmlx-part", dst2);
+    CK(stat(tmp, &st) != 0, "il temporaneo %s resta dopo un fallimento", tmp);
+
+    /* E il fallimento DENTRO il loop: `src` è una directory, quindi l'open riesce e il primo
+     * `read` rende `EISDIR`. È l'unico modo di arrivare all'`unlink` del temporaneo — che è poi la
+     * promessa che conta: una copia interrotta non lascia NÉ la destinazione NÉ un `.fmlx-part` da
+     * 30 GB in giro per il disco. Senza questo ramo l'`unlink` non lo esegue mai nessun test, e
+     * «l'ho scritto» varrebbe quanto «funziona». */
+    CK_ST(fmlx_pull_copy_stream(ROOT, dst2, NULL), FMLX_HF_ERR_IO);
+    CK(stat(dst2, &st) != 0, "%s creata da una copia fallita a metà", dst2);
+    snprintf(tmp, sizeof tmp, "%s.fmlx-part", dst2);
+    CK(stat(tmp, &st) != 0, "il temporaneo %s sopravvive a una copia fallita a metà", tmp);
+
+    free(a);
+    free(b);
+}
+
 /* Il `pull` completo su un non-terminale (memstream): nessuna riga di controllo, e le righe
  * per-file di sempre restano dove erano. `n_ticks == 0` è l'altra metà della prova: l'hook non è
  * nemmeno offerto al transport, quindi non è che si offre e si finge di non vederlo. */
@@ -624,9 +767,11 @@ static void case_progress_pty(void) {
     FmlxPullReport rep;
     int m = -1, sl = -1;
     struct winsize ws;
-    char buf[4096];
-    size_t got = 0;
-    FILE *log;
+    char stack[4096], *buf = stack;
+    char dest_root[FMLX_HF_PATH_MAX], dst[FMLX_HF_PATH_MAX], outfile[FMLX_HF_PATH_MAX];
+    size_t cap = sizeof stack, got = 0;
+    pid_t kid;
+    FILE *log, *rf;
 
     fresh("progress-pty");
     memset(&ws, 0, sizeof ws);
@@ -638,29 +783,66 @@ static void case_progress_pty(void) {
         return;
     }
     opts_for(&o);
+    /* Lo specchio entra in QUESTO caso perché è qui che ha una prova da fare: su un terminale deve
+     * comparire una riga che dice cosa sta succedendo (altrimenti le barre `[i/n]` dello specchio
+     * sono indistinguibili da quelle del download) e NON deve comparire la riga per-file che
+     * `case_progress_pipe` esige. Le due modalità restano alternative anche sotto `--dest`. */
+    snprintf(dest_root, sizeof dest_root, "%s/models", ROOT);
+    o.dest = dest_root;
     memset(&rep, 0, sizeof rep);
-    log = fdopen(sl, "w");
-    if (!log) {
-        CK(0, "fdopen della pty: %s", strerror(errno));
+    snprintf(outfile, sizeof outfile, "%s/pty-out.bin", ROOT);
+
+    /* Il master lo drena un FIGLIO. Non è pignoleria: il buffer del driver di una pty è dell'ordine
+     * del KILOBYTO, e quando l'output lo supera la `write` sullo schiavo si BLOCCA — il test si
+     * impalla invece di fallire, che è il modo peggiore di sbagliare perché da fuori sembra «sta
+     * ancora girando» e in una build automatica diventa un timeout senza colpevoli. Misurato su
+     * questo caso: 898 byte passano, ~170 byte di log in più (il mutante `doublelog`) bloccano.
+     * Il padre chiude lo schiavo PRIMA di `waitpid`: è quello, e non un tempo di attesa, a dire al
+     * drenatore che è finita (il master rende `EIO` quando l'ultimo schiavo è chiuso). */
+    kid = fork();
+    if (kid < 0) {
+        CK(0, "fork del drenatore: %s", strerror(errno));
         close(m);
         close(sl);
         return;
     }
-    /* Il master si mette in NON-BLOCKING PRIMA di scrivere: dopo che lo schiavo è chiuso un master
-     * non restituisce più niente, e «non ho letto» somiglierebbe a «non ha scritto» — che è il
-     * genere di verde-muto che fa passare un regresso. */
-    fcntl(m, F_SETFL, O_NONBLOCK);
-    CK_ST(fmlx_pull_with(REPO, "main", &o, &VT, &rep, log), FMLX_HF_OK);
-    fflush(log); /* lo stdio su terminale è line-buffered: l'ultima riga è ancora nel buffer */
-    for (;;) {
-        ssize_t r = read(m, buf + got, sizeof buf - 1 - got);
-        if (r <= 0) break;
-        got += (size_t)r;
-        if (got + 1 >= sizeof buf) break;
+    if (kid == 0) {
+        char b[4096];
+        ssize_t r;
+        int fd = open(outfile, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        close(sl); /* il figlio NON deve tenere lo schiavo: se lo tiene, il master non vede mai la
+                    * fine e il `waitpid` del padre non torna mai */
+        if (fd >= 0)
+            while ((r = read(m, b, sizeof b)) > 0)
+                if (write(fd, b, (size_t)r) != r) break;
+        if (fd >= 0) close(fd);
+        _exit(0);
     }
-    buf[got] = '\0';
-    fclose(log);
+    log = fdopen(sl, "w");
+    if (!log) {
+        CK(0, "fdopen della pty: %s", strerror(errno));
+        close(m);
+        close(sl); /* anche il figlio, bloccato in `read`, si sveglia */
+        return;
+    }
+    CK_ST(fmlx_pull_with(REPO, "main", &o, &VT, &rep, log), FMLX_HF_OK);
+    fclose(log); /* = close(sl): chiude LO SCHIAVO, ed è questo a terminare il drenatore */
+    waitpid(kid, NULL, 0);
     close(m);
+    rf = fopen(outfile, "rb");
+    if (!rf) {
+        CK(0, "il drenatore non ha lasciato %s: %s", outfile, strerror(errno));
+        return;
+    }
+    buf[0] = '\0';
+    got = fread(buf, 1, cap - 1, rf);
+    buf[got] = '\0';
+    if (got + 1 >= cap - 1) {
+        /* Lo spazio è finito mentre si leggeva: si dice, non si asserisce su un troncone. */
+        CK(0, "l'output del terminale supera %zu byte: il caso va fatto leggere da un buffer più grande",
+           cap);
+    }
+    fclose(rf);
     CK(n_ticks >= 2, "sul terminale l'hook non è mai arrivato al transport: %d tick", n_ticks);
     CK(strchr(buf, '\r') != NULL, "su un terminale VERO nessun ridisegno:\n%s", buf);
     CK(strstr(buf, "[1/2]") != NULL && strstr(buf, "config.json") != NULL,
@@ -671,6 +853,15 @@ static void case_progress_pty(void) {
      * doppio log che l'utente non ha chiesto. */
     CK(strstr(buf, "  [1/2] config.json  7 byte\n") == NULL,
        "barra E riga per-file insieme (doppio log):\n%s", buf);
+
+    /* E lo specchio, sul terminale: UNA riga che dice dove sta copiando, e nessuna delle righe
+     * per-file che il caso della pipe esige. Sono le due metà della stessa regola, applicate al
+     * secondo ciclo di `[i/n]` — quello che senza questa riga sembrerebbe un download doppio. */
+    CK(strstr(buf, "specchio →") != NULL, "lo specchio non annuncia cosa fa:\n%s", buf);
+    CK(strstr(buf, "  specchio ") == NULL, "riga per-file dello specchio sotto la barra:\n%s", buf);
+    CK(rep.n_mirrored == 2, "n_mirrored=%zu: lo specchio del terminale non è girato", rep.n_mirrored);
+    snprintf(dst, sizeof dst, "%s/models/" LEAF "/weights/model.safetensors", ROOT);
+    CK(is_file(dst, NULL) && content_is(dst, BODY_B), "manca il file specchiato %s", dst);
 }
 
 int main(int argc, char **argv) {
@@ -700,6 +891,8 @@ int main(int argc, char **argv) {
     case_manifest_refused();
     case_null_report();
     case_progress_disegna();
+    case_progress_stessa_foto();
+    case_copy_stream();
     case_progress_pipe();
     case_progress_pty();
 

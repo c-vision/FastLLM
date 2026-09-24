@@ -63,14 +63,24 @@ static const char *repo_leaf(const char *repo_id) {
 
 /* Copia `src` su `dst` passando da un temporaneo: serve SOLO dove `link()` non può funzionare
  * (volume diverso), perché è l'unico caso in cui i byte diventano due copie e quindi vale la stessa
- * atomicità che il cache si impone. */
-static FmlxHfStatus copy_stream(const char *src, const char *dst) {
+ * atomicità che il cache si impone. È anche l'UNICA parte del `pull` che può muovere decine di GB
+ * senza dire nulla, ed è la ragione per cui prende lo stesso progressore del download: `prog == NULL`
+ * è il modo normale (hardlink, o terminale che non chiede la riga).
+ *
+ * Non è `static` e sta in `fmlx_cli_internal.h` per un motivo misurabile: su questa macchina il ramo
+ * che lo chiama (`EXDEV`) non si incontra mai, perché cache e `--dest` stanno sullo stesso volume.
+ * Lasciarlo ineseguito significava non sapere NEANCHE se la copia produce byte giusti. */
+FmlxHfStatus fmlx_pull_copy_stream(const char *src, const char *dst, FmlxPullProgress *prog) {
     char tmp[FMLX_HF_PATH_MAX * 2];
     unsigned char buf[COPY_CHUNK];
     FmlxHfStatus s = FMLX_HF_OK;
-    int in, out;
+    struct stat st;
+    int64_t total = -1, moved = 0;
     ssize_t r;
+    int in, out;
 
+    if (stat(src, &st) == 0) total = (int64_t)st.st_size; /* la promessa della barra viene dal file
+                                                          * che stiamo leggendo, non dal manifesto */
     if (snprintf(tmp, sizeof tmp, "%s.fmlx-part", dst) >= (int)sizeof tmp) return FMLX_HF_ERR_BUF_SMALL;
     in = open(src, O_RDONLY);
     if (in < 0) return FMLX_HF_ERR_IO;
@@ -91,6 +101,11 @@ static FmlxHfStatus copy_stream(const char *src, const char *dst) {
             off += w;
         }
         if (s != FMLX_HF_OK) break;
+        moved += r;
+        /* Stessa regola del download: la cifra è ciò che sta SU DISCO, e il tempo si prende qui,
+         * non dentro il renderer (che deve restare provabile con un orologio finto). */
+        if (prog)
+            fmlx_pull_progress_bytes(prog, moved, total, (int64_t)time(NULL));
     }
     if (r < 0) s = FMLX_HF_ERR_IO;
     if (close(in) != 0 && s == FMLX_HF_OK) s = FMLX_HF_ERR_IO;
@@ -109,7 +124,7 @@ static FmlxHfStatus copy_stream(const char *src, const char *dst) {
 /* Un file nello specchio: se `dst` è già LO STESSO inode dei byte nel cache non c'è nulla da fare;
  * negli altri casi la directory di destinazione prende i byte del cache (hardlink dove si può,
  * copia dove non si può). È il significato di `--dest`: quel path deve contenere il modello. */
-static FmlxHfStatus mirror_one(const char *src, const char *dst) {
+static FmlxHfStatus mirror_one(const char *src, const char *dst, FmlxPullProgress *prog) {
     struct stat a, b;
     int saved;
 
@@ -125,7 +140,7 @@ static FmlxHfStatus mirror_one(const char *src, const char *dst) {
      * rete): stessa strada. Tutto il resto è un errore da dire, non da aggirare. */
     if (saved != EXDEV && saved != EPERM && saved != EOPNOTSUPP && saved != ENOTSUP)
         return FMLX_HF_ERR_IO;
-    return copy_stream(src, dst);
+    return fmlx_pull_copy_stream(src, dst, prog);
 }
 
 /* Il transport chiama QUI, e l'orologio si prende QUI e non dentro il renderer: il renderer deve
@@ -254,6 +269,12 @@ static FmlxHfStatus pull_go(const char *repo_id, const char *revision, const Fml
     }
     if (mirroring) {
         snprintf(rep->dest_dir, sizeof rep->dest_dir, "%s", dst_root);
+        /* Una riga che dice COSA sta succedendo, prima dei ridisegni: senza, le barre di `[i/n]`
+         * dello specchio sono indistinguibili da quelle del download, e l'utente legge «di nuovo
+         * 9 file» come se avesse scaricato due volte. Solo sul terminale: su pipe e log il
+         * riepilogo in fondo basta, e aggiungere una riga là avrebbe rotto un output che i test
+         * contano. */
+        if (log && fmlx_pull_progress_inplace(&prog)) fprintf(log, "specchio → %s\n", dst_root);
         for (i = 0; i < m.n; i++) {
             FmlxHfRef ref;
             const char *rel = m.files[i].path;
@@ -275,14 +296,19 @@ static FmlxHfStatus pull_go(const char *repo_id, const char *revision, const Fml
                 break;
             }
             snprintf(src, sizeof src, "%s", ref.path);
-            s = mirror_one(src, dst);
+            fmlx_pull_progress_begin(&prog, i + 1, m.n, rel, ref.size, (int64_t)time(NULL));
+            s = mirror_one(src, dst, &prog);
             if (s != FMLX_HF_OK) {
+                fmlx_pull_progress_abort(&prog);
                 fail_own(rep, s, rel, "pull: specchio %s -> %s: %s", src, dst, strerror(errno));
                 s = rep->error;
                 break;
             }
             rep->n_mirrored++;
-            if (log) fprintf(log, "  specchio %s\n", dst);
+            if (fmlx_pull_progress_inplace(&prog))
+                fmlx_pull_progress_end(&prog, ref.size, (int64_t)time(NULL));
+            else if (log)
+                fprintf(log, "  specchio %s\n", dst);
         }
     }
 

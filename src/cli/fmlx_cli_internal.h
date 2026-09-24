@@ -13,8 +13,10 @@
 #ifndef FMLX_CLI_INTERNAL_H
 #define FMLX_CLI_INTERNAL_H
 
-#include <stdio.h>
+#include "fmlx/fmlx_hf.h" /* FmlxHfStatus: il codice che `copy_stream` ritorna */
+
 #include <stdint.h>
+#include <stdio.h>
 
 /* --- il formatore di dimensioni (definito in fmlx_models.c) --- */
 void fmlx_cli_fmt_bytes(int64_t b, char *out, size_t n);
@@ -45,6 +47,7 @@ typedef struct {
     int64_t last_t;  /* ultimo ridisegno: il throttling è di UNO per secondo */
     int wide;        /* riga più lunga già disegnata: serve a cancellare il resto */
     int drew;        /* 1 = almeno un ridisegno è partito: `end` deve andare a capo */
+    char last_body[512]; /* l'ultima foto VERAMENTE scritta: la stessa non si riscrive due volte */
 } FmlxPullProgress;
 
 void fmlx_pull_progress_init(FmlxPullProgress *p, FILE *out, int tty);
@@ -56,7 +59,16 @@ void fmlx_pull_progress_bytes(FmlxPullProgress *p, int64_t done, int64_t total_h
  * campione: l'ultimo chunk arriva prima della verifica). */
 void fmlx_pull_progress_end(FmlxPullProgress *p, int64_t final_bytes, int64_t now);
 void fmlx_pull_progress_abort(FmlxPullProgress *p);
-/* 1 se il chiamante NON deve stampare la propria riga per-è-file (lo fa il progressore). */
+/* 1 se il chiamante NON deve stampare la propria riga per-file (lo fa il progressore). */
 int fmlx_pull_progress_inplace(const FmlxPullProgress *p);
+
+/* --- la copia dello specchio (definita in fmlx_pull.c) ----------------------------------------
+ *
+ * Sta qui, e non resta `static`, per un motivo misurabile: il ramo che la invoca (`link()` che rende
+ * `EXDEV`, cioè cache e `--dest` su due volumi) non esiste su questa macchina, e un test sul ramo
+ * falso NON sarebbe una prova. Chiamarla direttamente è l'unico modo di sapere che i byte copiati
+ * sono gli stessi, che il temporaneo `.fmlx-part` non resta in giro e che l'avanzamento dice il
+ * numero giusto. `prog` può essere NULL: è il caso del terminale che non chiede righe. */
+FmlxHfStatus fmlx_pull_copy_stream(const char *src, const char *dst, FmlxPullProgress *prog);
 
 #endif /* FMLX_CLI_INTERNAL_H */
