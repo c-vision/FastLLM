@@ -782,7 +782,7 @@ mesi, perché il valore atteso è quasi sempre uguale.
 ```sh
 cmake -S . -B build
 cmake --build build          # -Wall -Wextra -Werror
-ctest --test-dir build --output-on-failure   # 16 suite, 2761 verifiche, nessuna tocca la rete (4,3–4,7 s)
+ctest --test-dir build --output-on-failure   # 16 suite, 2761 verifiche, nessuna tocca la rete (2,9 s; 4,3–4,7 nella finestra contesa)
 ./build/fmlx_gguf_inspect <file.gguf>   # testata, tipi, allineamento, coda di byte
 ./build/fastmlx pull <org>/<repo> [--revision R] [--dest D] [--cache C]   # lo snapshot nel cache
                                          # su un terminale: UNA riga che si riscrive; su pipe o log:
