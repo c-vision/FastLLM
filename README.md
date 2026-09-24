@@ -812,7 +812,13 @@ rosse. Un mutante che non muove nulla è riportato come `VERDE-MUTO` e fa uscire
 (pty piena, `wait`, rete) è riportato come `BLOCCATO` dopo `--timeout` secondi invece di appendere la
 build. I nomi dei mutanti citati in questo file (`mut_hookwire`, `nodedupe`, `doublelog`, …) stanno in
 `build/probe-*/spec.json` e si rieseguono con `--list`. **Le batterie di questa sessione sono invece
-versionate in `tests/mutants/*.json`** (le quattro `unreadable-*`), e si rilanciano da lì con `--spec`:
+versionate in `tests/mutants/*.json`** (le quattro `unreadable-*`), e si rilanciano da lì così — il
+bersaglio va detto, perché lo spec elenca i mutanti ma non il binario da ricompilare:
+
+```sh
+python3 tools/mut_prove.py --target test_hf_catalog --spec tests/mutants/unreadable-catalog.json --tag unreadable-catalog
+```
+
 un `rm -rf build` non deve cancellare la prova che un'asserzione è rossa davvero.
 
 Tre sonde toccano il mondo reale, e stanno **fuori da `ctest` di proposito**: la suite deve girare
