@@ -1,4 +1,4 @@
-# Contratto JSON di FastMLX — dove divergiamo da CPython, con la misura accanto
+# Contratto JSON di FastLLM — dove divergiamo da CPython, con la misura accanto
 
 > Scritto perché `include/fmlx/fmlx_json.h` lo prometteva. Ogni numero qui sotto è stato
 > **misurato** il 2026-09-22 su questo repo (`tests/json/corpus.hex`, 122 record), non ricordato.

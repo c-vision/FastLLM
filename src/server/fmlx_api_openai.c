@@ -28,7 +28,7 @@
 
 /* Le chiavi che questo adapter LEGGE e ONORA. Tutto il resto del corpo è ignoto →
  * `ignored_params`. `logit_bias`, `logprobs`, `top_logprobs`, `response_format` e `user`
- * sono nel piano fra i campi accettati ma NON sono onorati dal motore di FastMLX oggi:
+ * sono nel piano fra i campi accettati ma NON sono onorati dal motore di FastLLM oggi:
  * finiscono in `ignored_params` perché è ciò che sono per il client. */
 static const char *HONORED[] = {"messages",      "model",     "stream",
                                 "stream_options", "temperature", "top_p",

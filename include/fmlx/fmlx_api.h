@@ -1,4 +1,4 @@
-/* fmlx_api.h — il layer ② di FastMLX: router, catalogo errori e adapter OpenAI/Anthropic
+/* fmlx_api.h — il layer ② di FastLLM: router, catalogo errori e adapter OpenAI/Anthropic
  * sopra il codec (json + http). Non sopra un motore: il motore arriva da sotto come una
  * funzione che produce EVENTI NEUTRI.
  *

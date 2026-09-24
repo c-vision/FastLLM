@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(FastMLX LANGUAGES C)
+project(FastLLM LANGUAGES C)
 
 # Le estensioni GNU/POSIX servono: mmap/open/lseek non sono visibili con -std=c17 puro.
 set(CMAKE_C_STANDARD 17)

@@ -150,7 +150,7 @@ sed -n '1483,1488p' /Users/gaetano/llamacpp/ggml/src/ggml-quants.c              
 sed -n '33,62p;309,310p;795,798p' ../native/gmb_host_ai_mlx/build/_deps/gguflib-src/gguflib.c
 sed -n '40,60p' /Users/gaetano/ds4/gguf-tools/quants.c   # la TERZA tavola: q2_k 84, iq1_s 50
 grep -rn "gguflib.h" /Users/gaetano/ds4 | head -3        # → niente: DS4 non lo usa
-cd ../../../FastMLX && ctest                    # la nostra dequant bit-esatta (31 tipi)
+cd ../../../FastLLM && ctest                    # la nostra dequant bit-esatta (31 tipi)
 # e il gate a QUATTRO teste (build completa nel README §gate differenziale):
 build/quant_diff --synthetic ~/ai/Models/gguf/*.gguf ~/ds4/ds4flash.gguf | tail -6
 ```

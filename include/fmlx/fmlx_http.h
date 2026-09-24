@@ -1,4 +1,4 @@
-/* fmlx_http.h — il codec HTTP/1.1 di FastMLX: parse della richiesta, scrittura della
+/* fmlx_http.h — il codec HTTP/1.1 di FastLLM: parse della richiesta, scrittura della
  * risposta, framing SSE.
  *
  * Questa è la superficie che tocca per prima i byte che arrivano da internet. Il contratto

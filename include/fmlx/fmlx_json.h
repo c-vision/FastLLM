@@ -1,4 +1,4 @@
-/* fmlx_json.h — parser e serializzatore JSON di FastMLX (lane json).
+/* fmlx_json.h — parser e serializzatore JSON di FastLLM (lane json).
 
  * Perché riscriverlo quando esistono cjson/jansson: la lane json è l'unica superficie che
  * tocca OGNI byte che entra ed esce dalle API OpenAI/Anthropic, e qui il requisito non è

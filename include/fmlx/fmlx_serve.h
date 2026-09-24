@@ -1,4 +1,4 @@
-/* fmlx_serve.h — il pezzo ③ di FastMLX: il server TCP sopra il codec (http) e il layer ②
+/* fmlx_serve.h — il pezzo ③ di FastLLM: il server TCP sopra il codec (http) e il layer ②
  * (api), SENZA il motore.
  *
  * Cosa è questo file e cosa NON è. Il codec sa incorniciare i byte, il layer ② sa tradurre

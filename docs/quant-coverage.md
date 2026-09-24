@@ -1,4 +1,4 @@
-# Copertura quant GGUF: cosa carica MLX, cosa dequantizza FastMLX
+# Copertura quant GGUF: cosa carica MLX, cosa dequantizza FastLLM
 
 > Aggiornato: 2026-09-23. Fonte: **codice letto su questa macchina**, non documentazione.
 > Ogni affermazione ha il suo `file:riga`. Dove il dato non è verificabile localmente è
@@ -63,7 +63,7 @@ nostri e la regola del vault scatta.
 `PaddleOCR-VL-1.6-GGUF.gguf` (istogrammi del nostro `fmlx_gguf_inspect`): caricarli con MLX dipende
 dal codice di §1 "non verificabile qui". `fmlx_ggml_dequant_row` lo copre, con testimone bit-exact.
 
-La lane GGUF di FastMLX copre **31** tipi (dal 2026-09-23: erano 13, poi 21 con i lotti A e B):
+La lane GGUF di FastLLM copre **31** tipi (dal 2026-09-23: erano 13, poi 21 con i lotti A e B):
 F32, F16, BF16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, Q8_K, IQ2_XXS,
 IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S, IQ1_S, IQ1_M, IQ4_NL, IQ4_XS, TQ1_0, TQ2_0, MXFP4, NVFP4, Q1_0,
 I8, I16, I32 — e l'audit del gate (`tools/quant_diff.c::coverage_audit`) verifica che

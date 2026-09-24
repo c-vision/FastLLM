@@ -106,7 +106,7 @@ static int inode_seen(const Inode *v, size_t n, dev_t dev, ino_t ino) {
 
 /* Un SOLO livello, di proposito: i blob sono piatti (misurato su 34 repo) e ciò che potesse
  * annidarsi NON è un blob nostro — sarebbe il deposito di un altro tool, e contarlo come nostro
- * vorrebbe dire attribuire a FastMLX byte che FastMLX non ha scritto. */
+ * vorrebbe dire attribuire a FastLLM byte che FastLLM non ha scritto. */
 static FmlxHfStatus scan_blobs(const char *dir, FmlxHfRepo *out) {
     DIR *d = opendir(dir);
     if (!d) {

@@ -1,8 +1,8 @@
-# FastMLX
+# FastLLM
 
 Motore LLM in C puro: due programmi, **`MLXEngine`** (i motori MLX e GGUF veri, con swap
-su disco) e **`FastMLX`** (server OpenAI/Anthropic + CLI in stile Ollama + download e cache
-da Hugging Face). Piano completo: `AiWiki/01-Projects/FastMLX/Piani/(open) - FastMLX-Piano-Fondativo.md`
+su disco) e **`FastLLM`** (server OpenAI/Anthropic + CLI in stile Ollama + download e cache
+da Hugging Face). Piano completo: `AiWiki/01-Projects/FastLLM/Piani/(open) - FastLLM-Piano-Fondativo.md`
 (vault, non versionato qui).
 
 ## Stato reale del codice (non quello del piano)
@@ -226,7 +226,7 @@ prova, è una scommessa.
   | fallimento a metà | **resta**: «By default, we will try to resume the download if possible» `:1700-1704` | **cancellato** `:1944-1947` |
   | perché è cambiato | — | `:1900-1907`: su Lustre/GPFS/alcuni NFS `flock(2)` **riesce silenziosamente a tutti**, quindi un temporaneo condiviso con un lock non onorato **corrompe il cache**; col nome per processo un lock rotto costa solo banda duplicata |
 
-  FastMLX sta sulla semantica di **sinistra** — nome determinato, partial mantenuto — perché il caso
+  FastLLM sta sulla semantica di **sinistra** — nome determinato, partial mantenuto — perché il caso
   d'uso è un CLI interrotto a 30 GB: un suffisso casuale — la mia seconda bozza — non lo ritrovano
   né l'altro processo né il prossimo avvio. **Costo onesto: siamo più esposti a un lock non
   onorato.** Regge a due condizioni, entrambe verificate qui: `flock` deve essere vero (su APFS lo

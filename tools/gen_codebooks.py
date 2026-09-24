@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""gen_codebooks.py — genera (e verifica) le tabelle codebook ggml di FastMLX.
+"""gen_codebooks.py — genera (e verifica) le tabelle codebook ggml di FastLLM.
 
 Perché uno script e non una trascrizione a mano: una voce sbagliata su 256 cambia il peso
 di UN elemento e non si vede — è esattamente il difetto che i test di questa lane esistono
@@ -32,7 +32,7 @@ import os
 import re
 import sys
 
-# nome canonico FastMLX -> [(etichetta sorgente, nome nella sorgente), ...]
+# nome canonico FastLLM -> [(etichetta sorgente, nome nella sorgente), ...]
 # `group` = quale header esce (--write ... --group <nome>): i file generati restano sotto
 # le 1200 righe, e il gruppo è anche l'unità con cui si ragiona («le griglie IQ2/IQ3» contro
 # «la griglia IQ1_S», che da sola è 2048 voci).

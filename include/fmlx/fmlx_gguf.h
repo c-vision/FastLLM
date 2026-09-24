@@ -1,6 +1,6 @@
 /* fmlx_gguf.h — lettore GGUF di riferimento (lane_gguf), ABI C pubblica.
  *
- * Un SOLO lettore di record in FastMLX. Derivato nel design dal lettore GGUF di ds4
+ * Un SOLO lettore di record in FastLLM. Derivato nel design dal lettore GGUF di ds4
  * (motore C indipendente, senza ggml) e scritto contro le specifiche GGUF v2/v3/v4.
  *
  * Regole volute, che sono la ragione per cui questo file esiste (piano §8):

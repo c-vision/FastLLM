@@ -1,4 +1,4 @@
-/* quant_diff.c — verifica DIFFERENZIALE del dequant di FastMLX contro QUATTRO implementazioni
+/* quant_diff.c — verifica DIFFERENZIALE del dequant di FastLLM contro QUATTRO implementazioni
  * indipendenti, sui tensori REALI dei GGUF di questa
  * macchina. Nessun download, nessun modello in memoria: si dequantizza una finestra per
  * tipo e si confrontano i bit.
