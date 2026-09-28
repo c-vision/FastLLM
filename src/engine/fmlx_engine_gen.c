@@ -101,6 +101,172 @@ static llmjinja_val *jv_content(const FmlxJsonValue *content) {
     return v;
 }
 
+/* Converte un nodo del DOM JSON negli stessi valori che il motore Jinja conosce. I REALI
+ * diventano stringhe (il motore non ha un tipo double): per uno schema di tool un `default`
+ * numerico reso come stringa è un difetto minore e dichiarato, non un crash. */
+static llmjinja_val *jv_from_json(const FmlxJsonValue *v) {
+    int64_t i64;
+    double f64;
+    int b;
+
+    if (!v) return llmjinja_null();
+    switch (v->type) {
+    case FMLX_JSON_NULL: return llmjinja_null();
+    case FMLX_JSON_BOOL:
+        if (fmlx_json_as_bool(v, &b)) return llmjinja_bool(b);
+        return llmjinja_bool(0);
+    case FMLX_JSON_INT:
+        if (fmlx_json_as_i64(v, &i64)) return llmjinja_long((long)i64);
+        return llmjinja_long(0);
+    case FMLX_JSON_REAL:
+        if (fmlx_json_as_f64(v, &f64)) {
+            char buf[40];
+            snprintf(buf, sizeof buf, "%.17g", f64);
+            return llmjinja_str(buf);
+        }
+        return llmjinja_str("0");
+    case FMLX_JSON_STR: {
+        const char *s = fmlx_json_str(v);
+        size_t n = fmlx_json_str_len(v);
+        char *tmp = malloc(n + 1);
+        llmjinja_val *r;
+        if (!tmp) return llmjinja_str("");
+        memcpy(tmp, s, n);
+        tmp[n] = '\0';
+        r = llmjinja_str(tmp);
+        free(tmp);
+        return r;
+    }
+    case FMLX_JSON_ARR: {
+        llmjinja_val *a = llmjinja_arr();
+        for (size_t k = 0; k < fmlx_json_arr_n(v); k++)
+            llmjinja_arr_push(a, jv_from_json(fmlx_json_arr_at(v, k)));
+        return a;
+    }
+    case FMLX_JSON_OBJ: {
+        llmjinja_val *o = llmjinja_obj();
+        for (size_t k = 0; k < fmlx_json_obj_n(v); k++) {
+            const FmlxJsonValue *key = fmlx_json_obj_key_at(v, k);
+            const char *kp = fmlx_json_str(key);
+            size_t kn = fmlx_json_str_len(key);
+            char name[FMLX_API_MAX_NAME];
+            if (!kp || kn >= sizeof name) continue;
+            memcpy(name, kp, kn);
+            name[kn] = '\0';
+            llmjinja_obj_set(o, name, jv_from_json(fmlx_json_obj_value_at(v, k)));
+        }
+        return o;
+    }
+    case FMLX_JSON_KEY: break;
+    }
+    return llmjinja_null();
+}
+
+/* L'array `tools` per il template: lo stesso oggetto che il client ha mandato. Qwen e
+ * Llama-3 lo serializzano con `tojson` e ne fanno le definizioni. */
+static llmjinja_val *jv_tools(const FmlxApiChat *c) {
+    llmjinja_val *a = llmjinja_arr();
+    if (!a) return NULL;
+    for (size_t i = 0; c->tools && i < fmlx_json_arr_n(c->tools); i++)
+        llmjinja_arr_push(a, jv_from_json(fmlx_json_arr_at(c->tools, i)));
+    return a;
+}
+
+/* Aggiunge a `b` un valore del DOM reso JSON compatto. */
+static int sb_json(FmlxSb *b, const FmlxJsonValue *v) {
+    FmlxJsonW w;
+    size_t n = 0;
+    int rc = -1;
+
+    fmlx_jsonw_init(&w, NULL, 0, 1u << 20);
+    if (fmlx_json_render(v, &w) == FMLX_JSON_OK && fmlx_jsonw_finish(&w, &n) == FMLX_JSON_OK)
+        rc = fmlx_sb_add(b, w.buf ? w.buf : "null", n);
+    fmlx_jsonw_free(&w);
+    return rc;
+}
+
+/* Il preambolo dei tool per i template di FAMIGLIA (quelli senza Jinja). I modelli veri hanno
+ * il loro `chat_template`, che i tool li rende da solo: questo è il ripiego, e lo dice. */
+static int append_tool_preamble(FmlxSb *b, const FmlxApiChat *c, FmlxTplKind tpl) {
+    if (tpl == FMLX_TPL_LLAMA3) {
+        if (fmlx_sb_cstr(b, "You have access to the following functions. To call a function, "
+                            "respond with ONLY a JSON object of the form "
+                            "{\"name\": <function name>, \"arguments\": <arguments>} and "
+                            "nothing else. Do not use variables.\n\n") != 0)
+            return -1;
+        for (size_t i = 0; i < fmlx_json_arr_n(c->tools); i++) {
+            if (sb_json(b, fmlx_json_arr_at(c->tools, i)) != 0 || fmlx_sb_cstr(b, "\n\n") != 0)
+                return -1;
+        }
+        return 0;
+    }
+    if (fmlx_sb_cstr(b, "# Tools\n\nYou may call one or more functions to assist with the user "
+                        "query. You are provided with function signatures within <tools></tools> "
+                        "XML tags:\n<tools>\n") != 0)
+        return -1;
+    for (size_t i = 0; i < fmlx_json_arr_n(c->tools); i++) {
+        if (sb_json(b, fmlx_json_arr_at(c->tools, i)) != 0 || fmlx_sb_cstr(b, "\n") != 0)
+            return -1;
+    }
+    if (fmlx_sb_cstr(b, "</tools>\n\nFor each function call, return a json object with function "
+                        "name and arguments within <tool_call></tool_call> XML tags:\n"
+                        "<tool_call>\n{\"name\": <function-name>, \"arguments\": "
+                        "<args-json-object>}\n</tool_call>\n") != 0)
+        return -1;
+    return 0;
+}
+
+/* L'istruzione di `response_format`. NON è grammatica: è un vincolo di prompt e una
+ * post-validazione, e il limite va detto (l'ABI non espone un grammar/guided decoder). */
+static int append_rf(FmlxSb *b, const FmlxApiChat *c) {
+    if (!c->response_format) return 0;
+    if (c->rf_json_object &&
+        fmlx_sb_cstr(b, "You must respond with a single valid JSON object and nothing else: no "
+                        "prose, no markdown fences.") != 0)
+        return -1;
+    if (c->rf_json_schema) {
+        const FmlxJsonValue *js = fmlx_json_obj_get(c->response_format, "json_schema");
+        const FmlxJsonValue *sch = js ? fmlx_json_obj_get(js, "schema") : NULL;
+        if (fmlx_sb_cstr(b, "You must respond with a single valid JSON object and nothing else: "
+                            "no prose, no markdown fences. It must conform to this JSON "
+                            "Schema:\n") != 0)
+            return -1;
+        if (sch && sb_json(b, sch) != 0) return -1;
+    }
+    return 0;
+}
+
+/* Le istruzioni tool/response_format più il testo di sistema, in QUEST'ORDINE: prima il
+ * sistema del client, poi i vincoli. `include_tools` è 0 sul percorso Jinja (le definizioni
+ * viaggiano nella variabile `tools`). */
+static int build_system(FmlxSb *out, const FmlxApiChat *c, const char *sys, size_t sys_n,
+                        int include_tools, int mode, const FmlxSlice *named, FmlxTplKind tpl,
+                        char *err, size_t errcap) {
+    if (sys_n && fmlx_sb_add(out, sys, sys_n) != 0) goto oom;
+    if (include_tools && mode != FMLX_API_TOOL_NONE && c->tools &&
+        fmlx_json_arr_n(c->tools)) {
+        if (out->len && fmlx_sb_cstr(out, "\n\n") != 0) goto oom;
+        if (append_tool_preamble(out, c, tpl) != 0) goto oom;
+    }
+    if (mode == FMLX_API_TOOL_REQUIRED) {
+        if (out->len && fmlx_sb_cstr(out, "\n\n") != 0) goto oom;
+        if (fmlx_sb_cstr(out, "You MUST call one of the available functions.") != 0) goto oom;
+    } else if (mode == FMLX_API_TOOL_NAMED) {
+        if (out->len && fmlx_sb_cstr(out, "\n\n") != 0) goto oom;
+        if (fmlx_sb_cstr(out, "You MUST call the function ") != 0 ||
+            fmlx_sb_add(out, named->p, named->n) != 0 || fmlx_sb_cstr(out, ".") != 0)
+            goto oom;
+    }
+    if (c->response_format) {
+        if (out->len && fmlx_sb_cstr(out, "\n\n") != 0) goto oom;
+        if (append_rf(out, c) != 0) goto oom;
+    }
+    return 0;
+oom:
+    snprintf(err, errcap, "out of memory building the system prompt");
+    return -1;
+}
+
 /* `messages` per il template: il system (fuso da `join_system`) diventa il PRIMO messaggio, i
  * messaggi di sistema originali si saltano (altrimenti il template li vedrebbe due volte). */
 static llmjinja_val *jv_messages(const FmlxApiChat *c, const char *sys, size_t sys_n) {
@@ -138,6 +304,18 @@ static llmjinja_val *jv_messages(const FmlxApiChat *c, const char *sys, size_t s
         free(r);
         cv = jv_content(fmlx_json_obj_get(msg, "content"));
         llmjinja_obj_set(m, "content", cv ? cv : llmjinja_str(""));
+        /* Un turno assistant con `tool_calls` (la risposta a un giro precedente) va reso al
+         * template, o la conversazione multi-step perde la chiamata. La forma è quella
+         * OpenAI: `function.arguments` resta la STRINGA che il client ha rimandato. */
+        {
+            const FmlxJsonValue *tcs = fmlx_json_obj_get(msg, "tool_calls");
+            if (tcs && tcs->type == FMLX_JSON_ARR && fmlx_json_arr_n(tcs)) {
+                llmjinja_val *tca = llmjinja_arr();
+                for (size_t k = 0; k < fmlx_json_arr_n(tcs); k++)
+                    llmjinja_arr_push(tca, jv_from_json(fmlx_json_arr_at(tcs, k)));
+                llmjinja_obj_set(m, "tool_calls", tca);
+            }
+        }
         llmjinja_arr_push(arr, m);
     }
     return arr;
@@ -163,6 +341,9 @@ static int render_jinja(const FmlxEngineModel *m, const FmlxApiChat *c, FmlxSb *
     char errbuf[256] = "";
     char *sysmem = malloc(1u << 20);
     FmlxSlice sys = {NULL, 0};
+    FmlxSlice named = {NULL, 0};
+    int mode;
+    FmlxSb aug = {0};
     llmjinja_val *vars;
     char *out;
 
@@ -175,13 +356,24 @@ static int render_jinja(const FmlxEngineModel *m, const FmlxApiChat *c, FmlxSb *
         snprintf(err, errcap, "the system prompt does not fit the render buffer");
         return -1;
     }
+    mode = fmlx_api_tool_mode(c, &named);
+    /* Sul percorso Jinja le definizioni dei tool viaggiano nella variabile `tools` (i
+     * template di Qwen/Llama le rendono da sole): il preambolo testuale NON si aggiunge. */
+    if (build_system(&aug, c, sys.p, sys.n, 0, mode, &named, m->tpl, err, errcap) != 0) {
+        fmlx_sb_free(&aug);
+        free(sysmem);
+        return -1;
+    }
     vars = llmjinja_obj();
-    llmjinja_obj_set(vars, "messages", jv_messages(c, sys.p, sys.n));
+    llmjinja_obj_set(vars, "messages", jv_messages(c, aug.p, aug.len));
     llmjinja_obj_set(vars, "add_generation_prompt", llmjinja_bool(1));
+    if (mode != FMLX_API_TOOL_NONE && c->tools && fmlx_json_arr_n(c->tools))
+        llmjinja_obj_set(vars, "tools", jv_tools(c));
     if (m->bos[0]) llmjinja_obj_set(vars, "bos_token", llmjinja_str(m->bos));
     llmjinja_obj_set(vars, "strftime_now", llmjinja_fn_val((llmjinja_fn)jfn_strftime_now));
     out = llmjinja_render(m->chat_tpl, vars, errbuf, sizeof errbuf);
     llmjinja_val_free(vars);
+    fmlx_sb_free(&aug);
     free(sysmem);
     if (!out) {
         if (getenv("FMLX_TEMPLATE_DEBUG"))
@@ -206,6 +398,9 @@ int fmlx_engine_render_chat(const FmlxEngineModel *m, const FmlxApiChat *c, Fmlx
                             size_t errcap) {
     char *sysmem = NULL;
     FmlxSlice sys = {NULL, 0};
+    FmlxSlice named = {NULL, 0};
+    FmlxSb aug = {0};
+    int mode;
 
     if (!m || !c || !b) return -1;
     /* Se il modello porta il suo `chat_template`, si rende QUELLO. Un fallimento (costrutto
@@ -225,6 +420,15 @@ int fmlx_engine_render_chat(const FmlxEngineModel *m, const FmlxApiChat *c, Fmlx
         snprintf(err, errcap, "the system prompt does not fit the render buffer");
         return -1;
     }
+    mode = fmlx_api_tool_mode(c, &named);
+    /* Percorso di FAMIGLIA: qui i tool NON viaggiano in una variabile, quindi il preambolo
+     * testuale si aggiunge al sistema. */
+    if (build_system(&aug, c, sys.p, sys.n, 1, mode, &named, m->tpl, err, errcap) != 0) {
+        free(sysmem);
+        return -1;
+    }
+    sys.p = aug.p;
+    sys.n = (uint32_t)aug.len;
 
     if (m->tpl == FMLX_TPL_LLAMA3) {
         /* Mirror del template Llama-3 senza tool: BOS, blocco system (con le date di default
@@ -286,9 +490,11 @@ int fmlx_engine_render_chat(const FmlxEngineModel *m, const FmlxApiChat *c, Fmlx
         if (fmlx_sb_cstr(b, "assistant:") != 0) goto oom;
     }
     free(sysmem);
+    fmlx_sb_free(&aug);
     return 0;
 oom:
     free(sysmem);
+    fmlx_sb_free(&aug);
     snprintf(err, errcap, "out of memory building the prompt");
     return -1;
 }
@@ -615,6 +821,12 @@ FmlxEngineGen *fmlx_engine_chat(FmlxEngineModel *m, const FmlxApiChat *c, char *
     sampling_of(c, &sp);
     g = start(m, ids, n, max_tokens, &sp, c, err, errcap);
     free(ids);
+    if (g && fmlx_api_tool_mode(c, NULL) != FMLX_API_TOOL_NONE)
+        /* Qwen/ChatML marca i tool con `<tool_call>`: lì il JSON nudo non si riconosce (una
+         * risposta JSON della stessa famiglia non deve diventare una chiamata). Le altre
+         * famiglie (Llama-3 nativa, Hermes, generico) possono o marcare o emettere l'oggetto
+         * nudo, quindi lì il riconoscimento nudo è attivo. */
+        g->tools = fmlx_toolstream_new(m->tpl != FMLX_TPL_CHATML);
     return g;
 }
 
@@ -690,7 +902,33 @@ FmlxApiGenSt fmlx_engine_next(void *ctx, FmlxApiEvent *ev, FmlxApiErrCtx *err) {
         return FMLX_API_GEN_ERR;
     }
     for (;;) {
+        if (g->tools) {
+            FmlxToolOut o;
+            if (fmlx_toolstream_pop(g->tools, &o)) {
+                if (o.kind == FMLX_TS_TEXT) {
+                    ev->ev = FMLX_API_EV_TEXT;
+                    ev->text = o.text;
+                    ev->n = (uint32_t)o.n;
+                } else if (o.kind == FMLX_TS_TOOL_NAME) {
+                    ev->ev = FMLX_API_EV_TOOL_NAME;
+                    ev->tool_name = o.name;
+                    ev->tool_id = NULL; /* l'adapter assegna `call_<i>` */
+                } else {
+                    ev->ev = FMLX_API_EV_TOOL_ARGS;
+                    ev->text = o.text;
+                    ev->n = (uint32_t)o.n;
+                }
+                return FMLX_API_GEN_MORE;
+            }
+        }
         if (g->pos < g->text_len) {
+            if (g->tools) {
+                /* Tutto il delta decodificato passa dal riconoscitore: lui decide testo vs
+                 * chiamata, e trattiene la coda che può ancora essere un marcatore. */
+                fmlx_toolstream_feed(g->tools, g->text + g->pos, g->text_len - g->pos);
+                g->pos = g->text_len;
+                continue;
+            }
             size_t end = g->pos;
             while (end < g->text_len && end - g->pos < FMLX_ENGINE_CHUNK)
                 end = utf8_step(g->text, end, g->text_len);
@@ -700,7 +938,14 @@ FmlxApiGenSt fmlx_engine_next(void *ctx, FmlxApiEvent *ev, FmlxApiErrCtx *err) {
             g->pos = end;
             return FMLX_API_GEN_MORE;
         }
-        if (g->ended) break;
+        if (g->ended) {
+            if (g->tools && !g->tools_flushed) {
+                g->tools_flushed = 1;
+                fmlx_toolstream_finish(g->tools);
+                continue; /* la coda trattenuta può ancora produrre testo o chiamate */
+            }
+            break;
+        }
         {
             char e[256] = "";
             if (advance(g, e, sizeof e) != 0) {
@@ -717,6 +962,11 @@ FmlxApiGenSt fmlx_engine_next(void *ctx, FmlxApiEvent *ev, FmlxApiErrCtx *err) {
         g->done = 1;
         ev->ev = FMLX_API_EV_DONE;
         ev->finish = g->finish;
+        /* Se il modello ha emesso chiamate e non c'è una causa più forte (eos/lunghezza/stop),
+         * il finish è `tool_calls`: è ciò che il client si aspetta per eseguirle. */
+        if (g->tools && fmlx_toolstream_ntools(g->tools) > 0 &&
+            ev->finish == FMLX_API_FINISH_STOP)
+            ev->finish = FMLX_API_FINISH_TOOL;
         ev->prompt_tokens = g->prompt_tokens;
         ev->completion_tokens = (uint64_t)g->n_gen;
         ev->cached_tokens = 0;
@@ -736,5 +986,6 @@ void fmlx_engine_gen_free(FmlxEngineGen *g) {
     free(g->ids);
     free(g->full);
     free(g->text);
+    if (g->tools) fmlx_toolstream_free(g->tools);
     free(g);
 }

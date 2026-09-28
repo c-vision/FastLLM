@@ -156,6 +156,10 @@ typedef struct {
     uint32_t n_sys_msgs;
     const FmlxJsonValue *tools;    /* ARR, o NULL */
     const FmlxJsonValue *tool_choice;
+    /* `response_format` OpenAI: NULL = assente. I due tipi riconosciuti hanno un flag; lo
+     * schema (json_schema.json_schema.schema) resta nel DOM del chiamante. */
+    const FmlxJsonValue *response_format;
+    int rf_json_object, rf_json_schema;
 
     double temperature, top_p, presence_penalty, frequency_penalty;
     int64_t max_tokens, seed;
@@ -199,6 +203,16 @@ int fmlx_api_warn(FmlxApiChat *c, const char *msg);
  * `mem`: mai un prompt di sistema tagliato, perché il modello risponderebbe a metà delle
  * istruzioni senza che nessuno se ne accorga. */
 FmlxApiErr fmlx_api_join_system(const FmlxApiChat *c, char *mem, size_t cap, FmlxSlice *out);
+
+/* La politica dei tool decisa da `tools` + `tool_choice`, comune ai due dialetti:
+ * 0 = NESSUNO (nessun tool, o `tool_choice:"none"`), 1 = AUTO (default), 2 = REQUIRED
+ * (`required`/`any`), 3 = una FUNZIONE SPECIFICA (il nome va in `*named`). Serve al motore
+ * per decidere se iniettare le definizioni e se interpretare il markup in uscita. */
+#define FMLX_API_TOOL_NONE 0
+#define FMLX_API_TOOL_AUTO 1
+#define FMLX_API_TOOL_REQUIRED 2
+#define FMLX_API_TOOL_NAMED 3
+int fmlx_api_tool_mode(const FmlxApiChat *c, FmlxSlice *named);
 
 /* ---- 4. L'accumulatore: la risposta del motore messa in forma ---- */
 

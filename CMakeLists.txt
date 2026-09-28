@@ -215,7 +215,7 @@ add_test(NAME api COMMAND test_api)
 add_library(fmlx_serve STATIC src/server/fmlx_serve_respond.c src/server/fmlx_serve_admin.c
                              src/server/fmlx_serve_metrics.c
                              src/server/fmlx_serve.c src/engine/fmlx_engine.c
-                             src/engine/fmlx_engine_gen.c)
+                             src/engine/fmlx_engine_gen.c src/engine/fmlx_tools.c)
 target_include_directories(fmlx_serve PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
                               PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
                                       ${CMAKE_CURRENT_SOURCE_DIR}/../LLMEnv/LLMEngine/include)
@@ -229,6 +229,15 @@ target_link_libraries(fmlx_serve PUBLIC fmlx_api fmlx_hf llm_ai_mlx llmtoken llm
 add_executable(test_serve tests/server/test_serve.c)
 target_link_libraries(test_serve PRIVATE fmlx_serve)
 add_test(NAME serve COMMAND test_serve ${CMAKE_CURRENT_BINARY_DIR}/work-serve)
+
+# --- lane_tools: il riconoscitore delle chiamate di tool (PURO) ------------------------------
+# Testo -> chiamate, senza motore e senza rete: è il pezzo che si prova quando il modello non
+# c'è. Il caso che vale il file è il marcatore spezzato fra due delta di token, che non deve
+# mai uscire come testo.
+add_executable(test_tools tests/engine/test_tools.c src/engine/fmlx_tools.c)
+target_include_directories(test_tools PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(test_tools PRIVATE fmlx_json)
+add_test(NAME tools COMMAND test_tools)
 
 # --- lane_cli: il binario `fastmlx` (piano §10.3, §13) --------------------------------------
 # Un file per verbo, non uno: `pull` è una lane con un report e delle regole sui path, `models` è

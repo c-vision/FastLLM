@@ -27,14 +27,18 @@
 #define OAI_ARGS_CAP 2048u   /* glia rgomenti di UN singolo tool call */
 
 /* Le chiavi che questo adapter LEGGE e ONORA. Tutto il resto del corpo è ignoto →
- * `ignored_params`. `logit_bias`, `logprobs`, `top_logprobs`, `response_format` e `user`
- * sono nel piano fra i campi accettati ma NON sono onorati dal motore di FastLLM oggi:
- * finiscono in `ignored_params` perché è ciò che sono per il client. */
+ * `ignored_params`. `response_format` è onorato per i due tipi che sappiamo servire
+ * (`json_object`/`json_schema`) con l'iniezione di un'istruzione nel prompt e la
+ * post-validazione: NON è grammatica nativa (l'ABI non la espone) e va detto.
+ * `logprobs`/`top_logprobs` sono RICONOSCIUTI ma NON onorabili: l'ABI del motore non espone
+ * i logits, quindi una richiesta che li chiede è un 400 chiaro, non un campo ignorato in
+ * silenzio. `logit_bias` e `user` restano ignorati e DICHIARATI. */
 static const char *HONORED[] = {"messages",      "model",     "stream",
                                 "stream_options", "temperature", "top_p",
                                 "max_tokens",     "max_completion_tokens", "stop",
                                 "n",              "presence_penalty", "frequency_penalty",
-                                "tools",          "tool_choice", "seed"};
+                                "tools",          "tool_choice", "seed",
+                                "response_format", "logprobs", "top_logprobs"};
 #define HONORED_N ((int)(sizeof HONORED / sizeof HONORED[0]))
 
 static int is_honored(const char *k, size_t n) {
@@ -263,6 +267,77 @@ FmlxApiErr fmlx_api_openai_parse(const FmlxJsonValue *root, FmlxApiChat *c, Fmlx
         if (v->type == FMLX_JSON_OBJ) {
             const FmlxJsonValue *fn = fmlx_json_obj_get(v, "function");
             if (fn && fmlx_json_obj_get(fn, "name")) c->want_tool = 1;
+        }
+    }
+
+    /* `response_format`: i due tipi onorabili. `json_schema` esige uno `schema` oggetto,
+     * altrimenti non c'è niente da chiedere al modello. Un tipo ignoto è un errore, non un
+     * "testo": il client crede di avere JSON e riceve prosa. */
+    v = fmlx_json_obj_get(root, "response_format");
+    if (v && !fmlx_json_is_null(v)) {
+        const FmlxJsonValue *ty;
+        const char *tp = NULL;
+        size_t tn = 0;
+        if (v->type != FMLX_JSON_OBJ || !(ty = fmlx_json_obj_get(v, "type")) ||
+            !fmlx_json_as_str(ty, &tp, &tn)) {
+            set_err(err, FMLX_API_INVALID_REQUEST,
+                    "response_format must be an object with a string type", "response_format");
+            return FMLX_API_INVALID_REQUEST;
+        }
+        if (tn == 11 && !memcmp(tp, "json_object", 11)) {
+            c->response_format = v;
+            c->rf_json_object = 1;
+        } else if (tn == 11 && !memcmp(tp, "json_schema", 11)) {
+            const FmlxJsonValue *js = fmlx_json_obj_get(v, "json_schema");
+            const FmlxJsonValue *sch = js ? fmlx_json_obj_get(js, "schema") : NULL;
+            if (!js || js->type != FMLX_JSON_OBJ || !sch || sch->type != FMLX_JSON_OBJ) {
+                set_err(err, FMLX_API_INVALID_REQUEST,
+                        "response_format.json_schema.schema must be a JSON object",
+                        "response_format");
+                return FMLX_API_INVALID_REQUEST;
+            }
+            c->response_format = v;
+            c->rf_json_schema = 1;
+        } else if (!(tn == 4 && !memcmp(tp, "text", 4))) {
+            set_err(err, FMLX_API_INVALID_REQUEST,
+                    "unsupported response_format.type: use text, json_object or json_schema",
+                    "response_format");
+            return FMLX_API_INVALID_REQUEST;
+        }
+    }
+
+    /* `logprobs`: RICONOSCIUTI ma non onorabili. L'ABI `llmengine` non espone i logits (la
+     * vtable non ha alcun accessore, e i runner MLX tengono le probabilità interne ma non le
+     * pubblicano sul confine). Un 400 con la causa è l'unica risposta non menzognera; un
+     * `"logprobs":null` in risposta a chi ha chiesto `logprobs:true` sarebbe una bugia. */
+    v = fmlx_json_obj_get(root, "logprobs");
+    if (v && !fmlx_json_is_null(v)) {
+        int b = 0;
+        if (!fmlx_json_as_bool(v, &b)) {
+            set_err(err, FMLX_API_INVALID_REQUEST, "logprobs must be a boolean", "logprobs");
+            return FMLX_API_INVALID_REQUEST;
+        }
+        if (b) {
+            set_err(err, FMLX_API_INVALID_REQUEST,
+                    "logprobs is not supported: the engine ABI does not expose token logits, "
+                    "so no probability could be returned",
+                    "logprobs");
+            return FMLX_API_INVALID_REQUEST;
+        }
+    }
+    v = fmlx_json_obj_get(root, "top_logprobs");
+    if (v && !fmlx_json_is_null(v)) {
+        int64_t k = 0;
+        if (!integer(v, &k) || k < 0) {
+            set_err(err, FMLX_API_INVALID_REQUEST, "top_logprobs must be a non-negative integer",
+                    "top_logprobs");
+            return FMLX_API_INVALID_REQUEST;
+        }
+        if (k > 0) {
+            set_err(err, FMLX_API_INVALID_REQUEST,
+                    "top_logprobs is not supported: the engine ABI does not expose token logits",
+                    "top_logprobs");
+            return FMLX_API_INVALID_REQUEST;
         }
     }
 

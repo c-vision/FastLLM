@@ -759,6 +759,116 @@ static void t_stream(void) {
 
 /* ============================================================================ */
 
+/* La politica dei tool e `response_format`/`logprobs`: sono le tre decisioni del passo 4 che
+ * NON richiedono il motore — chi decide cosa chiedere al modello, e cosa rifiutare. */
+static void t_tool_policy_rf(void) {
+    printf("== 9. tool policy, response_format, logprobs\n");
+    FmlxJsonDoc d;
+    FmlxApiChat c;
+    FmlxApiErrCtx e;
+    FmlxSlice named;
+
+    /* tools senza tool_choice -> AUTO */
+    const FmlxJsonValue *r = body("{\"model\":\"m\",\"messages\":[{\"role\":\"user\","
+                                  "\"content\":\"c\"}],\"tools\":[{\"type\":\"function\","
+                                  "\"function\":{\"name\":\"f\"}}]}",
+                                  &d);
+    CK(fmlx_api_openai_parse(r, &c, &e) == FMLX_API_OK, "tools parse");
+    CK(fmlx_api_tool_mode(&c, &named) == FMLX_API_TOOL_AUTO, "senza tool_choice: AUTO");
+    fmlx_json_doc_free(&d);
+
+    r = body("{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"c\"}],"
+             "\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"f\"}}],"
+             "\"tool_choice\":\"none\"}",
+             &d);
+    fmlx_api_openai_parse(r, &c, &e);
+    CK(fmlx_api_tool_mode(&c, &named) == FMLX_API_TOOL_NONE, "tool_choice:none spegne i tool");
+    fmlx_json_doc_free(&d);
+
+    r = body("{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"c\"}],"
+             "\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"f\"}}],"
+             "\"tool_choice\":\"required\"}",
+             &d);
+    fmlx_api_openai_parse(r, &c, &e);
+    CK(fmlx_api_tool_mode(&c, &named) == FMLX_API_TOOL_REQUIRED, "tool_choice:required");
+    fmlx_json_doc_free(&d);
+
+    r = body("{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"c\"}],"
+             "\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"f\"}}],"
+             "\"tool_choice\":{\"type\":\"function\",\"function\":{\"name\":\"get_weather\"}}}",
+             &d);
+    fmlx_api_openai_parse(r, &c, &e);
+    CK(fmlx_api_tool_mode(&c, &named) == FMLX_API_TOOL_NAMED &&
+           named.n == 11 && !memcmp(named.p, "get_weather", 11),
+       "tool_choice nominato: NAMED con get_weather");
+    fmlx_json_doc_free(&d);
+
+    /* Anthropic: {type:any} -> required; {type:tool,name} -> named */
+    r = body("{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"c\"}],"
+             "\"tools\":[{\"name\":\"f\"}],\"tool_choice\":{\"type\":\"any\"}}",
+             &d);
+    fmlx_api_anthropic_parse(r, &c, &e);
+    CK(fmlx_api_tool_mode(&c, &named) == FMLX_API_TOOL_REQUIRED, "Anthropic type:any");
+    fmlx_json_doc_free(&d);
+    r = body("{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"c\"}],"
+             "\"tools\":[{\"name\":\"f\"}],\"tool_choice\":{\"type\":\"tool\",\"name\":\"f\"}}",
+             &d);
+    fmlx_api_anthropic_parse(r, &c, &e);
+    CK(fmlx_api_tool_mode(&c, &named) == FMLX_API_TOOL_NAMED && named.n == 1 &&
+           named.p[0] == 'f',
+       "Anthropic type:tool");
+    fmlx_json_doc_free(&d);
+
+    /* response_format: onorato per json_object/json_schema, NON finisce negli ignored */
+    r = body("{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"c\"}],"
+             "\"response_format\":{\"type\":\"json_object\"}}",
+             &d);
+    CK(fmlx_api_openai_parse(r, &c, &e) == FMLX_API_OK && c.rf_json_object &&
+           c.response_format != NULL,
+       "response_format json_object onorato");
+    CK(c.n_ignored == 0, "response_format NON è fra gli ignorati, %u", c.n_ignored);
+    fmlx_json_doc_free(&d);
+
+    r = body("{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"c\"}],"
+             "\"response_format\":{\"type\":\"json_schema\",\"json_schema\":{\"name\":\"x\","
+             "\"schema\":{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"integer\"}}"
+             "}}}}",
+             &d);
+    CK(fmlx_api_openai_parse(r, &c, &e) == FMLX_API_OK && c.rf_json_schema,
+       "response_format json_schema onorato");
+    fmlx_json_doc_free(&d);
+
+    r = body("{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"c\"}],"
+             "\"response_format\":{\"type\":\"nonesiste\"}}",
+             &d);
+    CK(fmlx_api_openai_parse(r, &c, &e) == FMLX_API_INVALID_REQUEST && e.param &&
+           !strcmp(e.param, "response_format"),
+       "tipo di response_format ignoto = errore, non prosa");
+    fmlx_json_doc_free(&d);
+
+    /* logprobs: un 400 con la causa, non un campo ignorato in silenzio */
+    r = body("{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"c\"}],"
+             "\"logprobs\":true}",
+             &d);
+    CK(fmlx_api_openai_parse(r, &c, &e) == FMLX_API_INVALID_REQUEST && e.param &&
+           !strcmp(e.param, "logprobs") && strstr(e.message, "ABI"),
+       "logprobs:true rifiutato con la causa (niente logits nell'ABI)");
+    fmlx_json_doc_free(&d);
+    r = body("{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"c\"}],"
+             "\"top_logprobs\":5}",
+             &d);
+    CK(fmlx_api_openai_parse(r, &c, &e) == FMLX_API_INVALID_REQUEST && e.param &&
+           !strcmp(e.param, "top_logprobs"),
+       "top_logprobs>0 rifiutato");
+    fmlx_json_doc_free(&d);
+    r = body("{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"c\"}],"
+             "\"logprobs\":false}",
+             &d);
+    CK(fmlx_api_openai_parse(r, &c, &e) == FMLX_API_OK,
+       "logprobs:false è onorato (non si chiede nulla)");
+    fmlx_json_doc_free(&d);
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0); /* un SIGBUS deve dire QUALE sezione, non niente */
     t_router();
@@ -769,6 +879,7 @@ int main(void) {
     t_openai_render();
     t_anthropic_render();
     t_stream();
+    t_tool_policy_rf();
     printf("\napi: %d verifiche, %d fallite\n", checks, failures);
     return failures ? 1 : 0;
 }

@@ -9,6 +9,8 @@
 #include "llmengine.h"
 #include "llmtoken.h"
 
+#include "fmlx/fmlx_tools.h"
+
 #include <stdint.h>
 
 #define FMLX_ENGINE_PATH_MAX 4096
@@ -73,6 +75,12 @@ struct FmlxEngineGen {
     int prefix_hit; /* 1 = il prompt è stato riusato dalla prefix cache (nessun prefill) */
     FmlxApiFinish finish;
     char stop_seq[FMLX_API_MAX_NAME];
+
+    /* Riconoscimento dei tool in uscita: non NULL solo quando la richiesta porta `tools` e
+     * `tool_choice` non è `none`. Il testo decodificato gli viene alimentato e lui lo
+     * restituisce diviso fra testo e chiamate (fmlx_tools.h). */
+    void *tools; /* FmlxToolStream* */
+    int tools_flushed;
 };
 
 /* Stringa dinamica minimale. */

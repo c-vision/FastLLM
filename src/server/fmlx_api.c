@@ -323,6 +323,68 @@ FmlxApiErr fmlx_api_join_system(const FmlxApiChat *c, char *mem, size_t cap, Fml
     return FMLX_API_OK;
 }
 
+/* ---- Politica dei tool ------------------------------------------------------- */
+
+/* Legge `tools`/`tool_choice` di ENTRAMBI i dialetti. OpenAI usa stringhe
+ * (`"none"`/`"auto"`/`"required"`) o l'oggetto `{type:"function",function:{name}}`; Anthropic
+ * usa un oggetto `{type:"auto"|"any"|"tool",name}`. Nessun tool => NESSUNO. `"none"` spegne
+ * i tool anche quando le definizioni ci sono: è la richiesta esplicita di non chiamarli. */
+int fmlx_api_tool_mode(const FmlxApiChat *c, FmlxSlice *named) {
+    const FmlxJsonValue *tc;
+
+    if (named) {
+        named->p = NULL;
+        named->n = 0;
+    }
+    if (!c || !c->tools || fmlx_json_arr_n(c->tools) == 0) return FMLX_API_TOOL_NONE;
+    tc = c->tool_choice;
+    if (!tc || fmlx_json_is_null(tc)) return FMLX_API_TOOL_AUTO;
+    if (tc->type == FMLX_JSON_STR) {
+        const char *p = fmlx_json_str(tc);
+        size_t n = fmlx_json_str_len(tc);
+        if (p && n == 4 && !memcmp(p, "none", 4)) return FMLX_API_TOOL_NONE;
+        if (p && n == 8 && !memcmp(p, "required", 8)) return FMLX_API_TOOL_REQUIRED;
+        return FMLX_API_TOOL_AUTO; /* "auto" e qualunque ignoto: default prudente */
+    }
+    if (tc->type == FMLX_JSON_OBJ) {
+        const FmlxJsonValue *ty = fmlx_json_obj_get(tc, "type");
+        const char *p = NULL;
+        size_t n = 0;
+        if (ty && fmlx_json_as_str(ty, &p, &n)) {
+            if (n == 4 && !memcmp(p, "none", 4)) return FMLX_API_TOOL_NONE;
+            if (n == 3 && !memcmp(p, "any", 3)) return FMLX_API_TOOL_REQUIRED;
+            if (n == 4 && !memcmp(p, "tool", 4)) {
+                const FmlxJsonValue *nm = fmlx_json_obj_get(tc, "name");
+                /* Anthropic mette il nome in radice; OpenAI dentro `function`. */
+                if (!nm) {
+                    const FmlxJsonValue *fn = fmlx_json_obj_get(tc, "function");
+                    if (fn) nm = fmlx_json_obj_get(fn, "name");
+                }
+                if (nm && fmlx_json_as_str(nm, &p, &n)) {
+                    if (named) {
+                        named->p = p;
+                        named->n = (uint32_t)n;
+                    }
+                    return FMLX_API_TOOL_NAMED;
+                }
+            }
+        }
+        /* `{type:"function",function:{name}}` di OpenAI senza `type:"tool"`. */
+        {
+            const FmlxJsonValue *fn = fmlx_json_obj_get(tc, "function");
+            const FmlxJsonValue *nm = fn ? fmlx_json_obj_get(fn, "name") : NULL;
+            if (nm && fmlx_json_as_str(nm, &p, &n)) {
+                if (named) {
+                    named->p = p;
+                    named->n = (uint32_t)n;
+                }
+                return FMLX_API_TOOL_NAMED;
+            }
+        }
+    }
+    return FMLX_API_TOOL_AUTO;
+}
+
 /* ---- Accumulatore ------------------------------------------------------------ */
 
 void fmlx_api_acc_init(FmlxApiAcc *a, char *text, size_t text_cap, char *think, size_t think_cap,
