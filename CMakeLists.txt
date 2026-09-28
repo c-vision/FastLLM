@@ -26,6 +26,9 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../LLMEnv/LLMCodec ${CMAKE_BINARY_D
 # llama.cpp, che questa tappa non usa. Il target del motore resta UNO: `llm_ai_mlx`.
 set(LLMENV_BUILD_ENGINE ON CACHE BOOL "" FORCE)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../LLMEnv/LLMToken ${CMAKE_BINARY_DIR}/llmtoken)
+# Motore Jinja per i chat-template (`LLMJinja`: port di GMBasic/native/gmb_jinja). Layer
+# autonomo di LLMEnv; FastLLM lo consuma per rendere il `chat_template` reale del modello.
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../LLMEnv/LLMJinja ${CMAKE_BINARY_DIR}/llmjinja)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../LLMEnv/LLMEngine/mlx ${CMAKE_BINARY_DIR}/llmengine_mlx)
 
 # MLX carica `mlx.metallib` a runtime dal path ASSOLUTO compilato in libmlx (target `mlx-metallib`
@@ -194,6 +197,7 @@ add_test(NAME http COMMAND test_http)
 add_library(fmlx_api STATIC
     src/server/fmlx_api.c
     src/server/fmlx_api_openai.c
+    src/server/fmlx_api_openai_text.c
     src/server/fmlx_api_anthropic.c)
 target_include_directories(fmlx_api PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(fmlx_api PUBLIC fmlx_json fmlx_http)
@@ -208,15 +212,16 @@ add_test(NAME api COMMAND test_api)
 # senza orologio, senza malloc), `fmlx_serve.c` è il LOOP (socket, segnali, byte fin dove la testata
 # promette). Nello stesso file, l'unica parte provabile in-process dipenderebbe dalla build di
 # quella che chiede una porta libera: e un test di framing diventerebbe un test di rete.
-add_library(fmlx_serve STATIC src/server/fmlx_serve_respond.c src/server/fmlx_serve.c
-                             src/engine/fmlx_engine.c src/engine/fmlx_engine_gen.c)
+add_library(fmlx_serve STATIC src/server/fmlx_serve_respond.c src/server/fmlx_serve_admin.c
+                             src/server/fmlx_serve.c src/engine/fmlx_engine.c
+                             src/engine/fmlx_engine_gen.c)
 target_include_directories(fmlx_serve PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
                               PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
                                       ${CMAKE_CURRENT_SOURCE_DIR}/../LLMEnv/LLMEngine/include)
 # Il motore è una dipendenza PUBBLICA: chi linka `fmlx_serve` linka anche `llm_ai_mlx` e
 # `llmtoken` (dylib nel build tree). La generazione non è opzionale in questa lane: un
 # `fastmlx serve` che non potesse generare sarebbe il comando-che-risponde-di-sì.
-target_link_libraries(fmlx_serve PUBLIC fmlx_api fmlx_hf llm_ai_mlx llmtoken)
+target_link_libraries(fmlx_serve PUBLIC fmlx_api fmlx_hf llm_ai_mlx llmtoken llmjinja)
 
 # Il work directory qui serve DAVVERO: `/v1/models` e `/health` leggono il cache da disco, quindi
 # o il test costruisce un cache finto su disco, o sta provando un cammino che non ha mai corso.

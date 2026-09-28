@@ -23,6 +23,8 @@
 
 #include "engine/fmlx_engine.h"
 
+#include "fmlx_serve_internal.h"
+
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -35,9 +37,8 @@
  * stesso buffer e il corpo va poi spostato dietro la testata: è il pattern di
  * `fmlx_api_error_response` (src/server/fmlx_api.c:131), non una seconda invenzione. 256 byte
  * coprono status-line + Content-Type + Content-Length + `Connection: close` con margine; se un
- * giorno non bastassero, `w.len > RESERVE` lo dice e la risposta diventa un 500 — mai una
- * testata tagliata. */
-#define RESERVE 256u
+ * giorno non bastassero, `w.len > FMLX_SERVE_RESERVE` lo dice e la risposta diventa un 500 — mai una
+ * testata tagliata. La macro è in `fmlx_serve_internal.h`, condivisa con `fmlx_serve_admin.c`. */
 
 /* Confronto a TEMPO COSTANTE per la chiave di autenticazione: `strcmp` esce al primo byte
  * diverso, e il tempo che ci mette dipende da quanti primi byte erano giusti — è il canale
@@ -60,6 +61,7 @@ const char *fmlx_serve_status_str(FmlxServeSt s) {
     case FMLX_SERVE_ADDR_IN_USE: return "porta già in uso";
     case FMLX_SERVE_NO_PERM: return "permesso negato per ascoltare su quella porta";
     case FMLX_SERVE_BIND_FAILED: return "bind/listen rifiutato";
+    case FMLX_SERVE_STREAMED: return "risposta già consegnata in streaming";
     }
     return "?"; /* irraggiungibile: nessuno `default`, così -Wextra obbliga a nominare ogni esito */
 }
@@ -109,21 +111,21 @@ size_t fmlx_serve_body_limit(const FmlxServeOpts *o) {
 
 /* ---- il filo: testata + corpo già scritto ---- */
 
-/* Il corpo sta a `resp + RESERVE`, lungo `body_len`. `ka` dice se la connessione può restare
+/* Il corpo sta a `resp + FMLX_SERVE_RESERVE`, lungo `body_len`. `ka` dice se la connessione può restare
  * aperta, e qui si scrive il `Connection: close` di conseguenza: chi responde e chi decide se
  * tenere aperto devono essere la stessa funzione, o la testata prometterebbe una cosa e il loop
  * ne farebbe un'altra. */
-static FmlxServeSt finish_ok(FmlxServeBuf *buf, int status, const char *content_type,
+FmlxServeSt fmlx_serve_finish_ok(FmlxServeBuf *buf, int status, const char *content_type,
                              size_t body_len, int ka, size_t *out_len) {
     FmlxHttpRes w;
 
-    if (buf->resp_cap < RESERVE) return FMLX_SERVE_BUF_SMALL;
+    if (buf->resp_cap < FMLX_SERVE_RESERVE) return FMLX_SERVE_BUF_SMALL;
     fmlx_http_res_init(&w, buf->resp, buf->resp_cap);
     if (fmlx_http_write_head(&w, status, content_type, body_len,
                              ka ? NULL : "Connection: close") != FMLX_HTTP_OK)
         return FMLX_SERVE_BUF_SMALL;
-    if (w.len > RESERVE) return FMLX_SERVE_BUF_SMALL;
-    memmove(buf->resp + w.len, buf->resp + RESERVE, body_len);
+    if (w.len > FMLX_SERVE_RESERVE) return FMLX_SERVE_BUF_SMALL;
+    memmove(buf->resp + w.len, buf->resp + FMLX_SERVE_RESERVE, body_len);
     *out_len = w.len + body_len;
     return FMLX_SERVE_OK;
 }
@@ -138,7 +140,7 @@ static FmlxServeSt refuse(FmlxServeBuf *buf, const FmlxApiErrCtx *e, int anthrop
     return FMLX_SERVE_OK;
 }
 
-static FmlxServeSt refuse_simple(FmlxServeBuf *buf, FmlxApiErr err, int anthropic,
+FmlxServeSt fmlx_serve_refuse_simple(FmlxServeBuf *buf, FmlxApiErr err, int anthropic,
                                  const char *code, const char *msg, size_t *out_len) {
     FmlxApiErrCtx e;
 
@@ -294,11 +296,11 @@ static FmlxServeSt body_models(FmlxServeBuf *buf, const Cat *c, int ka, size_t *
     int wrote = 0;
 
     if (c->st != FMLX_HF_OK)
-        return refuse_simple(buf, FMLX_API_INTERNAL, 0, FMLX_SERVE_CODE_CATALOG,
+        return fmlx_serve_refuse_simple(buf, FMLX_API_INTERNAL, 0, FMLX_SERVE_CODE_CATALOG,
                              "the local model catalog could not be read; /health reports the code",
                              out_len);
 
-    fmlx_jsonw_init(&jw, buf->resp + RESERVE, buf->resp_cap - RESERVE, buf->resp_cap - RESERVE);
+    fmlx_jsonw_init(&jw, buf->resp + FMLX_SERVE_RESERVE, buf->resp_cap - FMLX_SERVE_RESERVE, buf->resp_cap - FMLX_SERVE_RESERVE);
     if (fmlx_jsonw_obj_begin(&jw) == FMLX_JSON_OK && fmlx_jsonw_key(&jw, "object") == FMLX_JSON_OK &&
         fmlx_jsonw_cstr(&jw, "list") == FMLX_JSON_OK && fmlx_jsonw_key(&jw, "data") == FMLX_JSON_OK &&
         fmlx_jsonw_arr_begin(&jw) == FMLX_JSON_OK) {
@@ -317,13 +319,13 @@ static FmlxServeSt body_models(FmlxServeBuf *buf, const Cat *c, int ka, size_t *
             fmlx_jsonw_obj_end(&jw) == FMLX_JSON_OK &&
             fmlx_jsonw_finish(&jw, &blen) == FMLX_JSON_OK) {
             fmlx_jsonw_free(&jw);
-            return finish_ok(buf, 200, "application/json", blen, ka, out_len);
+            return fmlx_serve_finish_ok(buf, 200, "application/json", blen, ka, out_len);
         }
     }
     fmlx_jsonw_free(&jw);
     /* Non entra: NON si manda l'elenco a metà. Un `data` troncato avrebbe l'aspetto esatto di
      * «questo cache ha N modelli» con N sbagliato, che è il risultato silenzioso del piano. */
-    return refuse_simple(buf, FMLX_API_INTERNAL, 0, "response_too_large",
+    return fmlx_serve_refuse_simple(buf, FMLX_API_INTERNAL, 0, "response_too_large",
                          "the model list does not fit this server's response buffer: raise the "
                          "response capacity or point at a smaller cache",
                          out_len);
@@ -350,7 +352,7 @@ static FmlxServeSt body_health(FmlxServeBuf *buf, const Cat *c, int auth_on, int
     int catalog_ok = c->st == FMLX_HF_OK;
     int ok;
 
-    fmlx_jsonw_init(&jw, buf->resp + RESERVE, buf->resp_cap - RESERVE, buf->resp_cap - RESERVE);
+    fmlx_jsonw_init(&jw, buf->resp + FMLX_SERVE_RESERVE, buf->resp_cap - FMLX_SERVE_RESERVE, buf->resp_cap - FMLX_SERVE_RESERVE);
     ok = fmlx_jsonw_obj_begin(&jw) == FMLX_JSON_OK &&
          fmlx_jsonw_key(&jw, "object") == FMLX_JSON_OK &&
          fmlx_jsonw_cstr(&jw, "health") == FMLX_JSON_OK &&
@@ -393,10 +395,10 @@ static FmlxServeSt body_health(FmlxServeBuf *buf, const Cat *c, int auth_on, int
          fmlx_jsonw_finish(&jw, &blen) == FMLX_JSON_OK;
     if (ok) {
         fmlx_jsonw_free(&jw);
-        return finish_ok(buf, catalog_ok ? 200 : 503, "application/json", blen, ka, out_len);
+        return fmlx_serve_finish_ok(buf, catalog_ok ? 200 : 503, "application/json", blen, ka, out_len);
     }
     fmlx_jsonw_free(&jw);
-    return refuse_simple(buf, FMLX_API_INTERNAL, 0, "response_too_large",
+    return fmlx_serve_refuse_simple(buf, FMLX_API_INTERNAL, 0, "response_too_large",
                          "the health body does not fit this server's response buffer", out_len);
 }
 
@@ -434,10 +436,25 @@ static FmlxServeSt refuse_engine(FmlxServeBuf *buf, FmlxApiAction act, int anthr
     memset(&e, 0, sizeof e);
     e.err = FMLX_API_NOT_SUPPORTED;
     e.code = FMLX_SERVE_CODE_ENGINE;
-    snprintf(msg, sizeof msg,
-             "%s requires the inference engine (lane 1), which is not wired in this build: this "
-             "server answers /v1/models and /health only",
-             missing_route_reason(act));
+    /* Il motore C'È: questi 501 non dicono "non wired", dicono cosa manca DAVVERO. Le
+     * embeddings non hanno un punto d'ingresso nell'ABI del runner MLX (nessun CAP_EMBED:
+     * `emb_dim`/`embed_text` sono NULL), quindi non si può fingere di calcolarle. */
+    switch (act) {
+    case FMLX_API_ACT_EMBEDDINGS:
+        snprintf(msg, sizeof msg,
+                 "embeddings are not available: the engine ABI exposes no embed_text for this "
+                 "runner, so this server cannot compute them");
+        break;
+    case FMLX_API_ACT_RESPONSES:
+        snprintf(msg, sizeof msg, "the Responses API is not implemented on this server");
+        break;
+    case FMLX_API_ACT_METRICS:
+        snprintf(msg, sizeof msg, "engine counters are not exposed on this route yet");
+        break;
+    default:
+        snprintf(msg, sizeof msg, "%s is not available on this server", missing_route_reason(act));
+        break;
+    }
     e.message = msg;
     return refuse(buf, &e, anthropic, out_len);
 }
@@ -462,15 +479,16 @@ static int copy_model_name(const FmlxSlice s, char *out, size_t cap) {
 }
 
 /* Errore del motore reso nel dialetto giusto e con un codice macchina-leggibile. */
-static FmlxServeSt engine_fail(FmlxServeBuf *buf, FmlxApiErr err, const char *code,
+FmlxServeSt fmlx_serve_engine_fail(FmlxServeBuf *buf, FmlxApiErr err, const char *code,
                                const char *msg, int anthropic, size_t *out_len) {
-    return refuse_simple(buf, err, anthropic, code, msg, out_len);
+    return fmlx_serve_refuse_simple(buf, err, anthropic, code, msg, out_len);
 }
 
 /* La risposta NON-stream: consuma tutti gli eventi, accumula, e rende il corpo del dialetto. */
 static FmlxServeSt gen_nonstream(FmlxServeBuf *buf, FmlxEngineGen *g, const FmlxApiChat *c,
-                                 const FmlxApiMeta *m, int anthropic, int ka, size_t *out_len) {
-    char *text = malloc(1u << 18);
+                                 const FmlxApiMeta *m, int anthropic, int text, int ka,
+                                 size_t *out_len) {
+    char *tbuf = malloc(1u << 18);
     char *think = malloc(4096);
     char *args = malloc(FMLX_API_MAX_TOOLCALLS * 2048u);
     FmlxApiAcc a;
@@ -478,13 +496,13 @@ static FmlxServeSt gen_nonstream(FmlxServeBuf *buf, FmlxEngineGen *g, const Fmlx
     FmlxJsonW w;
     size_t blen = 0;
 
-    if (!text || !think || !args) {
-        free(text);
+    if (!tbuf || !think || !args) {
+        free(tbuf);
         free(think);
         free(args);
         return FMLX_SERVE_BUF_SMALL;
     }
-    fmlx_api_acc_init(&a, text, 1u << 18, think, 4096, args, 2048u);
+    fmlx_api_acc_init(&a, tbuf, 1u << 18, think, 4096, args, 2048u);
     for (;;) {
         FmlxApiEvent ev;
         FmlxApiErrCtx ec;
@@ -505,47 +523,74 @@ static FmlxServeSt gen_nonstream(FmlxServeBuf *buf, FmlxEngineGen *g, const Fmlx
     }
     if (err == FMLX_API_OK && a.overflow) err = FMLX_API_INTERNAL;
     if (err != FMLX_API_OK) {
-        free(text);
+        free(tbuf);
         free(think);
         free(args);
-        return engine_fail(buf, FMLX_API_INTERNAL, NULL,
+        return fmlx_serve_engine_fail(buf, FMLX_API_INTERNAL, NULL,
                            "the engine produced more text than this server's buffers hold",
                            anthropic, out_len);
     }
-    fmlx_jsonw_init(&w, buf->resp + RESERVE, buf->resp_cap - RESERVE, buf->resp_cap - RESERVE);
-    if (anthropic) err = fmlx_api_anthropic_message(c, m, &a, &w);
+    fmlx_jsonw_init(&w, buf->resp + FMLX_SERVE_RESERVE, buf->resp_cap - FMLX_SERVE_RESERVE, buf->resp_cap - FMLX_SERVE_RESERVE);
+    if (text) err = fmlx_api_openai_completion_text(c, m, &a, &w);
+    else if (anthropic) err = fmlx_api_anthropic_message(c, m, &a, &w);
     else err = fmlx_api_openai_completion(c, m, &a, &w);
     if (err == FMLX_API_OK && fmlx_jsonw_finish(&w, &blen) == FMLX_JSON_OK) {
         fmlx_jsonw_free(&w);
-        free(text);
+        free(tbuf);
         free(think);
         free(args);
-        return finish_ok(buf, 200, "application/json", blen, ka, out_len);
+        return fmlx_serve_finish_ok(buf, 200, "application/json", blen, ka, out_len);
     }
     fmlx_jsonw_free(&w);
-    free(text);
+    free(tbuf);
     free(think);
     free(args);
     if (err != FMLX_API_OK)
-        return engine_fail(buf, FMLX_API_INTERNAL, NULL,
+        return fmlx_serve_engine_fail(buf, FMLX_API_INTERNAL, NULL,
                            "the response body could not be rendered for the client protocol",
                            anthropic, out_len);
-    return engine_fail(buf, FMLX_API_INTERNAL, NULL,
+    return fmlx_serve_engine_fail(buf, FMLX_API_INTERNAL, NULL,
                        "the response does not fit this server's response buffer", anthropic,
                        out_len);
 }
 
-/* La risposta streaming: la testata SSE e poi i frame del dialetto, tutti nel buffer della
- * risposta. Il loop li manda interi (chunked): il client vede un flusso SSE valido e chiuso. */
+/* La risposta streaming. Senza `buf->sink` la si costruisce INTERA nel buffer (come prima, per i
+ * test in memoria e per chi non ha un socket). Con il sink si consegna incrementale: la testata
+ * SSE esce subito (così il client vede lo stream aperto), poi ogni token è un flush sul socket:
+ * TTFT = primo token, e la memoria non cresce con la lunghezza della risposta. */
 static FmlxServeSt gen_stream(FmlxServeBuf *buf, FmlxEngineGen *g, const FmlxApiChat *c,
-                              const FmlxApiMeta *m, int anthropic, size_t *out_len) {
+                              const FmlxApiMeta *m, int anthropic, int text, int http10,
+                              size_t *out_len) {
     FmlxHttpRes w;
     FmlxApiErr err;
 
     fmlx_http_res_init(&w, buf->resp, buf->resp_cap);
+    w.sink = buf->sink;
+    w.sink_ctx = buf->sink_ctx;
     if (fmlx_api_sse_head(&w) != FMLX_HTTP_OK) return FMLX_SERVE_BUF_SMALL;
-    err = anthropic ? fmlx_api_anthropic_stream(c, m, fmlx_engine_next, g, &w)
-                    : fmlx_api_openai_stream(c, m, fmlx_engine_next, g, &w);
+    if (w.sink) {
+        /* La testata va messa d'accordo PRIMA di flusharla (versione + `Connection: close`) e
+         * lo stream chiude la connessione: i byte sono già partiti, un keep-alive su una
+         * generazione fallita sarebbe una promessa senza garanzia. */
+        size_t n = w.len;
+        if (fmlx_serve_agree_head(http10, buf, &n, 0) != FMLX_SERVE_OK) {
+            *out_len = 0;
+            return FMLX_SERVE_BUF_SMALL;
+        }
+        w.len = n;
+        if (fmlx_http_flush(&w) != FMLX_HTTP_OK) {
+            *out_len = 0;
+            return FMLX_SERVE_BUF_SMALL;
+        }
+    }
+    if (text) err = fmlx_api_openai_stream_text(c, m, fmlx_engine_next, g, &w);
+    else if (anthropic) err = fmlx_api_anthropic_stream(c, m, fmlx_engine_next, g, &w);
+    else err = fmlx_api_openai_stream(c, m, fmlx_engine_next, g, &w);
+    if (w.sink) {
+        (void)fmlx_http_flush(&w); /* coda; se il client è andato via non c'è nulla da dire */
+        *out_len = 0;
+        return FMLX_SERVE_STREAMED;
+    }
     if (err != FMLX_API_OK) return FMLX_SERVE_BUF_SMALL; /* nessun byte a metà esce */
     *out_len = w.len;
     return FMLX_SERVE_OK;
@@ -555,7 +600,8 @@ static FmlxServeSt gen_stream(FmlxServeBuf *buf, FmlxEngineGen *g, const FmlxApi
  * `body` è già stato validato come oggetto JSON; qui si ri-parsa per avere il DOM vivo durante
  * la generazione (l'adapter conserva SLICE nel DOM del chiamante). */
 static FmlxServeSt body_chat(FmlxServeBuf *buf, const char *body, size_t body_len, int act,
-                             int anthropic, const FmlxServeOpts *o, int ka, size_t *out_len) {
+                             int anthropic, const FmlxServeOpts *o, int http10, int ka,
+                             size_t *out_len) {
     FmlxJsonDoc doc;
     const FmlxJsonValue *root;
     FmlxApiChat chat;
@@ -572,7 +618,7 @@ static FmlxServeSt body_chat(FmlxServeBuf *buf, const char *body, size_t body_le
     fmlx_json_doc_init(&doc);
     if (fmlx_json_parse(body, body_len, 0, &doc) != FMLX_JSON_OK) {
         fmlx_json_doc_free(&doc);
-        return engine_fail(buf, FMLX_API_INTERNAL, NULL,
+        return fmlx_serve_engine_fail(buf, FMLX_API_INTERNAL, NULL,
                            "the request body could not be parsed again", anthropic, out_len);
     }
     root = fmlx_json_root(&doc);
@@ -586,7 +632,7 @@ static FmlxServeSt body_chat(FmlxServeBuf *buf, const char *body, size_t body_le
     }
     if (copy_model_name(chat.model, name, sizeof name) != 0) {
         fmlx_json_doc_free(&doc);
-        return engine_fail(buf, FMLX_API_INVALID_REQUEST, "model_not_found",
+        return fmlx_serve_engine_fail(buf, FMLX_API_INVALID_REQUEST, "model_not_found",
                            "model is required and must name a local model", anthropic, out_len);
     }
     model = fmlx_engine_model(o ? o->cache_root : NULL, name, err, sizeof err);
@@ -594,14 +640,14 @@ static FmlxServeSt body_chat(FmlxServeBuf *buf, const char *body, size_t body_le
         char msg[600];
         snprintf(msg, sizeof msg, "the requested model is not available: %s", err);
         fmlx_json_doc_free(&doc);
-        return engine_fail(buf, FMLX_API_MODEL_NOT_FOUND, NULL, msg, anthropic, out_len);
+        return fmlx_serve_engine_fail(buf, FMLX_API_MODEL_NOT_FOUND, NULL, msg, anthropic, out_len);
     }
     g = fmlx_engine_chat(model, &chat, err, sizeof err);
     if (!g) {
         char msg[600];
         snprintf(msg, sizeof msg, "the engine could not start the generation: %s", err);
         fmlx_json_doc_free(&doc);
-        return engine_fail(buf, FMLX_API_INTERNAL, NULL, msg, anthropic, out_len);
+        return fmlx_serve_engine_fail(buf, FMLX_API_INTERNAL, NULL, msg, anthropic, out_len);
     }
 
     memset(&meta, 0, sizeof meta);
@@ -613,16 +659,18 @@ static FmlxServeSt body_chat(FmlxServeBuf *buf, const char *body, size_t body_le
         meta.created = (int64_t)time(NULL);
         meta.prompt_tokens_known = 0; /* lo conosce il motore, non questo layer */
     }
-    st = chat.stream ? gen_stream(buf, g, &chat, &meta, anthropic, out_len)
-                     : gen_nonstream(buf, g, &chat, &meta, anthropic, ka, out_len);
+    st = chat.stream ? gen_stream(buf, g, &chat, &meta, anthropic, 0, http10, out_len)
+                     : gen_nonstream(buf, g, &chat, &meta, anthropic, 0, ka, out_len);
     fmlx_engine_gen_free(g);
     fmlx_json_doc_free(&doc);
     return st;
 }
 
-/* Il corpo di `/v1/completions`: prompt grezzo, nessun chat template. Il dialetto è OpenAI. */
+/* Il corpo di `/v1/completions`: prompt grezzo, nessun chat template. Il dialetto è OpenAI
+ * legacy (`text_completion`, `choices[].text`). `stop` è onorato: si passa la chat al motore
+ * solo per le stop sequences (nessun messaggio). */
 static FmlxServeSt body_completions(FmlxServeBuf *buf, const char *body, size_t body_len,
-                                    const FmlxServeOpts *o, int ka, size_t *out_len) {
+                                    const FmlxServeOpts *o, int http10, int ka, size_t *out_len) {
     FmlxJsonDoc doc;
     const FmlxJsonValue *root, *v, *p;
     FmlxSlice mslice;
@@ -640,17 +688,18 @@ static FmlxServeSt body_completions(FmlxServeBuf *buf, const char *body, size_t 
     static unsigned long seq = 0;
     FmlxServeSt st;
 
+    fmlx_api_chat_init(&chat);
     fmlx_json_doc_init(&doc);
     if (fmlx_json_parse(body, body_len, 0, &doc) != FMLX_JSON_OK) {
         fmlx_json_doc_free(&doc);
-        return engine_fail(buf, FMLX_API_INVALID_REQUEST, FMLX_SERVE_CODE_BODY_INVALID,
+        return fmlx_serve_engine_fail(buf, FMLX_API_INVALID_REQUEST, FMLX_SERVE_CODE_BODY_INVALID,
                            "request body is not valid JSON", 0, out_len);
     }
     root = fmlx_json_root(&doc);
     p = fmlx_json_obj_get(root, "prompt");
     if (!p || p->type != FMLX_JSON_STR) {
         fmlx_json_doc_free(&doc);
-        return engine_fail(buf, FMLX_API_INVALID_REQUEST, "invalid_prompt",
+        return fmlx_serve_engine_fail(buf, FMLX_API_INVALID_REQUEST, "invalid_prompt",
                            "prompt is required and must be a string", 0, out_len);
     }
     prompt = fmlx_json_str(p);
@@ -663,7 +712,7 @@ static FmlxServeSt body_completions(FmlxServeBuf *buf, const char *body, size_t 
         if (!v || !fmlx_json_as_str(v, &mp, &mn) || mn > 0xffffffffu ||
             copy_model_name((FmlxSlice){mp, (uint32_t)mn}, name, sizeof name) != 0) {
             fmlx_json_doc_free(&doc);
-            return engine_fail(buf, FMLX_API_INVALID_REQUEST, "model_not_found",
+            return fmlx_serve_engine_fail(buf, FMLX_API_INVALID_REQUEST, "model_not_found",
                                "model is required and must name a local model", 0, out_len);
         }
         mslice.p = mp;
@@ -677,23 +726,47 @@ static FmlxServeSt body_completions(FmlxServeBuf *buf, const char *body, size_t 
     if ((v = fmlx_json_obj_get(root, "frequency_penalty")) && fmlx_json_as_f64(v, &frequency)) {}
     if ((v = fmlx_json_obj_get(root, "seed")) && fmlx_json_as_i64(v, &seed)) {}
     if ((v = fmlx_json_obj_get(root, "stream"))) fmlx_json_as_bool(v, &stream);
+    /* `stop`: stringa o array di stringhe, come in chat. Vive nel DOM `doc`, che resta valido
+     * per tutta la generazione. */
+    if ((v = fmlx_json_obj_get(root, "stop")) && !fmlx_json_is_null(v)) {
+        if (v->type == FMLX_JSON_STR) {
+            const char *sp = NULL;
+            size_t sn = 0;
+            if (fmlx_json_as_str(v, &sp, &sn) && sn <= 0xffffffffu) {
+                chat.stop[0].p = sp;
+                chat.stop[0].n = (uint32_t)sn;
+                chat.n_stop = 1;
+            }
+        } else if (v->type == FMLX_JSON_ARR) {
+            size_t na = fmlx_json_arr_n(v);
+            if (na > FMLX_API_MAX_STOP) na = FMLX_API_MAX_STOP;
+            for (size_t i = 0; i < na; i++) {
+                const char *sp = NULL;
+                size_t sn = 0;
+                if (fmlx_json_as_str(fmlx_json_arr_at(v, i), &sp, &sn) && sn <= 0xffffffffu) {
+                    chat.stop[chat.n_stop].p = sp;
+                    chat.stop[chat.n_stop].n = (uint32_t)sn;
+                    chat.n_stop++;
+                }
+            }
+        }
+    }
 
     model = fmlx_engine_model(o ? o->cache_root : NULL, name, err, sizeof err);
     if (!model) {
         char msg[600];
         snprintf(msg, sizeof msg, "the requested model is not available: %s", err);
         fmlx_json_doc_free(&doc);
-        return engine_fail(buf, FMLX_API_MODEL_NOT_FOUND, NULL, msg, 0, out_len);
+        return fmlx_serve_engine_fail(buf, FMLX_API_MODEL_NOT_FOUND, NULL, msg, 0, out_len);
     }
     g = fmlx_engine_prompt(model, prompt, max_tokens, (float)temperature, (float)top_p, 0,
-                           (float)presence, (float)frequency, seed, err, sizeof err);
+                           (float)presence, (float)frequency, seed, &chat, err, sizeof err);
     if (!g) {
         char msg[600];
         snprintf(msg, sizeof msg, "the engine could not start the generation: %s", err);
         fmlx_json_doc_free(&doc);
-        return engine_fail(buf, FMLX_API_INTERNAL, NULL, msg, 0, out_len);
+        return fmlx_serve_engine_fail(buf, FMLX_API_INTERNAL, NULL, msg, 0, out_len);
     }
-    fmlx_api_chat_init(&chat);
     chat.model = mslice;
     chat.stream = stream;
     memset(&meta, 0, sizeof meta);
@@ -703,8 +776,8 @@ static FmlxServeSt body_completions(FmlxServeBuf *buf, const char *body, size_t 
         meta.id = idbuf;
         meta.created = (int64_t)time(NULL);
     }
-    st = stream ? gen_stream(buf, g, &chat, &meta, 0, out_len)
-                : gen_nonstream(buf, g, &chat, &meta, 0, ka, out_len);
+    st = stream ? gen_stream(buf, g, &chat, &meta, 0, 1, http10, out_len)
+                : gen_nonstream(buf, g, &chat, &meta, 0, 1, ka, out_len);
     fmlx_engine_gen_free(g);
     fmlx_json_doc_free(&doc);
     return st;
@@ -729,7 +802,7 @@ static FmlxServeSt body_count_tokens(FmlxServeBuf *buf, const char *body, size_t
     fmlx_json_doc_init(&doc);
     if (fmlx_json_parse(body, body_len, 0, &doc) != FMLX_JSON_OK) {
         fmlx_json_doc_free(&doc);
-        return engine_fail(buf, FMLX_API_INVALID_REQUEST, FMLX_SERVE_CODE_BODY_INVALID,
+        return fmlx_serve_engine_fail(buf, FMLX_API_INVALID_REQUEST, FMLX_SERVE_CODE_BODY_INVALID,
                            "request body is not valid JSON", 1, out_len);
     }
     root = fmlx_json_root(&doc);
@@ -742,7 +815,7 @@ static FmlxServeSt body_count_tokens(FmlxServeBuf *buf, const char *body, size_t
     }
     if (copy_model_name(chat.model, name, sizeof name) != 0) {
         fmlx_json_doc_free(&doc);
-        return engine_fail(buf, FMLX_API_INVALID_REQUEST, "model_not_found",
+        return fmlx_serve_engine_fail(buf, FMLX_API_INVALID_REQUEST, "model_not_found",
                            "model is required and must name a local model", 1, out_len);
     }
     model = fmlx_engine_model(o ? o->cache_root : NULL, name, err, sizeof err);
@@ -750,27 +823,27 @@ static FmlxServeSt body_count_tokens(FmlxServeBuf *buf, const char *body, size_t
         char msg[600];
         snprintf(msg, sizeof msg, "the requested model is not available: %s", err);
         fmlx_json_doc_free(&doc);
-        return engine_fail(buf, FMLX_API_MODEL_NOT_FOUND, NULL, msg, 1, out_len);
+        return fmlx_serve_engine_fail(buf, FMLX_API_MODEL_NOT_FOUND, NULL, msg, 1, out_len);
     }
     if (fmlx_engine_count_tokens(model, &chat, &n, err, sizeof err) != 0) {
         char msg[600];
         snprintf(msg, sizeof msg, "the prompt could not be tokenized: %s", err);
         fmlx_json_doc_free(&doc);
-        return engine_fail(buf, FMLX_API_INTERNAL, NULL, msg, 1, out_len);
+        return fmlx_serve_engine_fail(buf, FMLX_API_INTERNAL, NULL, msg, 1, out_len);
     }
-    fmlx_jsonw_init(&w, buf->resp + RESERVE, buf->resp_cap - RESERVE, buf->resp_cap - RESERVE);
+    fmlx_jsonw_init(&w, buf->resp + FMLX_SERVE_RESERVE, buf->resp_cap - FMLX_SERVE_RESERVE, buf->resp_cap - FMLX_SERVE_RESERVE);
     if (fmlx_jsonw_obj_begin(&w) != FMLX_JSON_OK || fmlx_jsonw_key(&w, "input_tokens") != FMLX_JSON_OK ||
         fmlx_jsonw_i64(&w, n) != FMLX_JSON_OK || fmlx_jsonw_obj_end(&w) != FMLX_JSON_OK ||
         fmlx_jsonw_finish(&w, &blen) != FMLX_JSON_OK) {
         fmlx_jsonw_free(&w);
         fmlx_json_doc_free(&doc);
-        return engine_fail(buf, FMLX_API_INTERNAL, NULL,
+        return fmlx_serve_engine_fail(buf, FMLX_API_INTERNAL, NULL,
                            "the token count response does not fit this server's buffer", 1,
                            out_len);
     }
     fmlx_jsonw_free(&w);
     fmlx_json_doc_free(&doc);
-    return finish_ok(buf, 200, "application/json", blen, 1, out_len);
+    return fmlx_serve_finish_ok(buf, 200, "application/json", blen, 1, out_len);
 }
 
 /* ---- validazione del corpo: la parte che NON dipende dal motore ---- */
@@ -782,7 +855,7 @@ typedef enum {
 } VSt;
 
 static VSt bad_body(FmlxServeBuf *buf, int anthropic, const char *msg, size_t *out_len) {
-    return refuse_simple(buf, FMLX_API_INVALID_REQUEST, anthropic, FMLX_SERVE_CODE_BODY_INVALID, msg,
+    return fmlx_serve_refuse_simple(buf, FMLX_API_INVALID_REQUEST, anthropic, FMLX_SERVE_CODE_BODY_INVALID, msg,
                          out_len) == FMLX_SERVE_OK
                ? V_REPLIED
                : V_BUF_SMALL;
@@ -880,7 +953,7 @@ static FmlxServeSt respond_one(const FmlxHttpReq *req, const char *body, size_t 
     *out_len = 0;
     *keep_alive = 0;
     buf = *cbuf;
-    if (buf.resp_cap < RESERVE + 64) return FMLX_SERVE_BUF_SMALL;
+    if (buf.resp_cap < FMLX_SERVE_RESERVE + 64) return FMLX_SERVE_BUF_SMALL;
     ka = fmlx_http_keep_alive(req);
 
     /* L'autenticazione PRIMA di tutto, rotta inclusa: «questa rotta esiste» è già informazione, e
@@ -900,7 +973,7 @@ static FmlxServeSt respond_one(const FmlxHttpReq *req, const char *body, size_t 
             ok = ct_eq(got.p + 7, got.n - 7, want, wn);
         if (!ok && xkey.n) ok = ct_eq(xkey.p, xkey.n, want, wn);
         if (!ok) {
-            st = refuse_simple(&buf, FMLX_API_UNAUTHORIZED, dialect_of(req), FMLX_SERVE_CODE_AUTH,
+            st = fmlx_serve_refuse_simple(&buf, FMLX_API_UNAUTHORIZED, dialect_of(req), FMLX_SERVE_CODE_AUTH,
                                "this server requires an API key: send \"Authorization: Bearer "
                                "<key>\" or \"x-api-key: <key>\"",
                                out_len);
@@ -919,7 +992,7 @@ static FmlxServeSt respond_one(const FmlxHttpReq *req, const char *body, size_t 
         else
             snprintf(msg, sizeof msg, "%.*s is not the method this route takes",
                      (int)req->method.n, req->method.p);
-        st = refuse_simple(&buf,
+        st = fmlx_serve_refuse_simple(&buf,
                            rt == FMLX_API_NOT_FOUND ? FMLX_API_NOT_FOUND : FMLX_API_INVALID_REQUEST,
                            dialect_of(req), rt == FMLX_API_NOT_FOUND ? NULL : "wrong_method", msg,
                            out_len);
@@ -940,7 +1013,7 @@ static FmlxServeSt respond_one(const FmlxHttpReq *req, const char *body, size_t 
      * resta Anthropic e il corpo è un oggetto JSON da validare come gli altri. */
     if (route_has_body(act)) {
         if (body_len > fmlx_serve_body_limit(o)) {
-            st = refuse_simple(&buf, FMLX_API_INVALID_REQUEST, ant, FMLX_SERVE_CODE_BODY_LARGE,
+            st = fmlx_serve_refuse_simple(&buf, FMLX_API_INVALID_REQUEST, ant, FMLX_SERVE_CODE_BODY_LARGE,
                                "request body is larger than this server accepts", out_len);
             *keep_alive = 0;
             return st;
@@ -950,7 +1023,7 @@ static FmlxServeSt respond_one(const FmlxHttpReq *req, const char *body, size_t 
             if (fmlx_api_anthropic_version(hv) < 0) {
                 snprintf(msg, sizeof msg, "anthropic-version %.*s is not understood", (int)hv.n,
                          hv.p);
-                st = refuse_simple(&buf, FMLX_API_INVALID_REQUEST, 1, FMLX_SERVE_CODE_VERSION, msg,
+                st = fmlx_serve_refuse_simple(&buf, FMLX_API_INVALID_REQUEST, 1, FMLX_SERVE_CODE_VERSION, msg,
                                    out_len);
                 *keep_alive = st == FMLX_SERVE_OK ? ka : 0;
                 return st;
@@ -971,15 +1044,27 @@ static FmlxServeSt respond_one(const FmlxHttpReq *req, const char *body, size_t 
     switch (act) {
     case FMLX_API_ACT_CHAT:
     case FMLX_API_ACT_MESSAGES:
-        st = body_chat(&buf, body, body_len, act, ant, o, ka, out_len);
+        st = body_chat(&buf, body, body_len, act, ant, o, req->http10, ka, out_len);
         *keep_alive = st == FMLX_SERVE_OK ? ka : 0;
         return st;
     case FMLX_API_ACT_COMPLETIONS:
-        st = body_completions(&buf, body, body_len, o, ka, out_len);
+        st = body_completions(&buf, body, body_len, o, req->http10, ka, out_len);
         *keep_alive = st == FMLX_SERVE_OK ? ka : 0;
         return st;
     case FMLX_API_ACT_COUNT_TOKENS:
         st = body_count_tokens(&buf, body, body_len, o, out_len);
+        *keep_alive = st == FMLX_SERVE_OK ? ka : 0;
+        return st;
+    case FMLX_API_ACT_MODELS_STATUS:
+        st = fmlx_serve_body_models_status(&buf, ka, out_len);
+        *keep_alive = st == FMLX_SERVE_OK ? ka : 0;
+        return st;
+    case FMLX_API_ACT_LOAD:
+        st = fmlx_serve_body_model_load(&buf, body, body_len, o, ka, out_len);
+        *keep_alive = st == FMLX_SERVE_OK ? ka : 0;
+        return st;
+    case FMLX_API_ACT_UNLOAD:
+        st = fmlx_serve_body_model_unload(&buf, body, body_len, ka, out_len);
         *keep_alive = st == FMLX_SERVE_OK ? ka : 0;
         return st;
     default: break;
@@ -1001,6 +1086,12 @@ FmlxServeSt fmlx_serve_respond(const FmlxHttpReq *req, const char *body, size_t 
     FmlxServeSt st;
 
     st = respond_one(req, body, body_len, o, cbuf, out_len, keep_alive);
+    /* Uno stream già consegnato via sink non ha una testata da mettere d'accordo qui: l'ha fatto
+     * `gen_stream` prima del primo flush, ed è già sul filo. */
+    if (st == FMLX_SERVE_STREAMED) {
+        *out_len = 0;
+        return st;
+    }
     if (st != FMLX_SERVE_OK) {
         *out_len = 0;
         return st;

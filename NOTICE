@@ -38,6 +38,9 @@ A. CODICE CONSUMATO / DERIVATO (attribuzione richiesta)
     copiato). Gguflib e' anche linkata DENTRO libmlx.a (via FetchContent MLX).
   * oMLX (jundot/omlx)           - Apache-2.0 - kernel Metal `oq_a8*` (via
     GMBasic/native/gmb_metal_oq_a8/), NON ancora presi in FastLLM.
+  * GMBasic/native/gmb_jinja     - stessa autoria (Gaetano Minardi) - motore Jinja
+    per chat-template, portato in LLMEnv/LLMJinja (autore unico, rilicenziato
+    Apache-2.0 in LLMEnv). FastLLM lo consuma come dipendenza (`llmjinja`).
   * huggingface_hub              - Apache-2.0 - contratto del cache/download
     (LETTO dal disco, nessun modello o file di cache copiato nel repo).
 

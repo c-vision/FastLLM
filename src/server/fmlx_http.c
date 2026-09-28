@@ -402,6 +402,23 @@ void fmlx_http_res_init(FmlxHttpRes *w, char *buf, size_t cap) {
     w->len = 0;
     w->chunked = 0;
     w->err = FMLX_HTTP_OK;
+    w->sink = NULL;
+    w->sink_ctx = NULL;
+}
+
+/* Svuota il buffer verso il sink (se c'è) e riparte da zero. Usata dallo streaming: il
+ * contenuto già consegnato non resta in memoria, quindi il tetto `cap` non è un tetto sulla
+ * lunghezza della risposta. */
+FmlxHttpStatus fmlx_http_flush(FmlxHttpRes *w) {
+    if (!w) return FMLX_HTTP_ERR_BAD_ARG;
+    if (w->err) return w->err;
+    if (!w->sink || w->len == 0) return w->err;
+    if (w->sink(w->sink_ctx, w->buf, w->len) != 0) {
+        w->err = FMLX_HTTP_ERR_BUF_SMALL;
+        return w->err;
+    }
+    w->len = 0;
+    return w->err;
 }
 
 /* Scrive SOLO se entra intera: mai un pezzo di header e poi l'errore. */
@@ -572,6 +589,9 @@ FmlxHttpStatus fmlx_http_sse_write(FmlxHttpRes *w, const char *event, FmlxSlice 
         w->len = mark; /* addietro anche l'intestazione del chunk: non esiste orfana */
         if (!w->err) w->err = FMLX_HTTP_ERR_BUF_SMALL;
     }
+    /* Streaming reale: ogni evento COMPLETO esce subito (TTFT = primo token) e il tetto `cap`
+     * non è un tetto sulla lunghezza della risposta. Senza sink la risposta resta in memoria. */
+    if (w->err == FMLX_HTTP_OK && w->sink) (void)fmlx_http_flush(w);
     return w->err;
 }
 

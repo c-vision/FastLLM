@@ -1,17 +1,25 @@
 /* fmlx_engine_gen.c — render del prompt, prefill/decode via l'ABI `llmengine`, e l'iteratore
  * di eventi che il layer ② consuma.
  *
- * UN SOLO decode. `generate_ids` produce l'intera sequenza (l'ABI MLX non espone un callback
- * per-token); qui si decodifica UNA volta e si emettono i pezzi a valle. È una scelta, non un
- * ripiego: decodificare i prefissi token per token farebbe passare per il filo byte UTF-8
- * spezzati a metà, che il writer JSON rifiuta — la risposta corretta è tenere l'intero testo e
- * tagliarlo SOLO sui confini di codepoint. Il risultato su filo è SSE valido con più `delta`.
+ * DECODE INCREMENTALE. L'ABI è ids-only e `generate_ids(s, 1, eos, out)` è il modo previsto per
+ * il server (`llm_mlx_session_generate.c`: "il server chiama generate(s, 1) in un ciclo"): qui
+ * si genera UN token per chiamata dell'iteratore, così il testo esce appena prodotto (TTFT =
+ * primo token) invece che a generazione finita. Dopo ogni token si decodifica l'INTERA sequenza
+ * e si consegna solo la coda nuova tagliata su confini di codepoint: è l'unico modo di non far
+ * passare per il filo byte UTF-8 spezzati a metà, che il writer JSON rifiuta.
+ *
+ * STOP SEQUENCES. Con l'emissione token-live una stop può attraversare più token: si tiene
+ * indietro la coda che può essere il PREFISSO di una stop (holdback) e si tronca al primo match
+ * completo, esattamente come farebbe il decode batch.
  */
 #include "fmlx_engine_internal.h"
+
+#include "llmjinja.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 /* ---- contenuto dei messaggi ---- */
 
@@ -77,6 +85,121 @@ static int is_system_role(const char *role, size_t rn) {
            (rn == 9 && !memcmp(role, "developer", 9));
 }
 
+/* ---- render del chat_template REALE (Jinja) ---- */
+
+/* Costruisce un valore stringa dal `content` di un messaggio (stringa o array di blocchi). */
+static llmjinja_val *jv_content(const FmlxJsonValue *content) {
+    FmlxSb sb = {0};
+    llmjinja_val *v;
+
+    if (content_text(content, &sb, 0) != 0) {
+        fmlx_sb_free(&sb);
+        return NULL;
+    }
+    v = llmjinja_str(sb.p ? sb.p : "");
+    fmlx_sb_free(&sb);
+    return v;
+}
+
+/* `messages` per il template: il system (fuso da `join_system`) diventa il PRIMO messaggio, i
+ * messaggi di sistema originali si saltano (altrimenti il template li vedrebbe due volte). */
+static llmjinja_val *jv_messages(const FmlxApiChat *c, const char *sys, size_t sys_n) {
+    llmjinja_val *arr = llmjinja_arr();
+
+    if (!arr) return NULL;
+    if (sys_n) {
+        llmjinja_val *m = llmjinja_obj();
+        char *s = malloc(sys_n + 1);
+        if (s) {
+            memcpy(s, sys, sys_n);
+            s[sys_n] = '\0';
+        }
+        llmjinja_obj_set(m, "role", llmjinja_str("system"));
+        llmjinja_obj_set(m, "content", llmjinja_str(s ? s : ""));
+        free(s);
+        llmjinja_arr_push(arr, m);
+    }
+    for (size_t i = 0; c->messages && i < fmlx_json_arr_n(c->messages); i++) {
+        const FmlxJsonValue *msg = fmlx_json_arr_at(c->messages, i);
+        const char *role;
+        size_t rn;
+        llmjinja_val *m, *cv;
+        char *r;
+
+        role_of(msg, &role, &rn);
+        if (!role || is_system_role(role, rn)) continue;
+        m = llmjinja_obj();
+        r = malloc(rn + 1);
+        if (r) {
+            memcpy(r, role, rn);
+            r[rn] = '\0';
+        }
+        llmjinja_obj_set(m, "role", llmjinja_str(r ? r : ""));
+        free(r);
+        cv = jv_content(fmlx_json_obj_get(msg, "content"));
+        llmjinja_obj_set(m, "content", cv ? cv : llmjinja_str(""));
+        llmjinja_arr_push(arr, m);
+    }
+    return arr;
+}
+
+/* `strftime_now(fmt)` di contesto (J_FN): la template Llama-3 la usa per le date. */
+static llmjinja_val *jfn_strftime_now(int n, llmjinja_val **args) {
+    char out[128];
+    const char *fmt = "%d %b %Y";
+    time_t t = time(NULL);
+    struct tm tmv;
+
+    localtime_r(&t, &tmv);
+    if (n >= 1 && args && args[0] && llmjinja_is_str(args[0])) fmt = llmjinja_as_str(args[0]);
+    if (!strftime(out, sizeof out, fmt, &tmv)) out[0] = '\0';
+    return llmjinja_str(out);
+}
+
+/* Render con il template reale del modello. Ritorna 0/-1 (con `err`). Su -1 il chiamante può
+ * ripiegare sul template di famiglia: un costrutto non supportato non deve far fallire la chat. */
+static int render_jinja(const FmlxEngineModel *m, const FmlxApiChat *c, FmlxSb *b, char *err,
+                        size_t errcap) {
+    char errbuf[256] = "";
+    char *sysmem = malloc(1u << 20);
+    FmlxSlice sys = {NULL, 0};
+    llmjinja_val *vars;
+    char *out;
+
+    if (!sysmem) {
+        snprintf(err, errcap, "out of memory building the system prompt");
+        return -1;
+    }
+    if (fmlx_api_join_system(c, sysmem, 1u << 20, &sys) != FMLX_API_OK) {
+        free(sysmem);
+        snprintf(err, errcap, "the system prompt does not fit the render buffer");
+        return -1;
+    }
+    vars = llmjinja_obj();
+    llmjinja_obj_set(vars, "messages", jv_messages(c, sys.p, sys.n));
+    llmjinja_obj_set(vars, "add_generation_prompt", llmjinja_bool(1));
+    if (m->bos[0]) llmjinja_obj_set(vars, "bos_token", llmjinja_str(m->bos));
+    llmjinja_obj_set(vars, "strftime_now", llmjinja_fn_val((llmjinja_fn)jfn_strftime_now));
+    out = llmjinja_render(m->chat_tpl, vars, errbuf, sizeof errbuf);
+    llmjinja_val_free(vars);
+    free(sysmem);
+    if (!out) {
+        if (getenv("FMLX_TEMPLATE_DEBUG"))
+            fprintf(stderr, "[template] Jinja render FALLITO: %s (ripiego di famiglia)\n",
+                    errbuf[0] ? errbuf : "unknown");
+        snprintf(err, errcap, "chat template render failed: %s", errbuf[0] ? errbuf : "unknown");
+        return -1;
+    }
+    if (getenv("FMLX_TEMPLATE_DEBUG"))
+        fprintf(stderr, "[template] Jinja render ok (%zu byte)\n", strlen(out));
+    if (fmlx_sb_cstr(b, out) != 0) {
+        free(out);
+        snprintf(err, errcap, "out of memory building the prompt");
+        return -1;
+    }
+    free(out);
+    return 0;
+}
 /* ---- render del prompt ---- */
 
 int fmlx_engine_render_chat(const FmlxEngineModel *m, const FmlxApiChat *c, FmlxSb *b, char *err,
@@ -85,6 +208,13 @@ int fmlx_engine_render_chat(const FmlxEngineModel *m, const FmlxApiChat *c, Fmlx
     FmlxSlice sys = {NULL, 0};
 
     if (!m || !c || !b) return -1;
+    /* Se il modello porta il suo `chat_template`, si rende QUELLO. Un fallimento (costrutto
+     * Jinja non supportato) non è fatale: si ripiega sul template di famiglia, che è meglio di
+     * un 500 e viene dichiarato nel log del server. */
+    if (m->chat_tpl) {
+        if (render_jinja(m, c, b, err, errcap) == 0) return 0;
+        if (err && errcap) err[0] = '\0';
+    }
     sysmem = malloc(1u << 20);
     if (!sysmem) {
         snprintf(err, errcap, "out of memory building the system prompt");
@@ -192,45 +322,153 @@ static int32_t *tokenize(llmtoken_handle tok, const char *text, int *out_n, char
     return ids;
 }
 
-/* Decodifica la sequenza COMPLETA. Ritorna una stringa malloc (NUL-terminata) + lunghezza. */
-static char *detokenize(llmtoken_handle tok, const int32_t *ids, int n, size_t *out_len) {
-    int need = llmtoken_decode(tok, ids, n, NULL, 0);
-    char *s;
+/* ---- stop sequences ---- */
 
-    if (need < 0) return NULL;
-    s = malloc((size_t)need + 1);
-    if (!s) return NULL;
-    if (llmtoken_decode(tok, ids, n, s, need + 1) != need) {
-        free(s);
-        return NULL;
-    }
-    *out_len = (size_t)need;
-    return s;
-}
+/* Ritorna la lunghezza del più lungo SUFFISSO di `s[0..len)` che è un prefisso PROPRIO di una
+ * stop. È la coda che non si può ancora emettere, perché un token successivo potrebbe
+ * completare la stop. */
+static size_t stop_holdback(const FmlxApiChat *c, const char *s, size_t len) {
+    size_t hb = 0;
 
-/* ---- stop sequences: tronca al primo match e dice quale. ---- */
-
-static size_t apply_stop(const FmlxApiChat *c, char *text, size_t len, const char **which) {
-    size_t best = (size_t)-1;
-    const char *best_p = NULL;
-
+    if (!c) return 0;
     for (uint32_t i = 0; i < c->n_stop; i++) {
-        const char *s = c->stop[i].p;
-        uint32_t sn = c->stop[i].n;
-        if (!s || sn == 0 || sn > len) continue;
-        for (size_t k = 0; k + sn <= len; k++) {
-            if (memcmp(text + k, s, sn) == 0) {
-                if (k < best) {
-                    best = k;
-                    best_p = s;
-                }
+        const char *t = c->stop[i].p;
+        uint32_t tn = c->stop[i].n;
+        if (!t || tn < 2) continue;
+        uint32_t maxp = tn - 1;
+        if ((size_t)maxp > len) maxp = (uint32_t)len;
+        for (uint32_t p = maxp; p > 0; p--) {
+            if ((size_t)p <= len && memcmp(s + len - p, t, p) == 0) {
+                if (p > hb) hb = p;
                 break;
             }
         }
     }
-    if (best == (size_t)-1) return len;
-    *which = best_p;
-    return best;
+    return hb;
+}
+
+static int is_secondary_eos(const FmlxEngineModel *m, int32_t id) {
+    for (int i = 0; i < m->n_eos; i++)
+        if (m->eos_list[i] == id) return 1;
+    return 0;
+}
+
+static int utf8_is_cont(unsigned char c) { return (c & 0xC0) == 0x80; }
+
+/* Ricalcola il testo dell'intera sequenza, decide la stop e consegna la coda nuova (tagliata a
+ * un confine di codepoint) in `g->text`. Ritorna 0/-1. */
+static int text_update(FmlxEngineGen *g, char *err, size_t errcap) {
+    int need = llmtoken_decode(g->m->tok, g->ids, g->n_gen, NULL, 0);
+    char *cur;
+    size_t limit, hb;
+    const char *which = NULL;
+    uint32_t which_n = 0;
+
+    if (need < 0) {
+        snprintf(err, errcap, "the tokenizer could not decode the output");
+        return -1;
+    }
+    cur = malloc((size_t)need + 1);
+    if (!cur) {
+        snprintf(err, errcap, "out of memory decoding the output");
+        return -1;
+    }
+    if (need && llmtoken_decode(g->m->tok, g->ids, g->n_gen, cur, need + 1) != need) {
+        free(cur);
+        snprintf(err, errcap, "the tokenizer produced an inconsistent decode");
+        return -1;
+    }
+    cur[need] = '\0';
+    free(g->full);
+    g->full = cur;
+    g->full_len = (size_t)need;
+
+    /* stop completa: la PRIMA posizione di match vince */
+    limit = g->full_len;
+    if (g->c) {
+        for (uint32_t i = 0; i < g->c->n_stop; i++) {
+            const char *s = g->c->stop[i].p;
+            uint32_t sn = g->c->stop[i].n;
+            if (!s || sn == 0 || (size_t)sn > g->full_len) continue;
+            for (size_t k = 0; k + sn <= g->full_len; k++) {
+                if (memcmp(g->full + k, s, sn) == 0) {
+                    if (k < limit) {
+                        limit = k;
+                        which = s;
+                        which_n = sn;
+                    }
+                    break;
+                }
+            }
+        }
+        if (limit < g->full_len) g->ended = 1;
+    }
+
+    /* Senza una stop completa, si tiene indietro un possibile prefisso di stop. */
+    if (limit == g->full_len) {
+        hb = stop_holdback(g->c, g->full, limit);
+        if (hb <= limit) limit -= hb;
+    }
+
+    /* confine di codepoint: mai consegnare un UTF-8 a metà */
+    while (limit > g->emitted && limit < g->full_len &&
+           utf8_is_cont((unsigned char)g->full[limit]))
+        limit--;
+
+    if (limit > g->emitted) {
+        size_t cnt = limit - g->emitted;
+        char *nb = malloc(cnt);
+        if (!nb) {
+            snprintf(err, errcap, "out of memory buffering the decoded text");
+            return -1;
+        }
+        memcpy(nb, g->full + g->emitted, cnt);
+        free(g->text);
+        g->text = nb;
+        g->text_len = cnt;
+        g->pos = 0;
+        g->emitted = limit;
+    }
+
+    if (g->ended && limit < g->full_len) {
+        /* stop completa: registra quale, per il `stop_sequence` del DONE */
+        if (which)
+            snprintf(g->stop_seq, sizeof g->stop_seq, "%.*s", (int)(which_n < FMLX_API_MAX_NAME - 1
+                                                                        ? which_n
+                                                                        : FMLX_API_MAX_NAME - 1),
+                     which);
+        g->finish = FMLX_API_FINISH_STOPSEQ;
+    }
+    return 0;
+}
+
+/* Un passo di decode: esattamente UN token. */
+static int advance(FmlxEngineGen *g, char *err, size_t errcap) {
+    int got;
+    int32_t id = 0;
+
+    if (g->n_gen >= g->max_new) {
+        g->finish = FMLX_API_FINISH_LENGTH;
+        g->ended = 1;
+        return 0;
+    }
+    got = g->m->eng->generate_ids(g->session, 1, g->m->eos, &id);
+    if (got < 0) {
+        snprintf(err, errcap, "the engine failed while generating");
+        return -1;
+    }
+    if (got == 0) { /* l'engine ha incontrato l'eos primario e non l'ha emesso */
+        g->finish = FMLX_API_FINISH_STOP;
+        g->ended = 1;
+        return 0;
+    }
+    if (is_secondary_eos(g->m, id)) { /* eos della lista non gestito dall'ABI */
+        g->finish = FMLX_API_FINISH_STOP;
+        g->ended = 1;
+        return 0;
+    }
+    g->ids[g->n_gen++] = id;
+    return text_update(g, err, errcap);
 }
 
 /* ---- avvio della generazione ---- */
@@ -239,8 +477,6 @@ static FmlxEngineGen *start(const FmlxEngineModel *m, const int32_t *ids, int n_
                             int max_tokens, const LlmEngineLlmSampling *sp, const FmlxApiChat *c,
                             char *err, size_t errcap) {
     LlmEngineLlmSession s;
-    int32_t *out;
-    int got;
     FmlxEngineGen *g;
 
     if (n_prompt <= 0) {
@@ -261,47 +497,25 @@ static FmlxEngineGen *start(const FmlxEngineModel *m, const int32_t *ids, int n_
         snprintf(err, errcap, "the engine failed to ingest the prompt");
         return NULL;
     }
-    out = malloc((size_t)max_tokens * sizeof *out);
-    if (!out) {
-        m->eng->destroy_session(s);
-        snprintf(err, errcap, "out of memory for %d output tokens", max_tokens);
-        return NULL;
-    }
-    got = m->eng->generate_ids(s, max_tokens, m->eos, out);
-    m->eng->destroy_session(s);
-    if (got < 0) {
-        free(out);
-        snprintf(err, errcap, "the engine failed while generating");
-        return NULL;
-    }
-    if (got > max_tokens) got = max_tokens; /* contratto: mai più del richiesto */
-
     g = calloc(1, sizeof *g);
     if (!g) {
-        free(out);
+        m->eng->destroy_session(s);
         snprintf(err, errcap, "out of memory for the generation state");
         return NULL;
     }
-    g->prompt_tokens = (uint64_t)n_prompt;
-    g->n_out = got;
-    g->finish = got >= max_tokens ? FMLX_API_FINISH_LENGTH : FMLX_API_FINISH_STOP;
-    g->text = detokenize(m->tok, out, got, &g->text_len);
-    free(out);
-    if (!g->text) {
+    g->ids = malloc((size_t)max_tokens * sizeof *g->ids);
+    if (!g->ids) {
+        m->eng->destroy_session(s);
         free(g);
-        snprintf(err, errcap, "the tokenizer could not decode the output");
+        snprintf(err, errcap, "out of memory for %d output tokens", max_tokens);
         return NULL;
     }
-    if (c) {
-        const char *which = NULL;
-        size_t cut = apply_stop(c, g->text, g->text_len, &which);
-        if (cut < g->text_len) {
-            g->text_len = cut;
-            g->text[cut] = '\0';
-            g->finish = FMLX_API_FINISH_STOPSEQ;
-            if (which) snprintf(g->stop_seq, sizeof g->stop_seq, "%s", which);
-        }
-    }
+    g->m = m;
+    g->session = s;
+    g->c = c;
+    g->max_new = max_tokens;
+    g->prompt_tokens = (uint64_t)n_prompt;
+    g->finish = FMLX_API_FINISH_LENGTH;
     return g;
 }
 
@@ -344,7 +558,8 @@ FmlxEngineGen *fmlx_engine_chat(FmlxEngineModel *m, const FmlxApiChat *c, char *
 
 FmlxEngineGen *fmlx_engine_prompt(FmlxEngineModel *m, const char *prompt, int max_tokens,
                                   float temperature, float top_p, int top_k, float presence,
-                                  float frequency, int64_t seed, char *err, size_t errcap) {
+                                  float frequency, int64_t seed, const FmlxApiChat *c, char *err,
+                                  size_t errcap) {
     int32_t *ids;
     int n = 0;
     LlmEngineLlmSampling sp;
@@ -361,7 +576,7 @@ FmlxEngineGen *fmlx_engine_prompt(FmlxEngineModel *m, const char *prompt, int ma
     sp.presence_penalty = presence;
     sp.frequency_penalty = frequency;
     sp.seed = seed;
-    g = start(m, ids, n, max_tokens, &sp, NULL, err, errcap);
+    g = start(m, ids, n, max_tokens, &sp, c, err, errcap);
     free(ids);
     return g;
 }
@@ -404,27 +619,47 @@ static size_t utf8_step(const char *s, size_t i, size_t len) {
 FmlxApiGenSt fmlx_engine_next(void *ctx, FmlxApiEvent *ev, FmlxApiErrCtx *err) {
     FmlxEngineGen *g = ctx;
 
-    (void)err;
     if (!g || !ev) return FMLX_API_GEN_ERR;
-    if (g->pos < g->text_len) {
-        size_t end = g->pos;
-        while (end < g->text_len && end - g->pos < FMLX_ENGINE_CHUNK)
-            end = utf8_step(g->text, end, g->text_len);
-        ev->ev = FMLX_API_EV_TEXT;
-        ev->text = g->text + g->pos;
-        ev->n = (uint32_t)(end - g->pos);
-        g->pos = end;
-        return FMLX_API_GEN_MORE;
+    if (g->err) {
+        if (err) {
+            err->err = FMLX_API_INTERNAL;
+            err->message = "the engine failed while generating";
+        }
+        return FMLX_API_GEN_ERR;
+    }
+    for (;;) {
+        if (g->pos < g->text_len) {
+            size_t end = g->pos;
+            while (end < g->text_len && end - g->pos < FMLX_ENGINE_CHUNK)
+                end = utf8_step(g->text, end, g->text_len);
+            ev->ev = FMLX_API_EV_TEXT;
+            ev->text = g->text + g->pos;
+            ev->n = (uint32_t)(end - g->pos);
+            g->pos = end;
+            return FMLX_API_GEN_MORE;
+        }
+        if (g->ended) break;
+        {
+            char e[256] = "";
+            if (advance(g, e, sizeof e) != 0) {
+                g->err = 1;
+                if (err) {
+                    err->err = FMLX_API_INTERNAL;
+                    err->message = "the engine failed while generating";
+                }
+                return FMLX_API_GEN_ERR;
+            }
+        }
     }
     if (!g->done) {
         g->done = 1;
         ev->ev = FMLX_API_EV_DONE;
         ev->finish = g->finish;
         ev->prompt_tokens = g->prompt_tokens;
-        ev->completion_tokens = (uint64_t)g->n_out;
+        ev->completion_tokens = (uint64_t)g->n_gen;
         ev->cached_tokens = 0;
-        ev->stop_sequence = g->finish == FMLX_API_FINISH_STOPSEQ && g->stop_seq[0] ? g->stop_seq
-                                                                                   : NULL;
+        ev->stop_sequence =
+            g->finish == FMLX_API_FINISH_STOPSEQ && g->stop_seq[0] ? g->stop_seq : NULL;
         return FMLX_API_GEN_MORE;
     }
     return FMLX_API_GEN_END;
@@ -432,6 +667,10 @@ FmlxApiGenSt fmlx_engine_next(void *ctx, FmlxApiEvent *ev, FmlxApiErrCtx *err) {
 
 void fmlx_engine_gen_free(FmlxEngineGen *g) {
     if (!g) return;
+    if (g->session && g->m && g->m->eng && g->m->eng->destroy_session)
+        g->m->eng->destroy_session(g->session);
+    free(g->ids);
+    free(g->full);
     free(g->text);
     free(g);
 }

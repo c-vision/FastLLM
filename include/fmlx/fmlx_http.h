@@ -135,6 +135,13 @@ int fmlx_http_expects_continue(const FmlxHttpReq *r);
 
 /* ---- Risposta ------------------------------------------------------------- */
 
+/* Un sink per lo streaming reale: quando è impostato, il writer SVUOTA il buffer verso il
+ * chiamante (tipicamente un `send` sul socket) dopo ogni evento SSE completo, invece di
+ * accumulare l'intera risposta. NULL = comportamento storico (tutto in memoria, il chiamante
+ * scrive dopo). Ritorna 0 se i byte sono stati presi, -1 su errore (client disconnesso): il
+ * writer entra in errore e la generazione si ferma, senza accumulare. */
+typedef int (*FmlxHttpSink)(void *ctx, const char *p, size_t n);
+
 /* Il writer della risposta scrive la SOLA testata; il corpo lo scrive il chiamante nello
  * stesso buffer o subito dopo. `Content-Length` è scritto da `body_len`: non esiste una
  * chiamata che lasci scegliere al chiamante un valore incoerente col corpo. */
@@ -143,6 +150,9 @@ typedef struct {
     size_t cap, len;
     int chunked; /* 1 = si scrive `Transfer-Encoding: chunked` al posto di CL (SSE) */
     FmlxHttpStatus err;
+    /* Sink opzionale per lo streaming incrementale (vedi `FmlxHttpSink`). */
+    FmlxHttpSink sink;
+    void *sink_ctx;
 } FmlxHttpRes;
 
 void fmlx_http_res_init(FmlxHttpRes *w, char *buf, size_t cap);
@@ -158,6 +168,11 @@ FmlxHttpStatus fmlx_http_sse_write(FmlxHttpRes *w, const char *event, FmlxSlice 
 
 /* Chiude lo streaming: `0\r\n\r\n` se chunked, altrimenti nessun byte. */
 FmlxHttpStatus fmlx_http_sse_end(FmlxHttpRes *w);
+
+/* Svuota il buffer verso `sink` (se impostato) e riparte da zero. No-op senza sink o a buffer
+ * vuoto. `fmlx_http_sse_write` la chiama da sé dopo ogni evento; il chiamante la chiama alla
+ * fine per consegnare la coda. */
+FmlxHttpStatus fmlx_http_flush(FmlxHttpRes *w);
 
 /* ---- Piccole utilities condivise (niente di più: sono il motivo per cui questo header
  * non dipende da una libreria di supporto) ---- */

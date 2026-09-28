@@ -286,6 +286,13 @@ FmlxApiErr fmlx_api_openai_completion(const FmlxApiChat *c, const FmlxApiMeta *m
 FmlxApiErr fmlx_api_openai_stream(const FmlxApiChat *c, const FmlxApiMeta *m, FmlxApiNext next,
                                   void *gen_ctx, FmlxHttpRes *w);
 
+/* `/v1/completions` (testo grezzo): `object:"text_completion"`, `choices[].text`. Stessa
+ * disciplina del chat (DONE, [DONE], chiusura chunked) ma il formato è quello legacy. */
+FmlxApiErr fmlx_api_openai_completion_text(const FmlxApiChat *c, const FmlxApiMeta *m,
+                                           const FmlxApiAcc *a, FmlxJsonW *w);
+FmlxApiErr fmlx_api_openai_stream_text(const FmlxApiChat *c, const FmlxApiMeta *m, FmlxApiNext next,
+                                       void *gen_ctx, FmlxHttpRes *w);
+
 /* ---- 7. Adapter Anthropic ---- */
 
 FmlxApiErr fmlx_api_anthropic_parse(const FmlxJsonValue *root, FmlxApiChat *c, FmlxApiErrCtx *err);

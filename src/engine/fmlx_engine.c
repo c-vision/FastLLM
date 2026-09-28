@@ -119,10 +119,14 @@ static void set_err(char *err, size_t errcap, const char *fmt, const char *a) {
 
 /* ---- eos: config.json, poi generation_config.json ---- */
 
-static int32_t read_eos(const char *dir) {
+/* Riempie `out` con la lista eos (al più FMLX_ENGINE_EOS_MAX) e ritorna il numero letti.
+ * In config.json/generation_config.json `eos_token_id` può essere un intero o una LISTA:
+ * la lista HF significa "fermati su UNO QUALSIASI". L'ABI MLX ne accetta uno solo: si
+ * conserva l'INTERA lista, e il consumer fa scattare gli eos secondari token per token. */
+static int read_eos_list(const char *dir, int32_t *out, int cap) {
     char path[FMLX_ENGINE_PATH_MAX];
     const char *files[] = {"config.json", "generation_config.json"};
-    int32_t eos = -1;
+    int n = 0;
 
     for (size_t i = 0; i < sizeof files / sizeof files[0]; i++) {
         char *txt;
@@ -144,32 +148,79 @@ static int32_t read_eos(const char *dir) {
         if (v) {
             int64_t x;
             if (fmlx_json_as_i64(v, &x)) {
-                if (x >= 0 && x <= INT32_MAX) eos = (int32_t)x;
+                if (x >= 0 && x <= INT32_MAX && n < cap) out[n++] = (int32_t)x;
             } else if (v->type == FMLX_JSON_ARR) {
-                /* La lista HF significa "fermati su UNO QUALSIASI". L'ABI MLX ne accetta uno:
-                 * l'ULTIMO è la scelta pratica (nei modelli instruct è il token di fine turno,
-                 * es. `<|eot_id|>` per Llama-3, mentre i primi sono fine-testo/fine-sequenza). */
-                size_t n = fmlx_json_arr_n(v);
-                for (size_t k = 0; k < n; k++) {
+                size_t na = fmlx_json_arr_n(v);
+                for (size_t k = 0; k < na && n < cap; k++) {
                     const FmlxJsonValue *e = fmlx_json_arr_at(v, k);
                     int64_t x2;
-                    if (e && fmlx_json_as_i64(e, &x2) && x2 >= 0 && x2 <= INT32_MAX) eos = (int32_t)x2;
+                    if (e && fmlx_json_as_i64(e, &x2) && x2 >= 0 && x2 <= INT32_MAX)
+                        out[n++] = (int32_t)x2;
                 }
             }
         }
         fmlx_json_doc_free(&doc);
         free(txt);
-        if (eos >= 0) break;
+        if (n > 0) break;
     }
-    return eos;
+    return n;
+}
+
+/* Legge `bos_token` (stringa o nodo {content}) da tokenizer_config.json / config.json.
+ * Solo la forma stringa viene copiata: la template la rende come testo. */
+static void read_bos(const char *dir, char *out, size_t cap) {
+    char path[FMLX_ENGINE_PATH_MAX];
+    const char *files[] = {"tokenizer_config.json", "config.json"};
+
+    out[0] = '\0';
+    for (size_t i = 0; i < sizeof files / sizeof files[0]; i++) {
+        char *txt;
+        size_t len;
+        FmlxJsonDoc doc;
+        const FmlxJsonValue *root, *v;
+
+        if (snprintf(path, sizeof path, "%s/%s", dir, files[i]) >= (int)sizeof path) continue;
+        txt = read_file(path, &len);
+        if (!txt) continue;
+        fmlx_json_doc_init(&doc);
+        if (fmlx_json_parse(txt, len, 0, &doc) != FMLX_JSON_OK) {
+            fmlx_json_doc_free(&doc);
+            free(txt);
+            continue;
+        }
+        root = fmlx_json_root(&doc);
+        v = fmlx_json_obj_get(root, "bos_token");
+        if (v && v->type == FMLX_JSON_STR) {
+            const char *s = fmlx_json_str(v);
+            size_t sn = fmlx_json_str_len(v);
+            if (s && sn < cap) {
+                memcpy(out, s, sn);
+                out[sn] = '\0';
+            }
+        } else if (v && v->type == FMLX_JSON_OBJ) {
+            const FmlxJsonValue *ct = fmlx_json_obj_get(v, "content");
+            if (ct && ct->type == FMLX_JSON_STR) {
+                const char *s = fmlx_json_str(ct);
+                size_t sn = fmlx_json_str_len(ct);
+                if (s && sn < cap) {
+                    memcpy(out, s, sn);
+                    out[sn] = '\0';
+                }
+            }
+        }
+        fmlx_json_doc_free(&doc);
+        free(txt);
+        if (out[0]) return;
+    }
 }
 
 /* ---- chat template ---- */
 
 /* Estrae `chat_template` (stringa o lista di {name,template}) e ne riconosce la FAMIGLIA.
  * Un template sconosciuto NON è un errore: si usa il fallback generico e lo si dice nel log
- * del server. Qui si decide solo la famiglia, senza fingere di interpretare Jinja. */
-static FmlxTplKind detect_template(const char *dir) {
+ * del server. Inoltre ritorna una COPIA malloc del template (per il motore Jinja) con la sua
+ * lunghezza; `*out_tpl` resta NULL se il modello non ne ha uno. */
+static FmlxTplKind detect_template(const char *dir, char **out_tpl, size_t *out_len) {
     char path[FMLX_ENGINE_PATH_MAX];
     char *txt;
     size_t len;
@@ -179,6 +230,8 @@ static FmlxTplKind detect_template(const char *dir) {
     size_t tpl_len = 0;
     FmlxTplKind kind = FMLX_TPL_GENERIC;
 
+    if (out_tpl) *out_tpl = NULL;
+    if (out_len) *out_len = 0;
     if (snprintf(path, sizeof path, "%s/tokenizer_config.json", dir) >= (int)sizeof path)
         return kind;
     txt = read_file(path, &len);
@@ -213,7 +266,9 @@ static FmlxTplKind detect_template(const char *dir) {
                 kind = FMLX_TPL_LLAMA3;
             else if (strstr(tmp, "<|im_start|>"))
                 kind = FMLX_TPL_CHATML;
-            free(tmp);
+            if (out_tpl) *out_tpl = tmp;
+            else free(tmp);
+            if (out_len) *out_len = tpl_len;
         }
     }
     fmlx_json_doc_free(&doc);
@@ -319,8 +374,13 @@ int fmlx_engine_load(const char *cache_root, const char *name, FmlxEngineModel *
                  out->dir);
         return -1;
     }
-    out->eos = read_eos(out->dir);
-    out->tpl = detect_template(out->dir);
+    out->n_eos = read_eos_list(out->dir, out->eos_list, FMLX_ENGINE_EOS_MAX);
+    /* L'ABI accetta UN eos: si passa l'ULTIMO della lista (nei modelli instruct è il token di
+     * fine turno, es. `<|eot_id|>`, mentre i primi sono fine-testo/fine-sequenza). Gli altri
+     * restano in `eos_list` e li ferma il consumer token per token. */
+    out->eos = out->n_eos > 0 ? out->eos_list[out->n_eos - 1] : -1;
+    out->tpl = detect_template(out->dir, &out->chat_tpl, &out->chat_tpl_len);
+    read_bos(out->dir, out->bos, sizeof out->bos);
 
     out->eng = llmengine_llm_engine_mlx();
     if (!out->eng || !out->eng->load_model) {
@@ -372,6 +432,34 @@ void fmlx_engine_shutdown(void) {
         if (g_slot[i].m.eng && g_slot[i].m.eng->free_model && g_slot[i].m.model)
             g_slot[i].m.eng->free_model(g_slot[i].m.model);
         if (g_slot[i].m.tok) llmtoken_free(g_slot[i].m.tok);
+        free(g_slot[i].m.chat_tpl);
         g_slot[i].used = 0;
     }
+}
+
+int fmlx_engine_resident_count(void) {
+    int n = 0;
+    for (int i = 0; i < FMLX_ENGINE_MODELS_MAX; i++)
+        if (g_slot[i].used) n++;
+    return n;
+}
+
+const char *fmlx_engine_resident_name(int i) {
+    if (i < 0 || i >= FMLX_ENGINE_MODELS_MAX || !g_slot[i].used) return NULL;
+    return g_slot[i].m.name;
+}
+
+int fmlx_engine_unload(const char *name) {
+    if (!name || !*name) return 0;
+    for (int i = 0; i < FMLX_ENGINE_MODELS_MAX; i++) {
+        if (!g_slot[i].used || strcmp(g_slot[i].m.name, name) != 0) continue;
+        if (g_slot[i].m.eng && g_slot[i].m.eng->free_model && g_slot[i].m.model)
+            g_slot[i].m.eng->free_model(g_slot[i].m.model);
+        if (g_slot[i].m.tok) llmtoken_free(g_slot[i].m.tok);
+        free(g_slot[i].m.chat_tpl);
+        memset(&g_slot[i].m, 0, sizeof g_slot[i].m);
+        g_slot[i].used = 0;
+        return 1;
+    }
+    return 0;
 }

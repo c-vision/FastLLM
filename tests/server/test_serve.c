@@ -440,11 +440,13 @@ static void case_engine_refusals(void) {
        "modello assente -> 404 model_not_found (%d)\n%s", r_status(&r), r.s);
     ck_length(&r);
 
-    /* Le rotte NON ancora cablate restano 501: l'elenco è la tabella del router, non memoria. */
+    /* Le rotte NON ancora cablate restano 501: l'elenco è la tabella del router, non memoria.
+     * `load`/`unload`/`status` NON sono più qui: il motore li espone via l'ABI e sono cablati
+     * (provati sotto). `responses`/`embeddings`/`metrics` restano 501 col loro codice stabile:
+     * le embeddings non hanno un punto d'ingresso nell'ABI (nessun CAP_EMBED). */
     {
         static const struct { const char *path; int post; } R[] = {
-            {"/v1/responses", 1},     {"/v1/embeddings", 1},    {"/v1/models/load", 1},
-            {"/v1/models/unload", 1}, {"/v1/models/status", 0}, {"/metrics", 0},
+            {"/v1/responses", 1}, {"/v1/embeddings", 1}, {"/metrics", 0},
         };
         size_t i;
         for (i = 0; i < sizeof R / sizeof R[0]; i++) {
@@ -459,6 +461,24 @@ static void case_engine_refusals(void) {
             ck_length(&r);
         }
     }
+
+    /* Amministrazione modelli: `status` elenca i residenti (vuoto = nessuno), `unload` di un
+     * non-residente è un 200 `not_loaded`, `load` di un nome inesistente è il 404 del modello. */
+    CK(ask(rq("GET /v1/models/status", NULL, NULL), &o, &b, &r) == FMLX_SERVE_OK,
+       "st status");
+    CK(r_status(&r) == 200 && HAS(r_body(&r), "\"object\":\"list\""),
+       "/v1/models/status -> 200 list (%d)\n%s", r_status(&r), r_body(&r));
+    ck_length(&r);
+    CK(ask(rq("POST /v1/models/unload", NULL, "{\"model\":\"m\"}"), &o, &b, &r) == FMLX_SERVE_OK,
+       "st unload");
+    CK(r_status(&r) == 200 && HAS(r_body(&r), "\"state\":\"not_loaded\""),
+       "/v1/models/unload -> 200 not_loaded (%d)\n%s", r_status(&r), r_body(&r));
+    ck_length(&r);
+    CK(ask(rq("POST /v1/models/load", NULL, "{\"model\":\"m\"}"), &o, &b, &r) == FMLX_SERVE_OK,
+       "st load");
+    CK(r_status(&r) == 404 && HAS(r_body(&r), "model_not_found"),
+       "/v1/models/load di un nome inesistente -> 404 (%d)\n%s", r_status(&r), r_body(&r));
+    ck_length(&r);
 
     /* `/v1/completions` genera anche lei: stesso 404 se il modello non c'è. */
     CK(ask(rq("POST /v1/completions", NULL, "{\"model\":\"m\",\"prompt\":\"x\"}"), &o, &b, &r) ==

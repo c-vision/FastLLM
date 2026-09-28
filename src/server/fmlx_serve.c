@@ -55,6 +55,8 @@ int fmlx_serve_buf_init(FmlxServeBuf *b, size_t resp_cap, size_t repos_cap) {
     }
     b->resp_cap = resp_cap;
     b->repos_cap = repos_cap;
+    b->sink = NULL;
+    b->sink_ctx = NULL;
     return 0;
 }
 
@@ -86,6 +88,10 @@ static int write_all(int fd, const char *p, size_t n) {
     }
     return 0;
 }
+
+/* Il sink dello streaming: i byte SSE escono sul socket appena il writer li consegna. `ctx` è
+ * l'fd della connessione, che vive per tutta `serve_conn`. */
+static int conn_sink(void *ctx, const char *p, size_t n) { return write_all(*(int *)ctx, p, n); }
 
 static void logf(FILE *log, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 
@@ -241,11 +247,27 @@ static void serve_conn(int fd, const FmlxServeOpts *o, FmlxServeBuf *sbuf, Conn 
             return;
         }
 
-        /* 3. La risposta, che è DECISA altrove. */
+        /* 3. La risposta, che è DECISA altrove. Il sink è impostato SOLO per questa risposta:
+         * `gen_stream` lo usa per consegnare i token appena generati, e `fmlx_serve_respond`
+         * ritorna FMLX_SERVE_STREAMED dicendo "già fatto". */
         body = cn->buf + req.body_off;
+        sbuf->sink = conn_sink;
+        sbuf->sink_ctx = &fd;
         st = fmlx_serve_respond(&req, body, need, o, sbuf, &out_len, &ka);
+        sbuf->sink = NULL;
+        sbuf->sink_ctx = NULL;
         (*req_no)++;
         log_target(&req.target, tgt, sizeof tgt);
+        if (st == FMLX_SERVE_STREAMED) {
+            logf(log, "#%u %.*s %s -> stream consegnato al client", *req_no, (int)req.method.n,
+                 req.method.p, tgt);
+            used = req.head_len + need;
+            if (used > cn->len) used = cn->len;
+            memmove(cn->buf, cn->buf + used, cn->len - used);
+            cn->len -= used;
+            if (!ka) return;
+            continue;
+        }
         if (st != FMLX_SERVE_OK || !out_len) {
             logf(log, "%.*s %s -> nessuna risposta (%s): connessione chiusa", (int)req.method.n,
                  req.method.p, tgt, fmlx_serve_status_str(st));

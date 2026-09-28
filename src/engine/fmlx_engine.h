@@ -55,19 +55,28 @@ int fmlx_engine_count_tokens(FmlxEngineModel *m, const FmlxApiChat *c, int *out,
  * irraggiungibile, prompt non tokenizzabile, decode fallito). */
 FmlxEngineGen *fmlx_engine_chat(FmlxEngineModel *m, const FmlxApiChat *c, char *err, size_t errcap);
 
-/* Avvia una generazione da PROMPT GREZZO (`/v1/completions`): nessun chat template. */
+/* Avvia una generazione da PROMPT GREZZO (`/v1/completions`): nessun chat template. `c` serve
+ * solo per le stop sequences (può essere NULL). */
 FmlxEngineGen *fmlx_engine_prompt(FmlxEngineModel *m, const char *prompt, int max_tokens,
                                   float temperature, float top_p, int top_k, float presence,
-                                  float frequency, int64_t seed, char *err, size_t errcap);
+                                  float frequency, int64_t seed, const FmlxApiChat *c, char *err,
+                                  size_t errcap);
 
-/* Iteratore compatibile con `FmlxApiNext`. Emette TEXT a pezzi (boundary UTF-8 rispettati) e
- * un solo DONE finale. `ctx` è il `FmlxEngineGen*`. */
+/* Iteratore compatibile con `FmlxApiNext`. Genera UN token per chiamata (decode incrementale),
+ * emette TEXT a pezzi (boundary UTF-8 rispettati) e un solo DONE finale. `ctx` è il
+ * `FmlxEngineGen*`. */
 FmlxApiGenSt fmlx_engine_next(void *ctx, FmlxApiEvent *ev, FmlxApiErrCtx *err);
 
 void fmlx_engine_gen_free(FmlxEngineGen *g);
 
 /* Libera la cache residente (per i test e per uno shutdown pulito). */
 void fmlx_engine_shutdown(void);
+
+/* Introspezione della cache residente (per `/v1/models/status`, `load`, `unload`). */
+int fmlx_engine_resident_count(void);
+const char *fmlx_engine_resident_name(int i); /* NULL fuori range */
+/* Scarica il modello residente con quel nome. Ritorna 1 se c'era, 0 se non residente. */
+int fmlx_engine_unload(const char *name);
 
 #ifdef __cplusplus
 }

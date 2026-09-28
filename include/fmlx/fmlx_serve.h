@@ -72,12 +72,17 @@ typedef struct {
 } FmlxServeOpts;
 
 /* La memoria del server. Il `resp` è DOVE SIAMO DECISI di fallire: un `/v1/models` con più
- * byte di `resp_cap` NON viene tagliato, diventa un 500 (vedi il comment nel .c). */
+ * byte di `resp_cap` NON viene tagliato, diventa un 500 (vedi il comment nel .c).
+ * `sink`/`sink_ctx` (opzionali): se impostati, una risposta STREAMING viene consegnata
+ * incrementalmente al chiamante (`fmlx_serve_respond` ritorna FMLX_SERVE_STREAMED e
+ * `*out_len` = 0) invece di essere accumulata per intero. */
 typedef struct {
     char *resp;
     size_t resp_cap;
     FmlxHfRepo *repos;
     size_t repos_cap;
+    FmlxHttpSink sink;
+    void *sink_ctx;
 } FmlxServeBuf;
 
 /* Mallocà i buffer. `repos_cap` 0 = FMLX_HF_CATALOG_REPOS_MAX. Ritorna 0, o -1 con `errno`.
@@ -100,7 +105,8 @@ typedef enum {
      * accorgersi che l'interfaccia nominata da `--host` su questa macchina non c'è. */
     FMLX_SERVE_ADDR_IN_USE = 3, /* EADDRINUSE: qualcun altro ascolta già su quella porta */
     FMLX_SERVE_NO_PERM = 4,     /* EACCES: porta < 1024 senza privilegi (o sandbox) */
-    FMLX_SERVE_BIND_FAILED = 5  /* ogni altro diniego di bind/listen: `errno` è nel log */
+    FMLX_SERVE_BIND_FAILED = 5, /* ogni altro diniego di bind/listen: `errno` è nel log */
+    FMLX_SERVE_STREAMED = 6     /* risposta già consegnata via `sink`: nulla da scrivere */
 } FmlxServeSt;
 
 const char *fmlx_serve_status_str(FmlxServeSt s);
