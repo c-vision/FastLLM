@@ -1,4 +1,4 @@
-/* fmlx_cli.h — il binario `fastmlx`: argv, `pull`, e ciò che il motore non ha ancora (piano §10.3, §13).
+/* fmlx_cli.h — il binario `fastllm`: argv, `pull`, e ciò che il motore non ha ancora (piano §10.3, §13).
 
  * Questa lane NON decide niente sui byte: le regole del cache stanno nella lane hf, il trasporto in
  * curl. Qui vivono DUE cose, ed è il motivo per cui esiste una lane separata:
@@ -81,9 +81,15 @@ typedef struct {
     char verb[16];
     char repo[FMLX_HF_PATH_MAX]; /* l'argomento posizionale: vuoto se il verbo non ne vuole */
     char prompt[FMLX_CLI_PROMPT_MAX]; /* il SECONDO posizionale, solo di `run`: il prompt one-shot */
+    char path[FMLX_HF_PATH_MAX]; /* il SECONDO posizionale di `add`: il percorso del modello */
+    char mmproj[FMLX_HF_PATH_MAX]; /* --mmproj di `add`: il proiettore di un VLM/OCR */
+    char modality[16];             /* --modality di `add`: chat|vlm|ocr|audio (default chat) */
+    int purge;                     /* --purge di `rm`: cancella anche i file, non solo la voce */
     const char *revision;        /* default "main": il default di Hugging Face, non una scelta nostra */
     const char *system;          /* --system di run/chat: il testo di sistema, NULL se assente */
     long long max_tokens;        /* --max-tokens di run/chat: 0 = il default del motore */
+    int show_think;              /* --think di run/chat: mostra il ragionamento (attenuato) */
+    int offload_experts;         /* --offload-experts: streama gli esperti MoE da disco (niente env) */
     FmlxPullOpts pull;
     FmlxServeOpts serve; /* le opzioni di `serve` stanno LÌ: una bandiera che esiste a CLI deve
                           * esistere anche nel server, o sarebbe una bandiera che mente (§1.1) */
@@ -109,7 +115,7 @@ FmlxCliStatus fmlx_chat_exec(const FmlxCliArgs *a, FILE *out, FILE *err);
 
 /* ---- ps ---- */
 
-/* `ps`: se un `serve` è in ascolto sulla porta nota (`--port`/`FASTMLX_PORT`, default 8000) e quali
+/* `ps`: se un `serve` è in ascolto sulla porta nota (`--port`/`FASTLLM_PORT`, default 8000) e quali
  * modelli sono residenti (interrogando `/v1/models/status`). La cache residente vive NEL processo del
  * server: questo verbo la OSSERVA via HTTP, non la possiede — è il criterio onesto finché non esiste
  * un registro di processi esterno. Nessun server in ascolto NON è un fallimento: è la risposta. */
@@ -123,6 +129,22 @@ FmlxCliStatus fmlx_ps_exec(const FmlxCliArgs *a, FILE *out, FILE *err);
  * Con `a->quiet` una riga per repo (id e basta): la forma per i parse di una shell.
  * `out`/`err` separate come per il `pull`: l'elenco è dato, i problemi no. */
 FmlxCliStatus fmlx_models_exec(const FmlxCliArgs *a, FILE *out, FILE *err);
+
+/* ---- registro locale (stile Ollama) — src/cli/fmlx_registry.c ---- */
+
+/* `add <nome> <path> [--mmproj <p>] [--modality chat|vlm|ocr|audio]`: registra un modello locale
+ * per percorso (dir MLX, `.gguf` ds4, o VLM con mmproj). Ri-aggiungere un nome lo aggiorna. */
+FmlxCliStatus fmlx_registry_add_exec(const FmlxCliArgs *a, FILE *out, FILE *err);
+/* `rm <nome|#n> [--purge]`: toglie la voce dal registro; `--purge` cancella anche i file. */
+FmlxCliStatus fmlx_registry_rm_exec(const FmlxCliArgs *a, FILE *out, FILE *err);
+/* `show <nome|#n>`: i dettagli di una voce. */
+FmlxCliStatus fmlx_registry_show_exec(const FmlxCliArgs *a, FILE *out, FILE *err);
+/* `list`: registro NUMERATO + i repo del cache HF non registrati. */
+FmlxCliStatus fmlx_registry_list_exec(const FmlxCliArgs *a, FILE *out, FILE *err);
+/* Risolve `<nome|#n>` dal registro: 1 = trovato (path/mmproj/modality scritti), 0 = non registrato.
+ * Usato da `run`/`chat`/`serve` per accettare un modello per nome o per numero. */
+int fmlx_registry_resolve(const char *spec, char *out_path, size_t cap, char *out_mmproj,
+                          size_t mcap, char *out_modality, size_t modcap);
 
 /* ---- doctor ---- */
 

@@ -271,7 +271,7 @@ add_test(NAME tools COMMAND test_tools)
 add_library(fmlx_cli STATIC src/cli/fmlx_pull.c src/cli/fmlx_models.c src/cli/fmlx_cli.c
                             src/cli/fmlx_pull_progress.c src/cli/fmlx_serve.c src/cli/fmlx_doctor.c
                             src/cli/fmlx_gen.c src/cli/fmlx_run.c src/cli/fmlx_chat.c
-                            src/cli/fmlx_ps.c src/cli/fmlx_banner.c)
+                            src/cli/fmlx_ps.c src/cli/fmlx_banner.c src/cli/fmlx_registry.c)
 target_include_directories(fmlx_cli PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
                             PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 # `fmlx_serve` tra le dipendenze PUBBLICHE: il verbo c'è solo se il loop c'è, e un `serve` che
