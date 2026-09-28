@@ -588,6 +588,10 @@ static int text_update(FmlxEngineGen *g, char *err, size_t errcap) {
     free(g->full);
     g->full = cur;
     g->full_len = (size_t)need;
+    /* Confine in byte di QUESTO token dentro `full`: il decode di un prefisso è un prefisso
+     * del decode intero (byte-level BPE; metaspace toglie lo spazio solo in testa), quindi
+     * `full_len` appena calcolato è la fine del token `n_gen-1`. */
+    if (g->want_logprobs && g->tok_end) g->tok_end[g->n_gen - 1] = (uint32_t)g->full_len;
 
     /* stop completa: la PRIMA posizione di match vince */
     limit = g->full_len;
@@ -622,17 +626,21 @@ static int text_update(FmlxEngineGen *g, char *err, size_t errcap) {
         limit--;
 
     if (limit > g->emitted) {
-        size_t cnt = limit - g->emitted;
-        char *nb = malloc(cnt);
-        if (!nb) {
-            snprintf(err, errcap, "out of memory buffering the decoded text");
-            return -1;
+        /* In modalità logprobs il testo esce dagli offset dei token (`tok_end`), non dal
+         * buffer a chunk: si aggiorna solo il confine sicuro. */
+        if (!g->want_logprobs) {
+            size_t cnt = limit - g->emitted;
+            char *nb = malloc(cnt);
+            if (!nb) {
+                snprintf(err, errcap, "out of memory buffering the decoded text");
+                return -1;
+            }
+            memcpy(nb, g->full + g->emitted, cnt);
+            free(g->text);
+            g->text = nb;
+            g->text_len = cnt;
+            g->pos = 0;
         }
-        memcpy(nb, g->full + g->emitted, cnt);
-        free(g->text);
-        g->text = nb;
-        g->text_len = cnt;
-        g->pos = 0;
         g->emitted = limit;
     }
 
@@ -648,7 +656,9 @@ static int text_update(FmlxEngineGen *g, char *err, size_t errcap) {
     return 0;
 }
 
-/* Un passo di decode: esattamente UN token. */
+/* Un passo di decode: esattamente UN token. Con `want_logprobs` si usa l'estensione ABI v2
+ * `generate_ids_probs`, che cattura la logprob del token PRIMA di avanzare (esatta anche con
+ * sampling: la distribuzione è quella del modello alla posizione di partenza). */
 static int advance(FmlxEngineGen *g, char *err, size_t errcap) {
     int got;
     int32_t id = 0;
@@ -658,7 +668,13 @@ static int advance(FmlxEngineGen *g, char *err, size_t errcap) {
         g->ended = 1;
         return 0;
     }
-    got = g->m->eng->generate_ids(g->session, 1, g->m->eos, &id);
+    if (g->want_logprobs) {
+        float lp = 0.0f;
+        got = g->m->eng->generate_ids_probs(g->session, 1, g->m->eos, &id, &lp);
+        if (got > 0) g->logprobs[g->n_gen] = lp;
+    } else {
+        got = g->m->eng->generate_ids(g->session, 1, g->m->eos, &id);
+    }
     if (got < 0) {
         snprintf(err, errcap, "the engine failed while generating");
         return -1;
@@ -708,11 +724,12 @@ static uint64_t fnv1a_ids(const int32_t *ids, int n) {
 
 static FmlxEngineGen *start(const FmlxEngineModel *m, const int32_t *ids, int n_prompt,
                             int max_tokens, const LlmEngineLlmSampling *sp, const FmlxApiChat *c,
-                            char *err, size_t errcap) {
+                            int want_logprobs, char *err, size_t errcap) {
     LlmEngineLlmSession s;
     FmlxEngineGen *g;
     int can_prefix;
     int reused = 0;
+    int can_lp;
 
     if (n_prompt <= 0) {
         snprintf(err, errcap, "empty prompt");
@@ -720,6 +737,15 @@ static FmlxEngineGen *start(const FmlxEngineModel *m, const int32_t *ids, int n_
     }
     if (max_tokens < 1) max_tokens = 1;
     if (max_tokens > FMLX_ENGINE_MAX_NEW) max_tokens = FMLX_ENGINE_MAX_NEW;
+
+    /* LOGPROBS: onorabili solo se il runner espone l'estensione ABI v2. Chiedere una cosa che
+     * il motore non sa dare è un errore esplicito, mai un campo nullo che finge. */
+    can_lp = want_logprobs && (m->eng->caps & LLMMODELIO_CAP_LOGPROBS) &&
+             m->eng->generate_ids_probs;
+    if (want_logprobs && !can_lp) {
+        snprintf(err, errcap, "logprobs were requested but this engine does not expose them");
+        return NULL;
+    }
 
     s = m->eng->create_session(m->model);
     if (!s) {
@@ -777,6 +803,19 @@ static FmlxEngineGen *start(const FmlxEngineModel *m, const int32_t *ids, int n_
         snprintf(err, errcap, "out of memory for %d output tokens", max_tokens);
         return NULL;
     }
+    if (can_lp) {
+        g->logprobs = malloc((size_t)max_tokens * sizeof *g->logprobs);
+        g->tok_end = malloc((size_t)max_tokens * sizeof *g->tok_end);
+        if (!g->logprobs || !g->tok_end) {
+            m->eng->destroy_session(s);
+            free(g->ids);
+            free(g->logprobs);
+            free(g->tok_end);
+            free(g);
+            snprintf(err, errcap, "out of memory for %d token logprobs", max_tokens);
+            return NULL;
+        }
+    }
     g->m = m;
     g->session = s;
     g->c = c;
@@ -784,6 +823,7 @@ static FmlxEngineGen *start(const FmlxEngineModel *m, const int32_t *ids, int n_
     g->prompt_tokens = (uint64_t)n_prompt;
     g->prefix_hit = reused;
     g->finish = FMLX_API_FINISH_LENGTH;
+    g->want_logprobs = can_lp;
     return g;
 }
 
@@ -819,7 +859,7 @@ FmlxEngineGen *fmlx_engine_chat(FmlxEngineModel *m, const FmlxApiChat *c, char *
     if (!ids) return NULL;
     max_tokens = c->has_max_tokens ? (int)c->max_tokens : 256;
     sampling_of(c, &sp);
-    g = start(m, ids, n, max_tokens, &sp, c, err, errcap);
+    g = start(m, ids, n, max_tokens, &sp, c, c->want_logprobs, err, errcap);
     free(ids);
     if (g && fmlx_api_tool_mode(c, NULL) != FMLX_API_TOOL_NONE)
         /* Qwen/ChatML marca i tool con `<tool_call>`: lì il JSON nudo non si riconosce (una
@@ -850,7 +890,7 @@ FmlxEngineGen *fmlx_engine_prompt(FmlxEngineModel *m, const char *prompt, int ma
     sp.presence_penalty = presence;
     sp.frequency_penalty = frequency;
     sp.seed = seed;
-    g = start(m, ids, n, max_tokens, &sp, c, err, errcap);
+    g = start(m, ids, n, max_tokens, &sp, c, c ? c->want_logprobs : 0, err, errcap);
     free(ids);
     return g;
 }
@@ -890,6 +930,35 @@ static size_t utf8_step(const char *s, size_t i, size_t len) {
 
 #define FMLX_ENGINE_CHUNK 96u
 
+/* Modalità logprobs: consegna UN token per evento leggendo da `full` con i confini `tok_end`.
+ * Un token può finire a metà di una codepoint UTF-8 (BPE byte-level): in quel caso il pezzo
+ * non è serializzabile da solo, quindi si UNISCE col token successivo in un solo evento (la
+ * concatenazione resta il testo esatto). Ritorna 1 se un evento è pronto, 0 se serve ancora
+ * avanzare (nessun token completo entro `emitted`). */
+static int emit_logprob(FmlxEngineGen *g, FmlxApiEvent *ev) {
+    while (g->tok_emit < g->n_gen) {
+        int j = g->tok_emit;
+        size_t end = g->tok_end[j];
+        if (end > g->emitted) return 0; /* il token non è ancora interamente al sicuro */
+        while (end < g->full_len && ((unsigned char)g->full[end] & 0xC0) == 0x80) {
+            j++; /* il token finisce a metà codepoint: unisci col prossimo */
+            if (j >= g->n_gen) return 0;
+            end = g->tok_end[j];
+            if (end > g->emitted) return 0;
+        }
+        size_t start = g->tok_byte;
+        ev->ev = FMLX_API_EV_TEXT;
+        ev->text = g->full + start;
+        ev->n = (uint32_t)(end - start);
+        ev->has_logprob = 1;
+        ev->logprob = g->logprobs[g->tok_emit];
+        g->tok_byte = end;
+        g->tok_emit = j + 1;
+        return 1;
+    }
+    return 0;
+}
+
 FmlxApiGenSt fmlx_engine_next(void *ctx, FmlxApiEvent *ev, FmlxApiErrCtx *err) {
     FmlxEngineGen *g = ctx;
 
@@ -921,7 +990,11 @@ FmlxApiGenSt fmlx_engine_next(void *ctx, FmlxApiEvent *ev, FmlxApiErrCtx *err) {
                 return FMLX_API_GEN_MORE;
             }
         }
-        if (g->pos < g->text_len) {
+        if (g->want_logprobs) {
+            /* Un token per evento, con la sua logprob. `tools` è mutuamente escluso con
+             * `logprobs` a monte, quindi non c'è da passare dal riconoscitore. */
+            if (emit_logprob(g, ev)) return FMLX_API_GEN_MORE;
+        } else if (g->pos < g->text_len) {
             if (g->tools) {
                 /* Tutto il delta decodificato passa dal riconoscitore: lui decide testo vs
                  * chiamata, e trattiene la coda che può ancora essere un marcatore. */
@@ -979,6 +1052,11 @@ FmlxApiGenSt fmlx_engine_next(void *ctx, FmlxApiEvent *ev, FmlxApiErrCtx *err) {
 
 int fmlx_engine_gen_prefix_hit(const FmlxEngineGen *g) { return g ? g->prefix_hit : 0; }
 
+int fmlx_engine_gen_kv_stats(const FmlxEngineGen *g, int *out_used, int *out_cap) {
+    if (!g || !g->session || !g->m || !g->m->eng || !g->m->eng->kv_stats) return -1;
+    return g->m->eng->kv_stats(g->session, out_used, out_cap);
+}
+
 void fmlx_engine_gen_free(FmlxEngineGen *g) {
     if (!g) return;
     if (g->session && g->m && g->m->eng && g->m->eng->destroy_session)
@@ -986,6 +1064,8 @@ void fmlx_engine_gen_free(FmlxEngineGen *g) {
     free(g->ids);
     free(g->full);
     free(g->text);
+    free(g->logprobs);
+    free(g->tok_end);
     if (g->tools) fmlx_toolstream_free(g->tools);
     free(g);
 }

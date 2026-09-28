@@ -493,8 +493,11 @@ static FmlxApiGenSt gen_observed(void *ctx, FmlxApiEvent *ev, FmlxApiErrCtx *err
     FmlxApiGenSt st = fmlx_engine_next(o->g, ev, err);
 
     if (st == FMLX_API_GEN_MORE && ev->ev == FMLX_API_EV_DONE) {
+        int used = 0, cap = 0;
         fmlx_metrics_tokens(ev->prompt_tokens, ev->completion_tokens);
         fmlx_metrics_cache(fmlx_engine_gen_prefix_hit(o->g));
+        /* KV reale della sessione (ABI v2 `kv_stats`), prima che la generazione sia liberata. */
+        if (fmlx_engine_gen_kv_stats(o->g, &used, &cap) == 0) fmlx_metrics_kv(used, cap);
     }
     return st;
 }
@@ -511,6 +514,8 @@ static FmlxServeSt gen_nonstream(FmlxServeBuf *buf, FmlxEngineGen *g, const Fmlx
     FmlxJsonW w;
     size_t blen = 0;
     GenObs obs;
+    float *logp = NULL;
+    uint32_t *logo = NULL, *logl = NULL;
 
     if (!tbuf || !think || !args) {
         free(tbuf);
@@ -520,6 +525,24 @@ static FmlxServeSt gen_nonstream(FmlxServeBuf *buf, FmlxEngineGen *g, const Fmlx
     }
     obs.g = g;
     fmlx_api_acc_init(&a, tbuf, 1u << 18, think, 4096, args, 2048u);
+    /* Logprobs: un blocco contiguo per le tre liste parallele. Solo quando chieste. */
+    if (c->want_logprobs) {
+        int ntok = (int)(c->has_max_tokens ? c->max_tokens : 256);
+        void *blk;
+        if (ntok > FMLX_ENGINE_MAX_NEW) ntok = FMLX_ENGINE_MAX_NEW;
+        if (ntok < 1) ntok = 1;
+        blk = malloc((size_t)ntok * (sizeof(float) + 2 * sizeof(uint32_t)));
+        if (!blk) {
+            free(tbuf);
+            free(think);
+            free(args);
+            return FMLX_SERVE_BUF_SMALL;
+        }
+        logp = blk;
+        logo = (uint32_t *)(logp + ntok);
+        logl = logo + ntok;
+        fmlx_api_acc_logbuf(&a, logp, logo, logl, ntok);
+    }
     for (;;) {
         FmlxApiEvent ev;
         FmlxApiErrCtx ec;
@@ -543,6 +566,7 @@ static FmlxServeSt gen_nonstream(FmlxServeBuf *buf, FmlxEngineGen *g, const Fmlx
         free(tbuf);
         free(think);
         free(args);
+        free(logp);
         return fmlx_serve_engine_fail(buf, FMLX_API_INTERNAL, NULL,
                            "the engine produced more text than this server's buffers hold",
                            anthropic, out_len);
@@ -556,12 +580,14 @@ static FmlxServeSt gen_nonstream(FmlxServeBuf *buf, FmlxEngineGen *g, const Fmlx
         free(tbuf);
         free(think);
         free(args);
+        free(logp);
         return fmlx_serve_finish_ok(buf, 200, "application/json", blen, ka, out_len);
     }
     fmlx_jsonw_free(&w);
     free(tbuf);
     free(think);
     free(args);
+    free(logp);
     if (err != FMLX_API_OK)
         return fmlx_serve_engine_fail(buf, FMLX_API_INTERNAL, NULL,
                            "the response body could not be rendered for the client protocol",
@@ -724,6 +750,15 @@ static FmlxServeSt body_completions(FmlxServeBuf *buf, const char *body, size_t 
                            "request body is not valid JSON", 0, out_len);
     }
     root = fmlx_json_root(&doc);
+    /* `logprobs`/`top_logprobs` (stesse regole del chat): le logprobs sono onorabili, il top-k no. */
+    {
+        FmlxApiErrCtx le;
+        memset(&le, 0, sizeof le);
+        if (fmlx_api_openai_logprobs(root, &chat, &le) != FMLX_API_OK) {
+            fmlx_json_doc_free(&doc);
+            return refuse(buf, &le, 0, out_len);
+        }
+    }
     p = fmlx_json_obj_get(root, "prompt");
     if (!p || p->type != FMLX_JSON_STR) {
         fmlx_json_doc_free(&doc);

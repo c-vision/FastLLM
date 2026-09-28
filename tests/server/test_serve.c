@@ -473,7 +473,9 @@ static void case_engine_refusals(void) {
            HAS(r_body(&r), "fastmlx_requests_by_endpoint_total") &&
            HAS(r_body(&r), "fastmlx_prefix_cache_hits_total") &&
            HAS(r_body(&r), "fastmlx_prefix_cache_misses_total") &&
-           HAS(r_body(&r), "fastmlx_tokens_total") && HAS(r_body(&r), "fastmlx_models_loaded"),
+           HAS(r_body(&r), "fastmlx_tokens_total") && HAS(r_body(&r), "fastmlx_models_loaded") &&
+           HAS(r_body(&r), "fastmlx_kv_tokens_used") &&
+           HAS(r_body(&r), "fastmlx_kv_tokens_capacity"),
        "/metrics non elenca i contatori attesi:\n%s", r_body(&r));
     ck_length(&r);
 

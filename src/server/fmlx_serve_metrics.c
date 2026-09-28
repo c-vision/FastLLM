@@ -33,6 +33,11 @@ typedef struct {
     long long inflight;
     double duration_sum;
     unsigned long long duration_count;
+    /* KV dell'ULTIMA generazione completata: `used`/`cap` vengono da `kv_stats` (ABI v2) sulla
+     * sessione. La sessione vive quanto la richiesta, quindi il gauge è "l'ultima foto", non
+     * un valore corrente — ed è esattamente ciò che `kv_stats` può dire senza inventare. */
+    int kv_used;
+    int kv_cap;
 } FmlxMetrics;
 
 static FmlxMetrics g_m;
@@ -56,6 +61,13 @@ void fmlx_metrics_tokens(uint64_t prompt, uint64_t completion) {
 void fmlx_metrics_cache(int hit) {
     if (hit) g_m.prefix_hits++;
     else g_m.prefix_misses++;
+}
+
+void fmlx_metrics_kv(int used, int capacity) {
+    if (used < 0) used = 0;
+    if (capacity < 0) capacity = 0;
+    g_m.kv_used = used;
+    g_m.kv_cap = capacity;
 }
 
 void fmlx_metrics_duration(double seconds) {
@@ -151,6 +163,16 @@ FmlxServeSt fmlx_serve_body_metrics(FmlxServeBuf *buf, int ka, size_t *out_len) 
     MP("# HELP fastmlx_models_loaded Models currently resident in memory.\n");
     MP("# TYPE fastmlx_models_loaded gauge\n");
     MP("fastmlx_models_loaded %d\n", fmlx_engine_resident_count());
+
+    /* KV reale (ABI v2 `kv_stats`): token usati e capacità dell'ULTIMA generazione completata.
+     * 0/0 prima della prima generazione: un gauge non inventa una capacità che non ha letto. */
+    MP("# HELP fastmlx_kv_tokens_used KV positions used by the last completed generation.\n");
+    MP("# TYPE fastmlx_kv_tokens_used gauge\n");
+    MP("fastmlx_kv_tokens_used %d\n", g_m.kv_used);
+
+    MP("# HELP fastmlx_kv_tokens_capacity KV capacity (positions) reported by the engine.\n");
+    MP("# TYPE fastmlx_kv_tokens_capacity gauge\n");
+    MP("fastmlx_kv_tokens_capacity %d\n", g_m.kv_cap);
 
     return fmlx_serve_finish_ok(buf, 200, "text/plain; version=0.0.4; charset=utf-8", len, ka, out_len);
 }

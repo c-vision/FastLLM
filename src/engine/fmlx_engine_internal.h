@@ -81,6 +81,16 @@ struct FmlxEngineGen {
      * restituisce diviso fra testo e chiamate (fmlx_tools.h). */
     void *tools; /* FmlxToolStream* */
     int tools_flushed;
+
+    /* LOGPROBS (ABI v2). Quando `want_logprobs` è 1 il decode usa `generate_ids_probs` e il
+     * testo esce UN TOKEN PER EVENTO leggendo da `full` (non dal buffer a chunk `text`):
+     * `tok_end[i]` è la fine in byte del token i dentro `full`, `tok_emit` il prossimo token
+     * da consegnare, `tok_byte` quanti byte di `full` sono già usciti. */
+    int want_logprobs;
+    float *logprobs;   /* malloc, `max_new` elementi */
+    uint32_t *tok_end; /* malloc, `max_new` elementi */
+    int tok_emit;
+    size_t tok_byte;
 };
 
 /* Stringa dinamica minimale. */

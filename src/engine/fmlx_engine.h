@@ -79,6 +79,11 @@ FmlxApiGenSt fmlx_engine_next(void *ctx, FmlxApiEvent *ev, FmlxApiErrCtx *err);
  * onesto il contatore `prefix_cache_hits_total` di `/metrics`. */
 int fmlx_engine_gen_prefix_hit(const FmlxEngineGen *g);
 
+/* Statistiche KV della generazione (token usati / capacità), lette dall'ABI v2 `kv_stats`
+ * sulla sessione. 0 se disponibili, -1 se il motore non le espone. Va chiamata PRIMA che la
+ * generazione sia liberata, cioè sull'evento DONE del flusso. */
+int fmlx_engine_gen_kv_stats(const FmlxEngineGen *g, int *out_used, int *out_cap);
+
 void fmlx_engine_gen_free(FmlxEngineGen *g);
 
 /* Libera la cache residente (per i test e per uno shutdown pulito). */

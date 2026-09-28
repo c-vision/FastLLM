@@ -407,11 +407,21 @@ nemmeno `{}`). Nel non-stream è applicabile alla lettera; nello stream no, perc
 partito non si ritira, e quindi diventa un invariante: `finish_reason` non è mai `tool_calls` se
 gli argomenti raccolti non validano.
 
-**Ciò che non è onorato viene DETTO.** `logit_bias`, `logprobs`, `top_logprobs`,
-`response_format`, `user` sono accettati per nome e dichiarati in `ignored_params[]` (piano:474);
-`n:2` è un 400 con `param:"n"`, non una risposta singola silenziosa; `max_tokens: 1.5` è un errore
-di tipo, non un troncamento. Due `max_tokens`/`max_completion_tokens` discordi: vince il più
-recente, l'altro finisce negli ignored.
+**Ciò che non è onorato viene DETTO.** `logit_bias` e `user` sono accettati per nome e dichiarati
+in `ignored_params[]` (piano:474); `n:2` è un 400 con `param:"n"`, non una risposta singola
+silenziosa; `max_tokens: 1.5` è un errore di tipo, non un troncamento. Due
+`max_tokens`/`max_completion_tokens` discordi: vince il più recente, l'altro finisce negli ignored.
+
+**`logprobs` è ONORATO dall'ABI v2** (`fmlx_api_openai_logprobs`): il runner MLX espone
+`generate_ids_probs`, che dà la logprob del token SCELTO a ogni passo. Il server la porta in
+`choices[].logprobs.content[]` (chat: `token`/`logprob`/`bytes`/`top_logprobs`) e nel formato legacy
+di `/v1/completions` (`tokens`/`token_logprobs`/`top_logprobs`/`text_offset`), anche in streaming
+(un token per frame). **Limite dichiarato:** l'ABI dà SOLO la logprob del token scelto, non la
+distribuzione top-k, quindi `top_logprobs > 0` è un 400 con la causa e `top_logprobs` resta sempre
+`[]`/`null`. `logprobs` combinato con `tools` è rifiutato: il testo passerebbe dal riconoscitore e
+la corrispondenza token↔logprob non sarebbe più esatta. `response_format` è onorato con
+l'iniezione dell'istruzione nel prompt e la post-validazione (non è grammatica nativa: l'ABI non la
+espone).
 
 **`|` non sequenzia gli operandi, e qui l'ordine È il contratto.** La prima versione degli adapter
 accumulava gli esiti del writer così: `bad |= fmlx_jsonw_key(w, "id") | fmlx_jsonw_cstr(w, id);`.
@@ -444,7 +454,10 @@ libera: un test di framing sarebbe diventato un test di rete.
    (`engine_not_wired`, …). Il piano (§11.2) vieta il risultato che sembra quello che non è: un
    200 con `content: ""` sarebbe il peggiore esito possibile — coerente, vuoto, e falso. `GET
    /metrics` è cablata e risponde testo Prometheus coi contatori VERI del server (richieste
-   totali e per endpoint, token, durata, cache hit/miss del prefisso, modelli residenti);
+   totali e per endpoint, token, durata, cache hit/miss del prefisso, modelli residenti, e
+   `fastmlx_kv_tokens_used`/`fastmlx_kv_tokens_capacity` letti da `kv_stats` dell'ABI v2);
+   `kv_clear` NON è usato: le sessioni sono per-richiesta e il prefisso salvato in KV è
+   deliberatamente riusato dalla prefix cache, quindi azzerarlo la romperebbe;
 3. **quel che NON richiede il motore viene già validato oggi** — auth, incorniciatura, tetto del
    corpo, JSON, `anthropic-version`. Un 400 che arriva oggi arriverà anche quando il motore ci
    sarà: il comportamento del server non deve cambiare all'arrivo della lane ①.

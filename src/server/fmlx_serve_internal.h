@@ -40,6 +40,7 @@ void fmlx_metrics_route(FmlxApiAction act);                   /* +1 sulla serie 
 void fmlx_metrics_inflight(int delta);                        /* gauge richieste di generazione attive */
 void fmlx_metrics_tokens(uint64_t prompt, uint64_t completion); /* dal DONE del motore */
 void fmlx_metrics_cache(int hit);                             /* 1 = prefisso riusato, 0 = prefill */
+void fmlx_metrics_kv(int used, int capacity);                 /* KV dell'ultima generazione (ABI v2) */
 void fmlx_metrics_duration(double seconds);                   /* durata di UNA generazione completata */
 /* GET /metrics: testo Prometheus. */
 FmlxServeSt fmlx_serve_body_metrics(FmlxServeBuf *buf, int ka, size_t *out_len);

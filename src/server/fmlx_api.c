@@ -401,6 +401,15 @@ void fmlx_api_acc_init(FmlxApiAcc *a, char *text, size_t text_cap, char *think, 
     }
 }
 
+void fmlx_api_acc_logbuf(FmlxApiAcc *a, float *lp, uint32_t *off, uint32_t *len, int cap) {
+    if (!a) return;
+    a->logprob = lp;
+    a->log_off = off;
+    a->log_len = len;
+    a->log_cap = (lp && off && len && cap > 0) ? cap : 0;
+    a->n_logprobs = 0;
+}
+
 /* Aggiunge byte in coda. Se non entrano TUTTI, non ne entra NESSUNO: un token tagliato a
  * metà è un carattere spezzato in UTF-8, e la risposta "quasi completa" è quella che un
  * client manda a valle senza accorgersi. */
@@ -430,7 +439,23 @@ FmlxApiErr fmlx_api_acc_push(FmlxApiAcc *a, const FmlxApiEvent *ev) {
 
     int ok = 1;
     switch (ev->ev) {
-    case FMLX_API_EV_TEXT: ok = append_buf(a->text, a->text_cap, &a->text_len, ev->text, ev->n); break;
+    case FMLX_API_EV_TEXT: {
+        size_t before = a->text_len;
+        ok = append_buf(a->text, a->text_cap, &a->text_len, ev->text, ev->n);
+        /* Un TEXT con `has_logprob` è un token: si annota la sua posizione in `text` e la
+         * logprob. Più token delle celle disponibili è overflow (risposta non inviabile). */
+        if (ok && ev->has_logprob && a->log_cap > 0) {
+            if (a->n_logprobs >= a->log_cap) ok = 0;
+            else {
+                int i = a->n_logprobs;
+                a->log_off[i] = (uint32_t)before;
+                a->log_len[i] = ev->n;
+                a->logprob[i] = ev->logprob;
+                a->n_logprobs++;
+            }
+        }
+        break;
+    }
     case FMLX_API_EV_THINK:
         /* piano:508: "se il modello non ha thinking: campo assente, mai stringa vuota".
          * Un evento THINK da 0 byte NON apre il blocco: resta assente. */

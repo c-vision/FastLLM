@@ -124,6 +124,11 @@ typedef struct {
     FmlxApiFinish finish;            /* DONE */
     const char *stop_sequence;       /* DONE se finish == STOPSEQ, altrimenti NULL */
     uint64_t prompt_tokens, completion_tokens, cached_tokens; /* DONE */
+    /* LOGPROBS (ABI v2). Un TEXT con `has_logprob` è ESATTAMENTE un token: `text`/`n` sono il
+     * suo testo e `logprob` la sua logprob naturale nell'ultima distribuzione. `has_logprob`
+     * distingue una logprob vera (anche 0.0) dal default di un evento costruito senza. */
+    int has_logprob;
+    float logprob;
 } FmlxApiEvent;
 
 typedef enum {
@@ -170,6 +175,11 @@ typedef struct {
 
     int stream, stream_usage; /* stream_options.include_usage */
     int want_tool;            /* tool_choice obbligato a una funzione specifica */
+    /* LOGPROBS (ABI v2): `logprobs:true` chiede che il motore emetta, per ogni token, la sua
+     * logprob. `top_logprobs` resta registrato per il rifiuto: l'ABI v2 espone la logprob del
+     * token scelto, NON la distribuzione top-k, quindi k>0 non è onorabile (400). */
+    int want_logprobs;
+    int want_top_logprobs;
 
     FmlxSlice stop[FMLX_API_MAX_STOP];
     uint32_t n_stop;
@@ -237,10 +247,20 @@ typedef struct {
     char stop_seq[FMLX_API_MAX_NAME];
     uint64_t prompt_tokens, completion_tokens, cached_tokens;
     int overflow; /* 1 = un buffer non è bastato: la risposta NON è inviable */
+    /* LOGPROBS: buffer del chiamante (nessuna malloc nell'accumulatore). `log_off[i]` è
+     * l'offset del token i dentro `text`, `log_len[i]` la sua lunghezza. `log_cap == 0`
+     * significa "non annotare" (il percorso streaming scrive le logprobs direttamente). */
+    float *logprob;
+    uint32_t *log_off, *log_len;
+    int log_cap, n_logprobs;
 } FmlxApiAcc;
 
 void fmlx_api_acc_init(FmlxApiAcc *a, char *text, size_t text_cap, char *think, size_t think_cap,
                        char *args, size_t args_cap_each);
+/* Registra i buffer (cap elementi) su cui l'accumulatore annota la logprob di ogni token
+ * emesso. Senza questa chiamata l'accumulatore ignora le logprobs (percorso streaming, dove
+ * il dialetto le scrive direttamente sull'evento). */
+void fmlx_api_acc_logbuf(FmlxApiAcc *a, float *lp, uint32_t *off, uint32_t *len, int cap);
 
 /* Accoda un evento. FMLX_API_INTERNAL se i buffer non bastano (`overflow` posto, gli
  * eventi successivi non cambiano nulla: la risposta è già non inviable). */
@@ -292,6 +312,10 @@ typedef struct {
 /* Interpreta il corpo (già parseato) come chat OpenAI. Gli errori sono quelli del piano:
  * `invalid_request` con `param` che nomina il campo. */
 FmlxApiErr fmlx_api_openai_parse(const FmlxJsonValue *root, FmlxApiChat *c, FmlxApiErrCtx *err);
+/* Legge `logprobs`/`top_logprobs`, comuni a chat e completions. Aggiorna `c->want_logprobs` e
+ * `c->want_top_logprobs`; `top_logprobs>0` è un 400 con la causa, perché l'ABI v2 espone la
+ * logprob del token scelto, non la distribuzione top-k. */
+FmlxApiErr fmlx_api_openai_logprobs(const FmlxJsonValue *root, FmlxApiChat *c, FmlxApiErrCtx *err);
 /* Il corpo di risposta non-stream. */
 FmlxApiErr fmlx_api_openai_completion(const FmlxApiChat *c, const FmlxApiMeta *m,
                                       const FmlxApiAcc *a, FmlxJsonW *w);

@@ -846,27 +846,91 @@ static void t_tool_policy_rf(void) {
        "tipo di response_format ignoto = errore, non prosa");
     fmlx_json_doc_free(&d);
 
-    /* logprobs: un 400 con la causa, non un campo ignorato in silenzio */
+    /* logprobs (ABI v2): onorato — il motore emette la logprob del token scelto. */
     r = body("{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"c\"}],"
              "\"logprobs\":true}",
              &d);
-    CK(fmlx_api_openai_parse(r, &c, &e) == FMLX_API_INVALID_REQUEST && e.param &&
-           !strcmp(e.param, "logprobs") && strstr(e.message, "ABI"),
-       "logprobs:true rifiutato con la causa (niente logits nell'ABI)");
+    CK(fmlx_api_openai_parse(r, &c, &e) == FMLX_API_OK && c.want_logprobs == 1,
+       "logprobs:true è onorato (logprob del token scelto dall'ABI v2)");
     fmlx_json_doc_free(&d);
+    /* top_logprobs>0 resta un 400: l'ABI espone la logprob del token scelto, non il top-k. */
     r = body("{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"c\"}],"
-             "\"top_logprobs\":5}",
+             "\"logprobs\":true,\"top_logprobs\":5}",
              &d);
     CK(fmlx_api_openai_parse(r, &c, &e) == FMLX_API_INVALID_REQUEST && e.param &&
-           !strcmp(e.param, "top_logprobs"),
-       "top_logprobs>0 rifiutato");
+           !strcmp(e.param, "top_logprobs") && strstr(e.message, "top-k"),
+       "top_logprobs>0 rifiutato con la causa (ABI: niente distribuzione top-k)");
     fmlx_json_doc_free(&d);
     r = body("{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"c\"}],"
              "\"logprobs\":false}",
              &d);
-    CK(fmlx_api_openai_parse(r, &c, &e) == FMLX_API_OK,
+    CK(fmlx_api_openai_parse(r, &c, &e) == FMLX_API_OK && c.want_logprobs == 0,
        "logprobs:false è onorato (non si chiede nulla)");
     fmlx_json_doc_free(&d);
+    /* logprobs + tool: rifiutato, il testo passerebbe dal riconoscitore (token↔logprob non esatta) */
+    r = body("{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"c\"}],"
+             "\"logprobs\":true,\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"f\"}}]}",
+             &d);
+    CK(fmlx_api_openai_parse(r, &c, &e) == FMLX_API_INVALID_REQUEST && e.param &&
+           !strcmp(e.param, "logprobs"),
+       "logprobs + tool rifiutato (la corrispondenza token↔logprob non sarebbe esatta)");
+    fmlx_json_doc_free(&d);
+}
+
+/* la logprob che viaggia su un evento TEXT (un token per evento). */
+static FmlxApiEvent EVT_LP(const char *t, float lp) {
+    FmlxApiEvent e = {.ev = FMLX_API_EV_TEXT, .text = t, .n = (uint32_t)strlen(t),
+                      .has_logprob = 1, .logprob = lp};
+    return e;
+}
+
+/* ============================================================================ */
+
+/* Le logprobs in risposta: chat `logprobs.content[]` e completions legacy. La logprob del
+ * token scelto è REALE (dall'evento); `top_logprobs` è vuoto/null perché l'ABI non dà il top-k. */
+static void t_logprobs_render(void) {
+    printf("== 10. logprobs in risposta (chat e completions)\n");
+    FmlxApiChat c = chat_from("{\"model\":\"gpt-x\",\"messages\":[{\"role\":\"user\","
+                              "\"content\":\"c\"}],\"logprobs\":true,\"top_logprobs\":0}");
+    FmlxApiMeta m = {"chatcmpl-lp", 1700000000, 0};
+    char text[256], think[64], args[8 * 64], out[4096];
+    float lp[8];
+    uint32_t lpo[8], lpl[8];
+    FmlxApiAcc a;
+    FmlxJsonW w;
+    size_t n = 0;
+
+    CK(c.want_logprobs == 1, "la chat chiede le logprobs");
+    fmlx_api_acc_init(&a, text, sizeof text, think, sizeof think, args, 64);
+    fmlx_api_acc_logbuf(&a, lp, lpo, lpl, 8);
+    const FmlxApiEvent s[] = {EVT_LP("Hel", -0.5f), EVT_LP("lo", -1.25f),
+                              EVT_DONE(FMLX_API_FINISH_STOP, 4, 2, 0)};
+    for (int i = 0; i < 3; i++) fmlx_api_acc_push(&a, &s[i]);
+    CK(a.n_logprobs == 2, "due token annotati (n=%d)", a.n_logprobs);
+    fmlx_jsonw_init(&w, out, sizeof out, sizeof out);
+    CK(fmlx_api_openai_completion(&c, &m, &a, &w) == FMLX_API_OK, "chat con logprobs");
+    CK(fmlx_jsonw_finish(&w, &n) == FMLX_JSON_OK, "finish");
+    out[n] = '\0';
+    CK(HAS(out, "\"logprobs\":{\"content\":["), "logprobs.content presente: %s", out);
+    CK(HAS(out, "\"token\":\"Hel\",\"logprob\":-0.5"), "logprob reale del primo token: %s", out);
+    CK(HAS(out, "\"token\":\"lo\",\"logprob\":-1.25"), "logprob reale del secondo token");
+    CK(HAS(out, "\"bytes\":[72,101,108]"), "i byte UTF-8 del token");
+    CK(HAS(out, "\"top_logprobs\":[]"), "top_logprobs vuoto (l'ABI non dà le alternative)");
+    fmlx_jsonw_free(&w);
+
+    /* completions legacy: le quattro liste parallele. */
+    fmlx_api_acc_init(&a, text, sizeof text, think, sizeof think, args, 64);
+    fmlx_api_acc_logbuf(&a, lp, lpo, lpl, 8);
+    for (int i = 0; i < 3; i++) fmlx_api_acc_push(&a, &s[i]);
+    fmlx_jsonw_init(&w, out, sizeof out, sizeof out);
+    CK(fmlx_api_openai_completion_text(&c, &m, &a, &w) == FMLX_API_OK, "completions con logprobs");
+    CK(fmlx_jsonw_finish(&w, &n) == FMLX_JSON_OK, "finish text");
+    out[n] = '\0';
+    CK(HAS(out, "\"tokens\":[\"Hel\",\"lo\"]"), "tokens paralleli: %s", out);
+    CK(HAS(out, "\"token_logprobs\":[-0.5,-1.25]"), "token_logprobs reali");
+    CK(HAS(out, "\"top_logprobs\":[null,null]"), "top_logprobs null per token");
+    CK(HAS(out, "\"text_offset\":[0,3]"), "text_offset cumulativi");
+    fmlx_jsonw_free(&w);
 }
 
 int main(void) {
@@ -880,6 +944,7 @@ int main(void) {
     t_anthropic_render();
     t_stream();
     t_tool_policy_rf();
+    t_logprobs_render();
     printf("\napi: %d verifiche, %d fallite\n", checks, failures);
     return failures ? 1 : 0;
 }
