@@ -39,96 +39,170 @@ void fmlx_cli_usage(FILE *out) {
     fprintf(out,
             "uso: fastllm <comando> [argomenti] [opzioni]\n"
             "\n"
-            "  pull <repo>            scarica (o ritrova) TUTTO il repo nel cache HF\n"
-            "  models [<filtro>]      cosa c'e' gia' nel cache HF, senza rete; <filtro> = org/nome,\n"
-            "                         nome (l'ultima parte dell'id) o org/*\n"
-            "  list, ls               la lista dei modelli DISPONIBILI, NUMERATA: il registro locale\n"
-            "                         + i repo del cache HF. Si sceglie per nome o per numero (#n)\n"
-            "  add <nome> <path>      registra un modello locale (dir MLX, .gguf ds4, o VLM):\n"
-            "                         --mmproj <p>  --modality chat|vlm|ocr|audio\n"
-            "  rm <nome|#n> [--purge] toglie un modello dal registro; --purge cancella anche i file\n"
+            "  pull <repo>            scarica (o ritrova) TUTTO il repo nel cache HF, con resume\n"
+            "  models [<filtro>]      cosa c'e' gia' nel cache HF, senza rete\n"
+            "  list, ls               i modelli DISPONIBILI, NUMERATI (registro locale + cache HF)\n"
+            "  add <nome> <path>      registra un modello locale per percorso (dir MLX, .gguf, VLM)\n"
+            "  rm <nome|#n>           toglie un modello dal registro (--purge: cancella i file)\n"
             "  show <nome|#n>         i dettagli di una voce del registro\n"
-            "  run <nome|#n> [prompt] una generazione col motore; il testo esce token-live.\n"
-            "                         Con [prompt] e' one-shot; senza, legge una riga per volta da\n"
-            "                         stdin (nessuna cronologia fra le righe)\n"
-            "  chat <nome|#n>         conversazione multi-turno col motore: chat template del\n"
-            "                         modello + prefix cache; comandi /exit /clear /system /help\n"
-            "  help                   questo testo\n"
-            "  serve                  serve /v1/models e /health e GENERA: chat, completions e\n"
-            "                         messages passano dal motore LLM; il resto e' 501\n"
-            "  ps                     dice se un `serve` e' in ascolto (--host/--port, default\n"
-            "                         127.0.0.1:8000) e i modelli residenti, via /v1/models/status\n"
-            "  doctor [<filtro>]      hasha i blob del cache e dice se SONO quelli promessi;\n"
-            "                         legge e basta: non cancella e non ripara\n"
+            "  run <nome|#n> [prompt] una generazione col motore; testo token-live\n"
+            "  chat <nome|#n>         conversazione multi-turno col motore\n"
+            "  serve                  server OpenAI/Anthropic: /v1/models, /v1/chat/completions, /v1/messages\n"
+            "  ps                     dice se un `serve` e' in ascolto e i modelli residenti\n"
+            "  doctor [<filtro>]      hasha i blob del cache HF e dice se SONO quelli promessi\n"
+            "  help [<comando>]       questo testo, o gli esempi di UN comando\n"
             "\n"
-            "per pull:\n"
+            "ESEMPI COMPLETI:  `fastllm help <comando>`  (oppure  `fastllm <comando> --help`).\n"
+            "Esempio:           fastllm help pull\n"
+            "\n"
+            "Il token si passa SOLO con la variabile d'ambiente HF_TOKEN.\n"
+            "Modelli locali registrati in $FASTLLM_HOME/models.tsv (default ~/.fastllm/models.tsv).\n");
+}
+
+/* L'aiuto di UN comando: le sue bandiere E almeno un esempio con TUTTI i parametri. */
+static void usage_verb(FILE *out, const char *v) {
+    if (!strcmp(v, "pull"))
+        fprintf(out,
+            "fastllm pull <repo> [opzioni]\n"
+            "  <repo>                 id Hugging Face (org/nome)\n"
             "  --revision <ref>       ramo o commit (default: main)\n"
-            "  --dest <dir>           specchia il modello in <dir>/<nome-del-repo> con hardlink\n"
             "  --cache <dir>          radice del cache (default: quella di Hugging Face)\n"
             "  --endpoint <url>       server diverso da huggingface.co\n"
-            "  --max-bytes <n>        tetto di byte per UN singolo file\n"
-            "  --stall-timeout <s>    secondi senza un byte prima di riprovare (default 60;\n"
-            "                         il taglio arriva ~6 s dopo: finestra di libcurl)\n"
-            "  --stall-retries <n>    quante volte ripartire con Range dopo uno stall\n"
+            "  --dest <dir>           specchia in <dir>/<nome-repo> (hardlink, mai symlink)\n"
+            "  --max-bytes <n>        tetto di byte per UN file\n"
+            "  --stall-timeout <s>    secondi senza byte prima di riprovare (default 60)\n"
+            "  --stall-retries <n>    riprese con Range dopo uno stall (default 3)\n"
             "  --offline              mai rete: se manca un file, errore\n"
-            "  --repair             permesso di sostituire un blob che non verifica\n"
-            "  --quiet              niente righe di progresso\n"
-            "                       Su terminale il progresso e' UNA riga che si riscrive; su pipe o\n"
-            "                       log una riga per file, senza nessun carattere di controllo.\n"
+            "  --repair               permesso di sostituire un blob che non verifica\n"
+            "  --quiet                niente righe di progresso\n"
             "  -h, --help             questo testo\n"
-            "\n"
-            "per models:\n"
-            "  <filtro>               uno solo, a posizione; zero match = uscita 1 (come grep):\n"
-            "                         «non c'e'» non puo' sembrare «va tutto bene»\n"
+            "esempi:\n"
+            "  fastllm pull mlx-community/Qwen3-8B-4bit\n"
+            "  fastllm pull org/modello --revision main --cache ~/.cache/huggingface \\\n"
+            "      --endpoint https://huggingface.co --dest ~/ai/Models --max-bytes 5000000000 \\\n"
+            "      --stall-timeout 60 --stall-retries 3 --repair --quiet\n"
+            "  fastllm pull org/modello --offline\n");
+    else if (!strcmp(v, "models"))
+        fprintf(out,
+            "fastllm models [<filtro>] [opzioni]\n"
+            "  <filtro>               uno solo: org/nome, nome, o org/*\n"
             "  --cache <dir>          radice del cache (default: quella di Hugging Face)\n"
             "  --quiet                solo gli id, uno per riga\n"
-            "  --json                 la stessa lista in JSON, per uno script\n"
-            "\n"
-            "per run:\n"
-            "  <modello> [prompt]     il modello E' il primo posizionale; senza prompt si legge stdin\n"
+            "  --json                 la stessa lista in JSON\n"
+            "  -h, --help             questo testo\n"
+            "esempi:\n"
+            "  fastllm models\n"
+            "  fastllm models qwen\n"
+            "  fastllm models mlx-community/* --cache ~/.cache/huggingface --json\n"
+            "  fastllm models --quiet\n");
+    else if (!strcmp(v, "list") || !strcmp(v, "ls"))
+        fprintf(out,
+            "fastllm list   (alias: ls)   [opzioni]\n"
+            "  --cache <dir>          radice del cache HF da unire al registro\n"
+            "  --json                 la stessa lista in JSON\n"
+            "  --quiet                (accettata; la lista e' gia' compatta)\n"
+            "  -h, --help             questo testo\n"
+            "esempi:\n"
+            "  fastllm list\n"
+            "  fastllm list --cache ~/.cache/huggingface --json\n");
+    else if (!strcmp(v, "add"))
+        fprintf(out,
+            "fastllm add <nome> <path> [opzioni]\n"
+            "  <nome>                 l'alias con cui sceglierlo (run/chat/show/rm)\n"
+            "  <path>                 dir MLX | file .gguf (ds4) | modello VLM\n"
+            "  --mmproj <path>        proiettore multimodale (per --modality vlm|ocr)\n"
+            "  --modality <m>         chat | vlm | ocr | audio (default chat)\n"
+            "  -h, --help             questo testo\n"
+            "esempi:\n"
+            "  fastllm add llama1b ~/ai/Models/Llama-3.2-1B-Instruct-4bit\n"
+            "  fastllm add ds4 ~/ds4/ds4flash.gguf --modality chat\n"
+            "  fastllm add doodle-ocr ~/ai/Models/gguf/PaddleOCR-VL-1.6-GGUF.gguf \\\n"
+            "      --mmproj ~/ai/Models/gguf/PaddleOCR-VL-1.6-GGUF-mmproj.gguf --modality ocr\n");
+    else if (!strcmp(v, "rm"))
+        fprintf(out,
+            "fastllm rm <nome|#n> [opzioni]\n"
+            "  <nome|#n>              l'alias o l'indice dalla `list`\n"
+            "  --purge                cancella anche i file (default: solo la voce)\n"
+            "  -h, --help             questo testo\n"
+            "esempi:\n"
+            "  fastllm rm ds4\n"
+            "  fastllm rm 2\n"
+            "  fastllm rm doodle-ocr --purge\n");
+    else if (!strcmp(v, "show"))
+        fprintf(out,
+            "fastllm show <nome|#n>\n"
+            "  <nome|#n>              l'alias o l'indice dalla `list`\n"
+            "  -h, --help             questo testo\n"
+            "esempi:\n"
+            "  fastllm show ds4\n"
+            "  fastllm show 0\n");
+    else if (!strcmp(v, "run"))
+        fprintf(out,
+            "fastllm run <nome|#n> [prompt] [opzioni]\n"
+            "  <nome|#n>              alias del registro, indice (#n), o path/id HF/$FMLX_MODELS_DIR\n"
+            "  [prompt]               one-shot; senza, legge una riga per volta da stdin\n"
             "  --cache <dir>          radice da cui risolvere il modello\n"
             "  --system <testo>       messaggio di sistema anteposto\n"
-            "  --max-tokens <n>       tetto sui token generati (default: quello del motore)\n"
-            "  --think                mostra il ragionamento dei modelli reasoning (default: nascosto)\n"
-            "  --offload-experts      streama gli esperti MoE da disco (per modelli più grandi della RAM)\n"
-            "\n"
-            "per chat:\n"
-            "  <modello>              il modello (un solo posizionale)\n"
+            "  --max-tokens <n>       tetto sui token generati\n"
+            "  --think                mostra il ragionamento dei modelli reasoning\n"
+            "  --offload-experts      streama gli esperti MoE da disco (modelli > RAM)\n"
+            "  -h, --help             questo testo\n"
+            "esempi:\n"
+            "  fastllm run llama1b \"Ciao, presentati in una frase.\"\n"
+            "  fastllm run 0 --cache ~/.cache/huggingface --system \"Sei conciso.\" \\\n"
+            "      --max-tokens 256 --think --offload-experts\n");
+    else if (!strcmp(v, "chat"))
+        fprintf(out,
+            "fastllm chat <nome|#n> [opzioni]   (REPL: /exit /clear /system /help)\n"
+            "  <nome|#n>              alias del registro, indice (#n), o path/id HF/$FMLX_MODELS_DIR\n"
             "  --cache <dir>          radice da cui risolvere il modello\n"
             "  --system <testo>       system iniziale (modificabile con /system)\n"
-            "  --max-tokens <n>       tetto sui token generati (default: quello del motore)\n"
-            "  --think                mostra il ragionamento dei modelli reasoning (default: nascosto)\n"
-            "  --offload-experts      streama gli esperti MoE da disco (per modelli più grandi della RAM)\n"
-            "\n"
-            "per serve:\n"
-            "  --host <if>            con quale interfaccia ascoltare (default 127.0.0.1)\n"
+            "  --max-tokens <n>       tetto sui token generati\n"
+            "  --think                mostra il ragionamento dei modelli reasoning\n"
+            "  --offload-experts      streama gli esperti MoE da disco (modelli > RAM)\n"
+            "  -h, --help             questo testo\n"
+            "esempi:\n"
+            "  fastllm chat llama1b\n"
+            "  fastllm chat 0 --cache ~/.cache/huggingface --system \"Sei un assistente.\" \\\n"
+            "      --max-tokens 512 --think --offload-experts\n");
+    else if (!strcmp(v, "serve"))
+        fprintf(out,
+            "fastllm serve [opzioni]\n"
+            "  --host <if>            interfaccia di ascolto (default 127.0.0.1)\n"
             "  --port <n>             porta TCP (default 8000)\n"
             "  --cache <dir>          radice del cache che /v1/models elenca\n"
             "  --max-body <n>         tetto di byte di un corpo di richiesta\n"
-            "  --once                 serve UNA richiesta e esce (per gli smoke test)\n"
-            "  --offload-experts      streama gli esperti MoE da disco (per modelli più grandi della RAM)\n"
+            "  --once                 serve UNA richiesta e esce (smoke test)\n"
+            "  --offload-experts      streama gli esperti MoE da disco (modelli > RAM)\n"
             "  --quiet                niente riepilogo finale su stdout (i log restano su stderr)\n"
-            "\n"
-            "per ps:\n"
+            "  -h, --help             questo testo\n"
+            "esempi:\n"
+            "  fastllm serve\n"
+            "  fastllm serve --host 0.0.0.0 --port 8000 --cache ~/.cache/huggingface \\\n"
+            "      --max-body 64000000 --offload-experts --quiet\n"
+            "  fastllm serve --once\n");
+    else if (!strcmp(v, "ps"))
+        fprintf(out,
+            "fastllm ps [opzioni]\n"
             "  --host <if>            dove cercare il server (default 127.0.0.1)\n"
-            "  --port <n>             porta del server (default FASTLLM_PORT, poi 8000)\n"
-            "\n"
-            "per doctor:\n"
-            "  <filtro>               gli STESSI tre modi di `models` (org/nome, nome, org/*);\n"
-            "                         nessuno = tutto il cache\n"
-            "  --cache <dir>          radice del cache (default: quella di Hugging Face)\n"
-            "  --quiet                SOLO le righe di PROBLEMA: nessun riepilogo, nessuna nota.\n"
-            "                         Uscita: 0 = niente corruzione, 1 = problemi o repo non\n"
-            "                         audibili, 2 = argv. Le note non muovono l'uscita.\n"
-            "\n"
-            "ascolta e risponde DAVVERO a /v1/models e /health, e GENERA su chat/completions,\n"
-            "/v1/completions e /v1/messages. Le altre rotte di generazione rispondono 501.\n"
-            "L'auth viene SOLO da FASTLLM_API_KEY (vuota = nessuna): una bandiera finirebbe in argv.\n"
-            "\n"
-            "in attesa del motore (rispondono un errore esplicito, mai un risultato finto):\n"
-            "  cp\n"
-            "\n"
-            "il token si passa SOLO con la variabile d'ambiente HF_TOKEN.\n");
+            "  --port <n>             porta (default FASTLLM_PORT, poi 8000)\n"
+            "  -h, --help             questo testo\n"
+            "esempi:\n"
+            "  fastllm ps\n"
+            "  fastllm ps --host 127.0.0.1 --port 8000\n");
+    else if (!strcmp(v, "doctor"))
+        fprintf(out,
+            "fastllm doctor [<filtro>] [opzioni]\n"
+            "  <filtro>               org/nome, nome, o org/*; nessuno = tutto il cache\n"
+            "  --cache <dir>          radice del cache\n"
+            "  --quiet                SOLO le righe di problema (uscita 0 = niente corruzione)\n"
+            "  -h, --help             questo testo\n"
+            "esempi:\n"
+            "  fastllm doctor\n"
+            "  fastllm doctor qwen\n"
+            "  fastllm doctor mlx-community/* --cache ~/.cache/huggingface --quiet\n");
+    else
+        fmlx_cli_usage(out);
 }
 
 /* Cosa risponde un verbo che oggi non può girare, e PERCHÉ. È il punto in cui la CLI smette di
@@ -457,7 +531,10 @@ FmlxCliStatus fmlx_cli_exec_with(const FmlxCliArgs *a_in, const FmlxHfTransport 
             snprintf(ac.repo, sizeof ac.repo, "%s", rp);
     }
     if (a->want_help) {
-        fmlx_cli_usage(out ? out : stdout);
+        if (a->verb[0] && strcmp(a->verb, "help"))
+            usage_verb(out ? out : stdout, a->verb);
+        else
+            fmlx_cli_usage(out ? out : stdout);
         return FMLX_CLI_OK;
     }
     if (!a->verb[0]) {
@@ -465,7 +542,8 @@ FmlxCliStatus fmlx_cli_exec_with(const FmlxCliArgs *a_in, const FmlxHfTransport 
         return FMLX_CLI_USAGE;
     }
     if (!strcmp(a->verb, "help")) {
-        fmlx_cli_usage(out ? out : stdout);
+        if (a->repo[0]) usage_verb(out ? out : stdout, a->repo);
+        else fmlx_cli_usage(out ? out : stdout);
         return FMLX_CLI_OK;
     }
     /* Registro locale (stile Ollama). */
