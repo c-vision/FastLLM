@@ -30,6 +30,15 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../LLMEnv/LLMToken ${CMAKE_BINARY_D
 # autonomo di LLMEnv; FastLLM lo consuma per rendere il `chat_template` reale del modello.
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../LLMEnv/LLMJinja ${CMAKE_BINARY_DIR}/llmjinja)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../LLMEnv/LLMEngine/mlx ${CMAKE_BINARY_DIR}/llmengine_mlx)
+# Lane VISION/OCR: il motore llama.cpp/mtmd di LLMEnv (`llm_ai_llamacpp`). L'engine MLX ha
+# `vision_* = NULL`, quindi i modelli multimodali (VLM/OCR/ASR) passano da QUI. Nessuna collisione
+# di target con `llm_ai_mlx` (llama.cpp non dipende dal codec).
+if(APPLE)
+  # `LLMEngine/llama` contiene sorgenti Objective-C (Apple Vision): senza OBJC la generazione
+  # fallisce con `CMAKE_OBJC_COMPILE_OBJECT` non definito.
+  enable_language(OBJC)
+endif()
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../LLMEnv/LLMEngine/llama ${CMAKE_BINARY_DIR}/llmengine_llama)
 
 # MLX carica `mlx.metallib` a runtime dal path ASSOLUTO compilato in libmlx (target `mlx-metallib`
 # di MLX). Senza il file, OGNI forward Metal fallisce. Il target esiste, ma MLX lo lascia
@@ -43,8 +52,8 @@ set(CMAKE_C_STANDARD 17)
 set(CMAKE_C_EXTENSIONS ON)
 
 add_compile_options(-Wall -Wextra)
-option(FASTMLX_WERROR "Tratta gli avvisi come errori" ON)
-if(FASTMLX_WERROR)
+option(FASTLLM_WERROR "Tratta gli avvisi come errori" ON)
+if(FASTLLM_WERROR)
   add_compile_options(-Werror)
 endif()
 
@@ -198,6 +207,7 @@ add_library(fmlx_api STATIC
     src/server/fmlx_api.c
     src/server/fmlx_api_openai.c
     src/server/fmlx_api_openai_text.c
+    src/server/fmlx_api_openai_embeddings.c
     src/server/fmlx_api_anthropic.c)
 target_include_directories(fmlx_api PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(fmlx_api PUBLIC fmlx_json fmlx_http)
@@ -215,20 +225,29 @@ add_test(NAME api COMMAND test_api)
 add_library(fmlx_serve STATIC src/server/fmlx_serve_respond.c src/server/fmlx_serve_admin.c
                              src/server/fmlx_serve_metrics.c
                              src/server/fmlx_serve.c src/engine/fmlx_engine.c
-                             src/engine/fmlx_engine_gen.c src/engine/fmlx_tools.c)
+                             src/engine/fmlx_engine_gen.c src/engine/fmlx_tools.c
+                             src/engine/fmlx_vision.c)
 target_include_directories(fmlx_serve PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
                               PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
                                       ${CMAKE_CURRENT_SOURCE_DIR}/../LLMEnv/LLMEngine/include)
 # Il motore è una dipendenza PUBBLICA: chi linka `fmlx_serve` linka anche `llm_ai_mlx` e
 # `llmtoken` (dylib nel build tree). La generazione non è opzionale in questa lane: un
-# `fastmlx serve` che non potesse generare sarebbe il comando-che-risponde-di-sì.
-target_link_libraries(fmlx_serve PUBLIC fmlx_api fmlx_hf llm_ai_mlx llmtoken llmjinja)
+# `fastllm serve` che non potesse generare sarebbe il comando-che-risponde-di-sì.
+target_link_libraries(fmlx_serve PUBLIC fmlx_api fmlx_hf llm_ai_mlx llmtoken llmjinja llm_ai_llamacpp)
 
 # Il work directory qui serve DAVVERO: `/v1/models` e `/health` leggono il cache da disco, quindi
 # o il test costruisce un cache finto su disco, o sta provando un cammino che non ha mai corso.
 add_executable(test_serve tests/server/test_serve.c)
 target_link_libraries(test_serve PRIVATE fmlx_serve)
 add_test(NAME serve COMMAND test_serve ${CMAKE_CURRENT_BINARY_DIR}/work-serve)
+
+# Lane VISION/OCR: punto d'ingresso testabile. Carica un VLM (GGUF testo + GGUF `mmproj`) e legge
+# un'immagine (o un audio) via il motore llama.cpp/mtmd. Linka `fmlx_serve` che a sua volta porta
+# `llm_ai_llamacpp` (la lane vision) e `llm_ai_mlx`.
+add_executable(vision_ocr tools/vision_ocr.c)
+target_include_directories(vision_ocr PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(vision_ocr PRIVATE fmlx_serve)
+add_dependencies(vision_ocr llm_ai_llamacpp)
 
 # --- lane_tools: il riconoscitore delle chiamate di tool (PURO) ------------------------------
 # Testo -> chiamate, senza motore e senza rete: è il pezzo che si prova quando il modello non
@@ -239,7 +258,7 @@ target_include_directories(test_tools PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/includ
 target_link_libraries(test_tools PRIVATE fmlx_json)
 add_test(NAME tools COMMAND test_tools)
 
-# --- lane_cli: il binario `fastmlx` (piano §10.3, §13) --------------------------------------
+# --- lane_cli: il binario `fastllm` (piano §10.3, §13) --------------------------------------
 # Un file per verbo, non uno: `pull` è una lane con un report e delle regole sui path, `models` è
 # una tabella letta da disco, l'argv è una terza cosa che cambia con motivi diversi (una bandiera
 # nuova contro un ordine di download). Il `main` sta da solo perché è l'unica parte NON provabile
@@ -252,7 +271,7 @@ add_test(NAME tools COMMAND test_tools)
 add_library(fmlx_cli STATIC src/cli/fmlx_pull.c src/cli/fmlx_models.c src/cli/fmlx_cli.c
                             src/cli/fmlx_pull_progress.c src/cli/fmlx_serve.c src/cli/fmlx_doctor.c
                             src/cli/fmlx_gen.c src/cli/fmlx_run.c src/cli/fmlx_chat.c
-                            src/cli/fmlx_ps.c)
+                            src/cli/fmlx_ps.c src/cli/fmlx_banner.c)
 target_include_directories(fmlx_cli PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
                             PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 # `fmlx_serve` tra le dipendenze PUBBLICHE: il verbo c'è solo se il loop c'è, e un `serve` che
@@ -260,8 +279,8 @@ target_include_directories(fmlx_cli PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
 # arrivano anche `llm_ai_mlx`/`llmtoken`/`llmjinja`, cioè il motore di cui `run`/`chat` si servono.
 target_link_libraries(fmlx_cli PUBLIC fmlx_hf_fetch fmlx_serve)
 
-add_executable(fastmlx src/cli/fastmlx_main.c)
-target_link_libraries(fastmlx PRIVATE fmlx_cli)
+add_executable(fastllm src/cli/fastllm_main.c)
+target_link_libraries(fastllm PRIVATE fmlx_cli)
 
 # Il `pull` contro un server finto: cache reale su disco, byte finti, zero rete.
 add_executable(test_pull tests/cli/test_pull.c)
