@@ -32,6 +32,13 @@ extern "C" {
 #define FMLX_ENGINE_NAME_MAX 256
 #define FMLX_ENGINE_MAX_NEW 8192
 
+/* Prefix cache (CAP_PREFIX del runner MLX). `MATCH` = quanti token di prefisso comuni servono
+ * perché il riuso valga il prefill risparmiato; `SAVE` = lunghezza minima del prompt perché
+ * valga la pena salvarne la KV. Entrambe sovrascrivibili via ambiente (FMLX_PREFIX_MIN_MATCH,
+ * FMLX_PREFIX_MIN_SAVE_LEN): sono politiche di memoria, non costanti del linguaggio. */
+#define FMLX_PREFIX_MIN_MATCH 8
+#define FMLX_PREFIX_MIN_SAVE_LEN 64
+
 /* Un modello residente (handle opaco). */
 typedef struct FmlxEngineModel FmlxEngineModel;
 
@@ -66,6 +73,11 @@ FmlxEngineGen *fmlx_engine_prompt(FmlxEngineModel *m, const char *prompt, int ma
  * emette TEXT a pezzi (boundary UTF-8 rispettati) e un solo DONE finale. `ctx` è il
  * `FmlxEngineGen*`. */
 FmlxApiGenSt fmlx_engine_next(void *ctx, FmlxApiEvent *ev, FmlxApiErrCtx *err);
+
+/* 1 se QUESTA generazione ha riusato la prefix cache (il prefisso del prompt era già in KV,
+ * quindi niente prefill del prefisso), 0 se il prefill è stato completo. È il dato che rende
+ * onesto il contatore `prefix_cache_hits_total` di `/metrics`. */
+int fmlx_engine_gen_prefix_hit(const FmlxEngineGen *g);
 
 void fmlx_engine_gen_free(FmlxEngineGen *g);
 

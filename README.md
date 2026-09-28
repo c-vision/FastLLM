@@ -438,11 +438,13 @@ libera: un test di framing sarebbe diventato un test di rete.
 
 1. **quel che è vero** — `GET /v1/models` legge il catalogo dal disco (`fmlx_hf_catalog`, nessun
    transport) e `GET /health` dice cosa sa fare;
-2. **quel che manca lo dice** — ogni rotta che genera (`chat/completions`, `completions`,
-   `responses`, `messages`, `models/load|unload|status`, `embeddings`, `metrics`) risponde **501**
-   con UNA frase sua e un `code` machine-readable per causa (`engine_not_wired`, …). Il piano
-   (§11.2) vieta il risultato che sembra quello che non è: un 200 con `content: ""` sarebbe il
-   peggiore esito possibile — coerente, vuoto, e falso;
+2. **quel che manca lo dice** — le rotte di generazione (`chat/completions`, `completions`,
+   `messages`) GENERANO via l'ABI LLMEngine; quelle non ancora cablate (`responses`, `embeddings`)
+   rispondono **501** con UNA frase loro e un `code` machine-readable per causa
+   (`engine_not_wired`, …). Il piano (§11.2) vieta il risultato che sembra quello che non è: un
+   200 con `content: ""` sarebbe il peggiore esito possibile — coerente, vuoto, e falso. `GET
+   /metrics` è cablata e risponde testo Prometheus coi contatori VERI del server (richieste
+   totali e per endpoint, token, durata, cache hit/miss del prefisso, modelli residenti);
 3. **quel che NON richiede il motore viene già validato oggi** — auth, incorniciatura, tetto del
    corpo, JSON, `anthropic-version`. Un 400 che arriva oggi arriverà anche quando il motore ci
    sarà: il comportamento del server non deve cambiare all'arrivo della lane ①.

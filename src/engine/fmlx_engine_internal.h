@@ -70,6 +70,7 @@ struct FmlxEngineGen {
     int n_out;
     int done; /* DONE già emesso */
     int err;  /* il motore ha fallito: ERR alla prossima chiamata */
+    int prefix_hit; /* 1 = il prompt è stato riusato dalla prefix cache (nessun prefill) */
     FmlxApiFinish finish;
     char stop_seq[FMLX_API_MAX_NAME];
 };

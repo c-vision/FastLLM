@@ -11,9 +11,10 @@
  *  - `/v1/models` risponde DAVVERO: i byte ci sono, vengono dal catalogo locale (`fmlx_hf_catalog`),
  *    e non serve il motore per sapere cosa c'è su disco.
  *  - `/health` risponde DAVVERO, e dice `engine:"not_wired"` in faccia a un orchestratore.
- *  - Ogni rotta che ha bisogno di generare — `chat/completions`, `completions`, `responses`,
- *    `messages`, `models/load|unload|status`, `embeddings`, `metrics` — risponde
- *    `FMLX_API_NOT_SUPPORTED` (501) col PERCHÉ, renderizzato dall'adapter del dialetto giusto.
+ *  - Ogni rotta che ha bisogno di generare — `chat/completions`, `completions`, `messages` —
+ *    GENERA via l'ABI del motore; ciò che non è ancora cablato (`responses`, `embeddings`)
+ *    risponde `FMLX_API_NOT_SUPPORTED` (501) col PERCHÉ, renderizzato dall'adapter del dialetto
+ *    giusto. `GET /metrics` risponde testo Prometheus coi contatori reali del server.
  *    Un `chat.completion` con `"content": ""` e `finish_reason:"stop"` sarebbe la risposta
  *    peggiore possibile: coerente, vuota, e falsa (piano §11.2, e il divieto del risultato
  *    silenzioso che corre tutto il progetto).

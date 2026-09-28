@@ -9,6 +9,8 @@
 
 #include "engine/fmlx_engine.h"
 
+#include <stdint.h>
+
 /* Byte lasciati liberi in testa al buffer per la testata scritta poi da `fmlx_http_write_head`. */
 #define FMLX_SERVE_RESERVE 256u
 
@@ -30,5 +32,16 @@ FmlxServeSt fmlx_serve_body_model_load(FmlxServeBuf *buf, const char *body, size
                                        const FmlxServeOpts *o, int ka, size_t *out_len);
 FmlxServeSt fmlx_serve_body_model_unload(FmlxServeBuf *buf, const char *body, size_t body_len,
                                          int ka, size_t *out_len);
+
+/* ---- contatori del server e `GET /metrics` (fmlx_serve_metrics.c) ----
+ * Scritti dal responder e dal ponte verso il motore; letti SOLO da `fmlx_serve_body_metrics`. */
+void fmlx_metrics_request(void);                              /* una richiesta arrivata al responder */
+void fmlx_metrics_route(FmlxApiAction act);                   /* +1 sulla serie dell'endpoint */
+void fmlx_metrics_inflight(int delta);                        /* gauge richieste di generazione attive */
+void fmlx_metrics_tokens(uint64_t prompt, uint64_t completion); /* dal DONE del motore */
+void fmlx_metrics_cache(int hit);                             /* 1 = prefisso riusato, 0 = prefill */
+void fmlx_metrics_duration(double seconds);                   /* durata di UNA generazione completata */
+/* GET /metrics: testo Prometheus. */
+FmlxServeSt fmlx_serve_body_metrics(FmlxServeBuf *buf, int ka, size_t *out_len);
 
 #endif /* FMLX_SERVE_INTERNAL_H */

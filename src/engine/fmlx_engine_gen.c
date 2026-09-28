@@ -473,11 +473,40 @@ static int advance(FmlxEngineGen *g, char *err, size_t errcap) {
 
 /* ---- avvio della generazione ---- */
 
+/* Intero d'ambiente con minimo: un valore assente/illeggibile/fuori range ricade sul default
+ * (una politica di memoria non deve poter essere azzerata da un typo). */
+static int env_int_at_least(const char *name, int def, int min) {
+    const char *v = getenv(name);
+    char *end;
+    long n;
+
+    if (!v || !*v) return def;
+    n = strtol(v, &end, 10);
+    if (end == v || *end || n < min || n > 1000000) return def;
+    return (int)n;
+}
+
+/* FNV-1a sui byte degli id: il NOME del prefisso salvato. Contenuto (non puntatore) di modo che
+ * richieste con lo STESSO prompt sostituiscano la stessa voce invece di accumularne una per
+ * richiesta; il match vero resta comunque content-addressed (radix sull'array di token). */
+static uint64_t fnv1a_ids(const int32_t *ids, int n) {
+    uint64_t h = 1469598103934665603ull;
+    const unsigned char *p = (const unsigned char *)ids;
+
+    for (size_t i = 0; i < (size_t)n * sizeof *ids; i++) {
+        h ^= p[i];
+        h *= 1099511628211ull;
+    }
+    return h;
+}
+
 static FmlxEngineGen *start(const FmlxEngineModel *m, const int32_t *ids, int n_prompt,
                             int max_tokens, const LlmEngineLlmSampling *sp, const FmlxApiChat *c,
                             char *err, size_t errcap) {
     LlmEngineLlmSession s;
     FmlxEngineGen *g;
+    int can_prefix;
+    int reused = 0;
 
     if (n_prompt <= 0) {
         snprintf(err, errcap, "empty prompt");
@@ -492,11 +521,43 @@ static FmlxEngineGen *start(const FmlxEngineModel *m, const int32_t *ids, int n_
         return NULL;
     }
     if (sp && m->eng->set_sampling) m->eng->set_sampling(s, sp);
-    if (m->eng->append_ids && m->eng->append_ids(s, ids, n_prompt) != 0) {
+
+    /* Prefill. Con CAP_PREFIX si usa il percorso AUTOMATICO (`append_ids_prefix`): il runner cerca
+     * il prefisso salvato che meglio combacia coi token d'ingresso e pre-filla SOLO la coda; se
+     * non c'è match utile fa l'append normale. Il match non combacia mai per costruzione della
+     * ricerca (token-per-token); -1 è un errore vero e abortisce, come nel server C di GMBasic. */
+    can_prefix = (m->eng->caps & LLMMODELIO_CAP_PREFIX) && m->eng->append_ids_prefix;
+    if (can_prefix) {
+        int rc = m->eng->append_ids_prefix(m->model, s, ids, n_prompt,
+                                           env_int_at_least("FMLX_PREFIX_MIN_MATCH",
+                                                            FMLX_PREFIX_MIN_MATCH, 1));
+        if (rc < 0) {
+            m->eng->destroy_session(s);
+            snprintf(err, errcap, "the engine failed to ingest the prompt");
+            return NULL;
+        }
+        reused = rc > 0;
+    } else if (!m->eng->append_ids || m->eng->append_ids(s, ids, n_prompt) != 0) {
         m->eng->destroy_session(s);
         snprintf(err, errcap, "the engine failed to ingest the prompt");
         return NULL;
     }
+
+    /* Salva il PREFISSO DEL PROMPT (non i token generati) per la richiesta futura. Salvare
+     * prompt+uscita sarebbe riusabile solo se il prossimo prompt la CONTIENE (conversazione che
+     * cresce); salvando il solo prompt, due richieste con lo stesso system prompt si riusano
+     * anche quando la domanda cambia. L'auto-prefix richiede `n_ids >= token_len`, quindi un
+     * prefisso salvato più lungo del prompt successivo non verrebbe comunque riusato. */
+    if (can_prefix && m->eng->save_prefix &&
+        n_prompt >= env_int_at_least("FMLX_PREFIX_MIN_SAVE_LEN", FMLX_PREFIX_MIN_SAVE_LEN, 1)) {
+        char key[48];
+        snprintf(key, sizeof key, "fmlx-%016llx", (unsigned long long)fnv1a_ids(ids, n_prompt));
+        (void)m->eng->save_prefix(m->model, key, s);
+    }
+    if (getenv("FMLX_PREFIX_DEBUG"))
+        fprintf(stderr, "[prefix] %s prompt=%d\n",
+                reused ? "HIT (riuso KV)" : "miss (prefill)", n_prompt);
+
     g = calloc(1, sizeof *g);
     if (!g) {
         m->eng->destroy_session(s);
@@ -515,6 +576,7 @@ static FmlxEngineGen *start(const FmlxEngineModel *m, const int32_t *ids, int n_
     g->c = c;
     g->max_new = max_tokens;
     g->prompt_tokens = (uint64_t)n_prompt;
+    g->prefix_hit = reused;
     g->finish = FMLX_API_FINISH_LENGTH;
     return g;
 }
@@ -664,6 +726,8 @@ FmlxApiGenSt fmlx_engine_next(void *ctx, FmlxApiEvent *ev, FmlxApiErrCtx *err) {
     }
     return FMLX_API_GEN_END;
 }
+
+int fmlx_engine_gen_prefix_hit(const FmlxEngineGen *g) { return g ? g->prefix_hit : 0; }
 
 void fmlx_engine_gen_free(FmlxEngineGen *g) {
     if (!g) return;

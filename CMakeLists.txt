@@ -213,6 +213,7 @@ add_test(NAME api COMMAND test_api)
 # promette). Nello stesso file, l'unica parte provabile in-process dipenderebbe dalla build di
 # quella che chiede una porta libera: e un test di framing diventerebbe un test di rete.
 add_library(fmlx_serve STATIC src/server/fmlx_serve_respond.c src/server/fmlx_serve_admin.c
+                             src/server/fmlx_serve_metrics.c
                              src/server/fmlx_serve.c src/engine/fmlx_engine.c
                              src/engine/fmlx_engine_gen.c)
 target_include_directories(fmlx_serve PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include

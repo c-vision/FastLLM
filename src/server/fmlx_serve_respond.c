@@ -448,9 +448,6 @@ static FmlxServeSt refuse_engine(FmlxServeBuf *buf, FmlxApiAction act, int anthr
     case FMLX_API_ACT_RESPONSES:
         snprintf(msg, sizeof msg, "the Responses API is not implemented on this server");
         break;
-    case FMLX_API_ACT_METRICS:
-        snprintf(msg, sizeof msg, "engine counters are not exposed on this route yet");
-        break;
     default:
         snprintf(msg, sizeof msg, "%s is not available on this server", missing_route_reason(act));
         break;
@@ -484,6 +481,24 @@ FmlxServeSt fmlx_serve_engine_fail(FmlxServeBuf *buf, FmlxApiErr err, const char
     return fmlx_serve_refuse_simple(buf, err, anthropic, code, msg, out_len);
 }
 
+/* Il ponte che OSSERVA il flusso di eventi senza alterarlo: gli adapter chiamano ancora
+ * `fmlx_engine_next`, ma passando da qui i contatori vedono il DONE (token VERI del motore) e
+ * l'esito del prefisso una volta sola, sia in streaming sia nell'accumulatore. */
+typedef struct {
+    FmlxEngineGen *g;
+} GenObs;
+
+static FmlxApiGenSt gen_observed(void *ctx, FmlxApiEvent *ev, FmlxApiErrCtx *err) {
+    GenObs *o = ctx;
+    FmlxApiGenSt st = fmlx_engine_next(o->g, ev, err);
+
+    if (st == FMLX_API_GEN_MORE && ev->ev == FMLX_API_EV_DONE) {
+        fmlx_metrics_tokens(ev->prompt_tokens, ev->completion_tokens);
+        fmlx_metrics_cache(fmlx_engine_gen_prefix_hit(o->g));
+    }
+    return st;
+}
+
 /* La risposta NON-stream: consuma tutti gli eventi, accumula, e rende il corpo del dialetto. */
 static FmlxServeSt gen_nonstream(FmlxServeBuf *buf, FmlxEngineGen *g, const FmlxApiChat *c,
                                  const FmlxApiMeta *m, int anthropic, int text, int ka,
@@ -495,6 +510,7 @@ static FmlxServeSt gen_nonstream(FmlxServeBuf *buf, FmlxEngineGen *g, const Fmlx
     FmlxApiErr err = FMLX_API_OK;
     FmlxJsonW w;
     size_t blen = 0;
+    GenObs obs;
 
     if (!tbuf || !think || !args) {
         free(tbuf);
@@ -502,6 +518,7 @@ static FmlxServeSt gen_nonstream(FmlxServeBuf *buf, FmlxEngineGen *g, const Fmlx
         free(args);
         return FMLX_SERVE_BUF_SMALL;
     }
+    obs.g = g;
     fmlx_api_acc_init(&a, tbuf, 1u << 18, think, 4096, args, 2048u);
     for (;;) {
         FmlxApiEvent ev;
@@ -509,7 +526,7 @@ static FmlxServeSt gen_nonstream(FmlxServeBuf *buf, FmlxEngineGen *g, const Fmlx
         FmlxApiGenSt gs;
         memset(&ev, 0, sizeof ev);
         memset(&ec, 0, sizeof ec);
-        gs = fmlx_engine_next(g, &ev, &ec);
+        gs = gen_observed(&obs, &ev, &ec);
         if (gs == FMLX_API_GEN_ERR) {
             err = ec.err ? ec.err : FMLX_API_INTERNAL;
             break;
@@ -563,7 +580,9 @@ static FmlxServeSt gen_stream(FmlxServeBuf *buf, FmlxEngineGen *g, const FmlxApi
                               size_t *out_len) {
     FmlxHttpRes w;
     FmlxApiErr err;
+    GenObs obs;
 
+    obs.g = g;
     fmlx_http_res_init(&w, buf->resp, buf->resp_cap);
     w.sink = buf->sink;
     w.sink_ctx = buf->sink_ctx;
@@ -583,9 +602,9 @@ static FmlxServeSt gen_stream(FmlxServeBuf *buf, FmlxEngineGen *g, const FmlxApi
             return FMLX_SERVE_BUF_SMALL;
         }
     }
-    if (text) err = fmlx_api_openai_stream_text(c, m, fmlx_engine_next, g, &w);
-    else if (anthropic) err = fmlx_api_anthropic_stream(c, m, fmlx_engine_next, g, &w);
-    else err = fmlx_api_openai_stream(c, m, fmlx_engine_next, g, &w);
+    if (text) err = fmlx_api_openai_stream_text(c, m, gen_observed, &obs, &w);
+    else if (anthropic) err = fmlx_api_anthropic_stream(c, m, gen_observed, &obs, &w);
+    else err = fmlx_api_openai_stream(c, m, gen_observed, &obs, &w);
     if (w.sink) {
         (void)fmlx_http_flush(&w); /* coda; se il client è andato via non c'è nulla da dire */
         *out_len = 0;
@@ -659,8 +678,17 @@ static FmlxServeSt body_chat(FmlxServeBuf *buf, const char *body, size_t body_le
         meta.created = (int64_t)time(NULL);
         meta.prompt_tokens_known = 0; /* lo conosce il motore, non questo layer */
     }
-    st = chat.stream ? gen_stream(buf, g, &chat, &meta, anthropic, 0, http10, out_len)
-                     : gen_nonstream(buf, g, &chat, &meta, anthropic, 0, ka, out_len);
+    {
+        struct timespec t0, t1;
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        fmlx_metrics_inflight(1);
+        st = chat.stream ? gen_stream(buf, g, &chat, &meta, anthropic, 0, http10, out_len)
+                         : gen_nonstream(buf, g, &chat, &meta, anthropic, 0, ka, out_len);
+        fmlx_metrics_inflight(-1);
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        fmlx_metrics_duration((double)(t1.tv_sec - t0.tv_sec) +
+                              (double)(t1.tv_nsec - t0.tv_nsec) / 1e9);
+    }
     fmlx_engine_gen_free(g);
     fmlx_json_doc_free(&doc);
     return st;
@@ -776,8 +804,17 @@ static FmlxServeSt body_completions(FmlxServeBuf *buf, const char *body, size_t 
         meta.id = idbuf;
         meta.created = (int64_t)time(NULL);
     }
-    st = stream ? gen_stream(buf, g, &chat, &meta, 0, 1, http10, out_len)
-                : gen_nonstream(buf, g, &chat, &meta, 0, 1, ka, out_len);
+    {
+        struct timespec t0, t1;
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        fmlx_metrics_inflight(1);
+        st = stream ? gen_stream(buf, g, &chat, &meta, 0, 1, http10, out_len)
+                    : gen_nonstream(buf, g, &chat, &meta, 0, 1, ka, out_len);
+        fmlx_metrics_inflight(-1);
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        fmlx_metrics_duration((double)(t1.tv_sec - t0.tv_sec) +
+                              (double)(t1.tv_nsec - t0.tv_nsec) / 1e9);
+    }
     fmlx_engine_gen_free(g);
     fmlx_json_doc_free(&doc);
     return st;
@@ -955,6 +992,7 @@ static FmlxServeSt respond_one(const FmlxHttpReq *req, const char *body, size_t 
     buf = *cbuf;
     if (buf.resp_cap < FMLX_SERVE_RESERVE + 64) return FMLX_SERVE_BUF_SMALL;
     ka = fmlx_http_keep_alive(req);
+    fmlx_metrics_request(); /* ogni richiesta che arriva al responder, auth e 404 inclusi */
 
     /* L'autenticazione PRIMA di tutto, rotta inclusa: «questa rotta esiste» è già informazione, e
      * un 401 non deve mai diventare un sondaggio gratuito delle route. La chiave viene dagli
@@ -1000,11 +1038,20 @@ static FmlxServeSt respond_one(const FmlxHttpReq *req, const char *body, size_t 
         return st;
     }
     ant = fmlx_api_is_anthropic(act);
+    fmlx_metrics_route(act); /* la serie dell'endpoint: una per rotta del router */
 
     if (act == FMLX_API_ACT_MODELS || act == FMLX_API_ACT_HEALTH) {
         cat = load_catalog(o, &buf);
         st = act == FMLX_API_ACT_MODELS ? body_models(&buf, &cat, ka, out_len)
                                         : body_health(&buf, &cat, auth_on, ka, out_len);
+        *keep_alive = st == FMLX_SERVE_OK ? ka : 0;
+        return st;
+    }
+
+    /* `/metrics`: testo Prometheus coi contatori VERI del server (richieste, token, durata,
+     * cache del prefisso, modelli residenti). È una GET senza corpo, come `/health`. */
+    if (act == FMLX_API_ACT_METRICS) {
+        st = fmlx_serve_body_metrics(&buf, ka, out_len);
         *keep_alive = st == FMLX_SERVE_OK ? ka : 0;
         return st;
     }

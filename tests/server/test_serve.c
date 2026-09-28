@@ -442,11 +442,12 @@ static void case_engine_refusals(void) {
 
     /* Le rotte NON ancora cablate restano 501: l'elenco è la tabella del router, non memoria.
      * `load`/`unload`/`status` NON sono più qui: il motore li espone via l'ABI e sono cablati
-     * (provati sotto). `responses`/`embeddings`/`metrics` restano 501 col loro codice stabile:
-     * le embeddings non hanno un punto d'ingresso nell'ABI (nessun CAP_EMBED). */
+     * (provati sotto). `responses`/`embeddings` restano 501 col loro codice stabile: le
+     * embeddings non hanno un punto d'ingresso nell'ABI (nessun CAP_EMBED). `metrics` è cablata
+     * (testo Prometheus) ed è provata qui sotto. */
     {
         static const struct { const char *path; int post; } R[] = {
-            {"/v1/responses", 1}, {"/v1/embeddings", 1}, {"/metrics", 0},
+            {"/v1/responses", 1}, {"/v1/embeddings", 1},
         };
         size_t i;
         for (i = 0; i < sizeof R / sizeof R[0]; i++) {
@@ -461,6 +462,20 @@ static void case_engine_refusals(void) {
             ck_length(&r);
         }
     }
+
+    /* `/metrics`: NON è più un 501 — è testo Prometheus coi contatori del server. Il
+     * Content-Type è quello che un Prometheus accetta, e i nomi delle metriche sono il
+     * contratto: cambiarli rompe la raccolta, quindi si asseriscono. */
+    CK(ask(rq("GET /metrics", NULL, NULL), &o, &b, &r) == FMLX_SERVE_OK, "st metrics");
+    CK(r_status(&r) == 200 && HAS(r.s, "Content-Type: text/plain"),
+       "/metrics -> 200 text/plain (%d)\n%s", r_status(&r), r.s);
+    CK(HAS(r_body(&r), "fastmlx_requests_total") &&
+           HAS(r_body(&r), "fastmlx_requests_by_endpoint_total") &&
+           HAS(r_body(&r), "fastmlx_prefix_cache_hits_total") &&
+           HAS(r_body(&r), "fastmlx_prefix_cache_misses_total") &&
+           HAS(r_body(&r), "fastmlx_tokens_total") && HAS(r_body(&r), "fastmlx_models_loaded"),
+       "/metrics non elenca i contatori attesi:\n%s", r_body(&r));
+    ck_length(&r);
 
     /* Amministrazione modelli: `status` elenca i residenti (vuoto = nessuno), `unload` di un
      * non-residente è un 200 `not_loaded`, `load` di un nome inesistente è il 404 del modello. */
