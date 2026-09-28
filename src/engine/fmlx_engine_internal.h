@@ -126,6 +126,10 @@ int fmlx_sb_add(FmlxSb *b, const char *s, size_t n);
 int fmlx_sb_cstr(FmlxSb *b, const char *s);
 void fmlx_sb_free(FmlxSb *b);
 
+/* 1 se il thinking è ABILITATO (default 0 = disattivato; vedi fmlx_engine_set_think). Usato dal
+ * render Jinja per iniettare `enable_thinking`. */
+int fmlx_engine_think_enabled(void);
+
 /* Carica il modello (risoluzione + tokenizer + eos + template). Ritorna 0/-1 con `err`. */
 int fmlx_engine_load(const char *cache_root, const char *name, FmlxEngineModel *out, char *err,
                      size_t errcap);

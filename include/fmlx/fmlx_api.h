@@ -42,7 +42,12 @@ extern "C" {
 #define FMLX_API_MAX_IGNORED 24u /* oltre: la richiesta è malformata, non "i primi 24" */
 #define FMLX_API_MAX_WARN 8u
 #define FMLX_API_MAX_TOOLCALLS 8u
-#define FMLX_API_DEF_MAX_TOKENS 2048 /* piano:510 — il default Anthropic, con warning */
+#define FMLX_API_DEF_MAX_TOKENS 262144 /* reasoning: spazio ampio (256k); il tetto vero e' la KV */
+/* TOP-LOGPROBS (ABI v3 `token_topk`): quante alternative serviamo per token e quanti byte può
+ * avere il testo di UNA alternativa. Oltre il tetto la voce si OMETTE (non si tronca: un token
+ * mozzato è un testo che il client non riconosce); il numero di voci è quindi <= K. */
+#define FMLX_API_MAX_TOP_K 20u
+#define FMLX_API_TOP_TOKEN_MAX 48u
 
 /* ---- 1. Catalogo errori: UNA lista interna, DUE formati su filo (piano:513-518) ---- */
 
@@ -116,6 +121,16 @@ typedef enum {
     FMLX_API_EV_DONE = 4       /* chiude: finish + conteggi token */
 } FmlxApiEvKind;
 
+/* Una voce di `top_logprobs`: il testo di un token ALTERNATIVO alla posizione del token scelto
+ * e la sua logprob naturale. `token` è terminata (NUL) ed è già valida UTF-8; `n` è la sua
+ * lunghezza in byte. Buffer inline (niente puntatori a vita breve): l'accumulatore la copia con
+ * un memcpy e la voce sopravvive all'evento. */
+typedef struct {
+    char token[FMLX_API_TOP_TOKEN_MAX];
+    uint32_t n;
+    float logprob;
+} FmlxApiTopLogprob;
+
 typedef struct {
     FmlxApiEvKind ev;
     const char *text; /* TEXT/THINK/TOOL_ARGS: NON terminata, `n` fa parte del valore */
@@ -129,6 +144,11 @@ typedef struct {
      * distingue una logprob vera (anche 0.0) dal default di un evento costruito senza. */
     int has_logprob;
     float logprob;
+    /* TOP-LOGPROBS (ABI v3). `n_top` voci in `top`, le alternative più probabili alla stessa
+     * posizione di questo token, ordinate per logprob decrescente (la voce 0 può coincidere col
+     * token scelto). 0 = nessuna alternativa (non richieste, o motore che non le espone). */
+    int n_top;
+    FmlxApiTopLogprob top[FMLX_API_MAX_TOP_K];
 } FmlxApiEvent;
 
 typedef enum {
@@ -253,6 +273,10 @@ typedef struct {
     float *logprob;
     uint32_t *log_off, *log_len;
     int log_cap, n_logprobs;
+    /* TOP-LOGPROBS (ABI v3): `top[i*top_k + j]` è la j-esima alternativa del token i, per i token
+     * annotati. Buffer del chiamante, `cap * top_k` voci; `top_k == 0` = non annotare. */
+    FmlxApiTopLogprob *top;
+    int top_k;
 } FmlxApiAcc;
 
 void fmlx_api_acc_init(FmlxApiAcc *a, char *text, size_t text_cap, char *think, size_t think_cap,
@@ -261,6 +285,9 @@ void fmlx_api_acc_init(FmlxApiAcc *a, char *text, size_t text_cap, char *think, 
  * emesso. Senza questa chiamata l'accumulatore ignora le logprobs (percorso streaming, dove
  * il dialetto le scrive direttamente sull'evento). */
 void fmlx_api_acc_logbuf(FmlxApiAcc *a, float *lp, uint32_t *off, uint32_t *len, int cap);
+/* Registra il buffer (cap * k voci) delle alternative top-k, allineato a `acc_logbuf`: la voce
+ * del token i è `top + i*k`. Va chiamata DOPO `acc_logbuf` (usa `log_cap`); `k == 0` disattiva. */
+void fmlx_api_acc_topbuf(FmlxApiAcc *a, FmlxApiTopLogprob *top, int k);
 
 /* Accoda un evento. FMLX_API_INTERNAL se i buffer non bastano (`overflow` posto, gli
  * eventi successivi non cambiano nulla: la risposta è già non inviable). */
@@ -313,8 +340,9 @@ typedef struct {
  * `invalid_request` con `param` che nomina il campo. */
 FmlxApiErr fmlx_api_openai_parse(const FmlxJsonValue *root, FmlxApiChat *c, FmlxApiErrCtx *err);
 /* Legge `logprobs`/`top_logprobs`, comuni a chat e completions. Aggiorna `c->want_logprobs` e
- * `c->want_top_logprobs`; `top_logprobs>0` è un 400 con la causa, perché l'ABI v2 espone la
- * logprob del token scelto, non la distribuzione top-k. */
+ * `c->want_top_logprobs`. `top_logprobs > 0` esige `logprobs:true` (contratto OpenAI) e chiede al
+ * motore la distribuzione top-k via l'ABI v3 `token_topk`: se il motore non la espone, il decode
+ * fallisce con un errore esplicito (mai un array vuoto che finge di averla). */
 FmlxApiErr fmlx_api_openai_logprobs(const FmlxJsonValue *root, FmlxApiChat *c, FmlxApiErrCtx *err);
 /* Il corpo di risposta non-stream. */
 FmlxApiErr fmlx_api_openai_completion(const FmlxApiChat *c, const FmlxApiMeta *m,
@@ -331,8 +359,31 @@ FmlxApiErr fmlx_api_openai_completion_text(const FmlxApiChat *c, const FmlxApiMe
 FmlxApiErr fmlx_api_openai_stream_text(const FmlxApiChat *c, const FmlxApiMeta *m, FmlxApiNext next,
                                        void *gen_ctx, FmlxHttpRes *w);
 
-/* ---- 7. Adapter Anthropic ---- */
+/* ---- 6b. Adapter OpenAI — `/v1/embeddings` ---- */
+#define FMLX_API_MAX_INPUTS 32u
 
+/* La richiesta di embeddings normalizzata: `input` può essere una stringa o un array di stringhe
+ * (array di token-id / immagini non è supportato). `ignored` raccoglie i campi non onorati, come
+ * per la chat (piano:474). `overflow` = più input del tetto: NON rispondere 200. */
+typedef struct {
+    FmlxSlice model;
+    FmlxSlice input[FMLX_API_MAX_INPUTS];
+    uint32_t n_input;
+    FmlxSlice ignored[FMLX_API_MAX_IGNORED];
+    uint32_t n_ignored;
+    int overflow;
+} FmlxApiEmbeddings;
+
+/* Interpreta il corpo come richiesta di embeddings. `input` stringa/array di stringhe;
+ * `encoding_format` solo "float"; `dimensions` non supportato (nessuna troncatura). */
+FmlxApiErr fmlx_api_openai_embeddings_parse(const FmlxJsonValue *root, FmlxApiEmbeddings *e,
+                                            FmlxApiErrCtx *err);
+/* Il corpo di risposta (`object:"list"`): `data[i].embedding` = `dim` float presi da
+ * `data + i*dim`; `usage` con i token totali. `ignored_params` se la richiesta ne aveva. */
+FmlxApiErr fmlx_api_openai_embeddings_render(const FmlxApiEmbeddings *e, const float *data,
+                                             int n, int dim, uint64_t tokens, FmlxJsonW *w);
+
+/* ---- 7. Adapter Anthropic ---- */
 FmlxApiErr fmlx_api_anthropic_parse(const FmlxJsonValue *root, FmlxApiChat *c, FmlxApiErrCtx *err);
 FmlxApiErr fmlx_api_anthropic_message(const FmlxApiChat *c, const FmlxApiMeta *m,
                                       const FmlxApiAcc *a, FmlxJsonW *w);

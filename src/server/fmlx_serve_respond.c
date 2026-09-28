@@ -67,7 +67,7 @@ const char *fmlx_serve_status_str(FmlxServeSt s) {
 }
 
 int fmlx_serve_key_from_env(const char **out) {
-    const char *v = getenv("FASTMLX_API_KEY");
+    const char *v = getenv("FASTLLM_API_KEY");
 
     if (out) *out = NULL;
     if (!v || !*v) return 0;
@@ -81,11 +81,11 @@ FmlxServeSt fmlx_serve_apply_env(FmlxServeOpts *o, char *msg, size_t msg_len) {
     if (!o) return FMLX_SERVE_BAD_ARG;
     if (msg && msg_len) msg[0] = '\0';
     if (!o->host) {
-        v = getenv("FASTMLX_HOST");
+        v = getenv("FASTLLM_HOST");
         if (v && *v) o->host = v;
     }
     if (o->port == 0) {
-        v = getenv("FASTMLX_PORT");
+        v = getenv("FASTLLM_PORT");
         if (v && *v) {
             char *end;
             long n;
@@ -95,7 +95,7 @@ FmlxServeSt fmlx_serve_apply_env(FmlxServeOpts *o, char *msg, size_t msg_len) {
             n = strtol(v, &end, 10);
             if (errno || !end || *end || n < 1 || n > 65535) {
                 if (msg && msg_len)
-                    snprintf(msg, msg_len, "FASTMLX_PORT: '%s' non è una porta 1..65535", v);
+                    snprintf(msg, msg_len, "FASTLLM_PORT: '%s' non è una porta 1..65535", v);
                 return FMLX_SERVE_BAD_ARG;
             }
             o->port = (int)n;
@@ -344,7 +344,7 @@ static FmlxServeSt body_models(FmlxServeBuf *buf, const Cat *c, int ka, size_t *
  * del progetto dove viene detta.
  *
  * Il `root` del cache finisce nel corpo: è il motivo per cui aprire oltre il loopback senza
- * `FASTMLX_API_KEY` è una scelta dell'esercente, e `/health` la dichiara (`auth: disabled`). */
+ * `FASTLLM_API_KEY` è una scelta dell'esercente, e `/health` la dichiara (`auth: disabled`). */
 static FmlxServeSt body_health(FmlxServeBuf *buf, const Cat *c, int auth_on, int ka,
                                size_t *out_len) {
     FmlxJsonW jw;
@@ -437,8 +437,8 @@ static FmlxServeSt refuse_engine(FmlxServeBuf *buf, FmlxApiAction act, int anthr
     e.err = FMLX_API_NOT_SUPPORTED;
     e.code = FMLX_SERVE_CODE_ENGINE;
     /* Il motore C'È: questi 501 non dicono "non wired", dicono cosa manca DAVVERO. Le
-     * embeddings non hanno un punto d'ingresso nell'ABI del runner MLX (nessun CAP_EMBED:
-     * `emb_dim`/`embed_text` sono NULL), quindi non si può fingere di calcolarle. */
+     * embeddings sono gestite da `body_embeddings` (ABI v4 `embed_ids`): qui restano solo le
+     * rotte senza un punto d'ingresso nel motore. */
     switch (act) {
     case FMLX_API_ACT_EMBEDDINGS:
         snprintf(msg, sizeof msg,
@@ -516,6 +516,7 @@ static FmlxServeSt gen_nonstream(FmlxServeBuf *buf, FmlxEngineGen *g, const Fmlx
     GenObs obs;
     float *logp = NULL;
     uint32_t *logo = NULL, *logl = NULL;
+    FmlxApiTopLogprob *topp = NULL;
 
     if (!tbuf || !think || !args) {
         free(tbuf);
@@ -527,7 +528,7 @@ static FmlxServeSt gen_nonstream(FmlxServeBuf *buf, FmlxEngineGen *g, const Fmlx
     fmlx_api_acc_init(&a, tbuf, 1u << 18, think, 4096, args, 2048u);
     /* Logprobs: un blocco contiguo per le tre liste parallele. Solo quando chieste. */
     if (c->want_logprobs) {
-        int ntok = (int)(c->has_max_tokens ? c->max_tokens : 256);
+        int ntok = (int)(c->has_max_tokens ? c->max_tokens : FMLX_API_DEF_MAX_TOKENS);
         void *blk;
         if (ntok > FMLX_ENGINE_MAX_NEW) ntok = FMLX_ENGINE_MAX_NEW;
         if (ntok < 1) ntok = 1;
@@ -542,6 +543,20 @@ static FmlxServeSt gen_nonstream(FmlxServeBuf *buf, FmlxEngineGen *g, const Fmlx
         logo = (uint32_t *)(logp + ntok);
         logl = logo + ntok;
         fmlx_api_acc_logbuf(&a, logp, logo, logl, ntok);
+        /* TOP-LOGPROBS (ABI v3): un blocco `ntok * k` di voci inline, allineato alle logprobs. */
+        if (c->want_top_logprobs > 0) {
+            int k = c->want_top_logprobs;
+            if (k > (int)FMLX_API_MAX_TOP_K) k = (int)FMLX_API_MAX_TOP_K;
+            topp = malloc((size_t)ntok * (size_t)k * sizeof *topp);
+            if (!topp) {
+                free(tbuf);
+                free(think);
+                free(args);
+                free(logp);
+                return FMLX_SERVE_BUF_SMALL;
+            }
+            fmlx_api_acc_topbuf(&a, topp, k);
+        }
     }
     for (;;) {
         FmlxApiEvent ev;
@@ -567,6 +582,7 @@ static FmlxServeSt gen_nonstream(FmlxServeBuf *buf, FmlxEngineGen *g, const Fmlx
         free(think);
         free(args);
         free(logp);
+        free(topp);
         return fmlx_serve_engine_fail(buf, FMLX_API_INTERNAL, NULL,
                            "the engine produced more text than this server's buffers hold",
                            anthropic, out_len);
@@ -581,6 +597,7 @@ static FmlxServeSt gen_nonstream(FmlxServeBuf *buf, FmlxEngineGen *g, const Fmlx
         free(think);
         free(args);
         free(logp);
+        free(topp);
         return fmlx_serve_finish_ok(buf, 200, "application/json", blen, ka, out_len);
     }
     fmlx_jsonw_free(&w);
@@ -588,6 +605,7 @@ static FmlxServeSt gen_nonstream(FmlxServeBuf *buf, FmlxEngineGen *g, const Fmlx
     free(think);
     free(args);
     free(logp);
+    free(topp);
     if (err != FMLX_API_OK)
         return fmlx_serve_engine_fail(buf, FMLX_API_INTERNAL, NULL,
                            "the response body could not be rendered for the client protocol",
@@ -732,7 +750,7 @@ static FmlxServeSt body_completions(FmlxServeBuf *buf, const char *body, size_t 
     char err[512] = "";
     const char *prompt = NULL;
     size_t prompt_len = 0;
-    int max_tokens = 256, stream = 0;
+    int max_tokens = FMLX_API_DEF_MAX_TOKENS, stream = 0;
     double temperature = 1.0, top_p = 1.0, presence = 0.0, frequency = 0.0;
     int64_t seed = 0, tmp;
     FmlxEngineModel *model;
@@ -916,6 +934,96 @@ static FmlxServeSt body_count_tokens(FmlxServeBuf *buf, const char *body, size_t
     fmlx_jsonw_free(&w);
     fmlx_json_doc_free(&doc);
     return fmlx_serve_finish_ok(buf, 200, "application/json", blen, 1, out_len);
+}
+
+/* `/v1/embeddings`: un embedding L2-normalizzato per input. Il calcolo è del motore (layer ①,
+ * `embed_ids`/`embed_text` dell'ABI); qui si risolve il modello, si calcola per ogni input e si
+ * veste la risposta OpenAI. `dim` è la larghezza del modello: non la si tronca. */
+static FmlxServeSt body_embeddings(FmlxServeBuf *buf, const char *body, size_t body_len,
+                                   const FmlxServeOpts *o, int ka, size_t *out_len) {
+    FmlxJsonDoc doc;
+    const FmlxJsonValue *root;
+    FmlxApiEmbeddings emb;
+    FmlxApiErrCtx e;
+    FmlxApiErr api;
+    FmlxEngineModel *model;
+    char name[FMLX_ENGINE_NAME_MAX] = "";
+    char err[512] = "";
+    float *data = NULL;
+    int dim, ok = 1;
+    uint64_t tokens = 0;
+    FmlxJsonW w;
+    size_t blen = 0;
+
+    fmlx_json_doc_init(&doc);
+    if (fmlx_json_parse(body, body_len, 0, &doc) != FMLX_JSON_OK) {
+        fmlx_json_doc_free(&doc);
+        return fmlx_serve_engine_fail(buf, FMLX_API_INVALID_REQUEST, FMLX_SERVE_CODE_BODY_INVALID,
+                           "request body is not valid JSON", 0, out_len);
+    }
+    root = fmlx_json_root(&doc);
+    memset(&e, 0, sizeof e);
+    api = fmlx_api_openai_embeddings_parse(root, &emb, &e);
+    if (api != FMLX_API_OK) {
+        fmlx_json_doc_free(&doc);
+        return refuse(buf, &e, 0, out_len);
+    }
+    if (copy_model_name(emb.model, name, sizeof name) != 0) {
+        fmlx_json_doc_free(&doc);
+        return fmlx_serve_engine_fail(buf, FMLX_API_INVALID_REQUEST, "model_not_found",
+                           "model is required and must name a local model", 0, out_len);
+    }
+    model = fmlx_engine_model(o ? o->cache_root : NULL, name, err, sizeof err);
+    if (!model) {
+        char msg[600];
+        snprintf(msg, sizeof msg, "the requested model is not available: %s", err);
+        fmlx_json_doc_free(&doc);
+        return fmlx_serve_engine_fail(buf, FMLX_API_MODEL_NOT_FOUND, NULL, msg, 0, out_len);
+    }
+    dim = fmlx_engine_embed_dim(model);
+    if (dim <= 0) {
+        fmlx_json_doc_free(&doc);
+        return fmlx_serve_engine_fail(buf, FMLX_API_NOT_SUPPORTED, FMLX_SERVE_CODE_ENGINE,
+                           "embeddings are not available: this engine exposes no embedding ABI",
+                           0, out_len);
+    }
+    data = malloc((size_t)emb.n_input * (size_t)dim * sizeof(float));
+    if (!data) {
+        fmlx_json_doc_free(&doc);
+        return fmlx_serve_engine_fail(buf, FMLX_API_INTERNAL, NULL,
+                           "out of memory for the embeddings", 0, out_len);
+    }
+    for (uint32_t i = 0; i < emb.n_input && ok; i++) {
+        char *txt = malloc(emb.input[i].n + 1);
+        int t = 0;
+        if (!txt) { ok = 0; break; }
+        memcpy(txt, emb.input[i].p, emb.input[i].n);
+        txt[emb.input[i].n] = '\0';
+        if (fmlx_engine_embed(model, txt, data + (size_t)i * dim, dim, &t) != dim) ok = 0;
+        else tokens += (uint64_t)t;
+        free(txt);
+    }
+    if (!ok) {
+        free(data);
+        fmlx_json_doc_free(&doc);
+        return fmlx_serve_engine_fail(buf, FMLX_API_INTERNAL, NULL,
+                           "the engine failed to compute an embedding", 0, out_len);
+    }
+    fmlx_jsonw_init(&w, buf->resp + FMLX_SERVE_RESERVE, buf->resp_cap - FMLX_SERVE_RESERVE,
+                    buf->resp_cap - FMLX_SERVE_RESERVE);
+    if (fmlx_api_openai_embeddings_render(&emb, data, (int)emb.n_input, dim, tokens, &w) !=
+            FMLX_API_OK ||
+        fmlx_jsonw_finish(&w, &blen) != FMLX_JSON_OK) {
+        fmlx_jsonw_free(&w);
+        free(data);
+        fmlx_json_doc_free(&doc);
+        return fmlx_serve_engine_fail(buf, FMLX_API_INTERNAL, NULL,
+                           "the embeddings response does not fit this server's buffer", 0, out_len);
+    }
+    fmlx_jsonw_free(&w);
+    free(data);
+    fmlx_json_doc_free(&doc);
+    return fmlx_serve_finish_ok(buf, 200, "application/json", blen, ka, out_len);
 }
 
 /* ---- validazione del corpo: la parte che NON dipende dal motore ---- */
@@ -1135,6 +1243,10 @@ static FmlxServeSt respond_one(const FmlxHttpReq *req, const char *body, size_t 
         return st;
     case FMLX_API_ACT_COUNT_TOKENS:
         st = body_count_tokens(&buf, body, body_len, o, out_len);
+        *keep_alive = st == FMLX_SERVE_OK ? ka : 0;
+        return st;
+    case FMLX_API_ACT_EMBEDDINGS:
+        st = body_embeddings(&buf, body, body_len, o, ka, out_len);
         *keep_alive = st == FMLX_SERVE_OK ? ka : 0;
         return st;
     case FMLX_API_ACT_MODELS_STATUS:

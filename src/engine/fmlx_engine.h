@@ -30,7 +30,10 @@ extern "C" {
 /* Limiti condivisi con il responder: il buffer che copia il nome del modello dal DOM e il tetto
  * sui token di uscita (un `max_tokens` oltre il tetto viene riportato al tetto, non ignorato). */
 #define FMLX_ENGINE_NAME_MAX 256
-#define FMLX_ENGINE_MAX_NEW 8192
+/* Tetto sui token di uscita. NON è un limite "di sicurezza" da tenere basso: i modelli reasoning
+ * possono spendere centinaia di migliaia di token nel blocco <think> prima della risposta, quindi
+ * il cap deve stare ~262k (256k). Il tetto reale è la KV del modello; qui si lascia spazio. */
+#define FMLX_ENGINE_MAX_NEW 262144
 
 /* Prefix cache (CAP_PREFIX del runner MLX). `MATCH` = quanti token di prefisso comuni servono
  * perché il riuso valga il prefill risparmiato; `SAVE` = lunghezza minima del prompt perché
@@ -75,6 +78,10 @@ void fmlx_engine_set_offload_experts(int on);
  * modello supera il 50% della memoria libera+reclamabile e `--offload-experts` non è già dato.
  * `serve` NON lo chiama: un server non deve bloccarsi su una domanda. */
 void fmlx_engine_set_interactive(int on);
+
+/* Thinking (ragionamento) dei modelli reasoning: DEFAULT = disattivato (il render Jinja inietta
+ * `enable_thinking=false`, che per i Qwen pre-riempie <think></think>). `--think` lo riattiva. */
+void fmlx_engine_set_think(int on);
 
 /* Avvia una generazione di chat. `c` è la richiesta normalizzata del layer ②; il sistema è
  * ricavato con `fmlx_api_join_system`. Ritorna NULL + `err` su fallimento (modello

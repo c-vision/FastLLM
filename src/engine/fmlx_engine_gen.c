@@ -368,6 +368,9 @@ static int render_jinja(const FmlxEngineModel *m, const FmlxApiChat *c, FmlxSb *
     vars = llmjinja_obj();
     llmjinja_obj_set(vars, "messages", jv_messages(c, aug.p, aug.len));
     llmjinja_obj_set(vars, "add_generation_prompt", llmjinja_bool(1));
+    /* THINKING: di default `false` (disattivato) — i template Qwen pre-riempiono <think></think>.
+     * `--think` lo riporta a true. I template che non usano la variabile la ignorano. */
+    llmjinja_obj_set(vars, "enable_thinking", llmjinja_bool(fmlx_engine_think_enabled() ? 1 : 0));
     if (mode != FMLX_API_TOOL_NONE && c->tools && fmlx_json_arr_n(c->tools))
         llmjinja_obj_set(vars, "tools", jv_tools(c));
     if (m->bos[0]) llmjinja_obj_set(vars, "bos_token", llmjinja_str(m->bos));
@@ -999,7 +1002,17 @@ FmlxEngineGen *fmlx_engine_chat(FmlxEngineModel *m, const FmlxApiChat *c, char *
     ids = tokenize(m->tok, prompt.p ? prompt.p : "", &n, err, errcap);
     fmlx_sb_free(&prompt);
     if (!ids) return NULL;
-    max_tokens = c->has_max_tokens ? (int)c->max_tokens : 256;
+    /* Default = il cap dell'engine, MA configurabile all'avvio con FASTLLM_MAX_TOKENS (clampato al
+     * cap). `--max-tokens` (richiesta esplicita) vince sempre. */
+    {
+        const char *e = getenv("FASTLLM_MAX_TOKENS");
+        int def = FMLX_ENGINE_MAX_NEW;
+        if (e && *e) {
+            long v = atol(e);
+            if (v >= 1 && v <= FMLX_ENGINE_MAX_NEW) def = (int)v;
+        }
+        max_tokens = c->has_max_tokens ? (int)c->max_tokens : def;
+    }
     sampling_of(c, &sp);
     g = start(m, ids, n, max_tokens, &sp, c, c->want_logprobs, c->want_top_logprobs, think_open,
               err, errcap);

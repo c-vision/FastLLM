@@ -168,7 +168,7 @@ static void usage_verb(FILE *out, const char *v) {
             "  --cache <dir>          radice da cui risolvere il modello\n"
             "  --system <testo>       messaggio di sistema anteposto\n"
             "  --max-tokens <n>       tetto sui token generati\n"
-            "  --think                mostra il ragionamento dei modelli reasoning\n"
+            "  --think                abilita il thinking e lo mostra (default: thinking DISATTIVATO)\n"
             "  --offload-experts      streama gli esperti MoE da disco (modelli > RAM)\n"
             "  -h, --help             questo testo\n"
             "\n"
@@ -183,7 +183,7 @@ static void usage_verb(FILE *out, const char *v) {
             "  --cache <dir>          radice da cui risolvere il modello\n"
             "  --system <testo>       system iniziale (modificabile con /system)\n"
             "  --max-tokens <n>       tetto sui token generati\n"
-            "  --think                mostra il ragionamento dei modelli reasoning\n"
+            "  --think                abilita il thinking e lo mostra (default: thinking DISATTIVATO)\n"
             "  --offload-experts      streama gli esperti MoE da disco (modelli > RAM)\n"
             "  -h, --help             questo testo\n"
             "\n"
@@ -553,8 +553,12 @@ FmlxCliStatus fmlx_cli_exec_with(const FmlxCliArgs *a_in, const FmlxHfTransport 
     ac = *a_in;
     a = &ac;
     /* Solo `run`/`chat` sono interattivi: possono CHIEDERE (Y/N) di attivare `--offload-experts`
-     * quando il modello supera metà della memoria libera. `serve` no. */
-    fmlx_engine_set_interactive((!strcmp(a->verb, "run") || !strcmp(a->verb, "chat")) ? 1 : 0);
+     * e usano il default "thinking OFF". `serve` no. */
+    {
+        int rc_verb = (!strcmp(a->verb, "run") || !strcmp(a->verb, "chat"));
+        fmlx_engine_set_interactive(rc_verb ? 1 : 0);
+        if (rc_verb) fmlx_engine_set_think(a->show_think); /* thinking OFF salvo --think */
+    }
     /* `run`/`chat`: `<nome|#n>` del registro → percorso. Se non è nel registro resta com'è (path
      * locale, cache HF, $FMLX_MODELS_DIR): un nome non registrato non è un errore, è un'altra via. */
     if ((!strcmp(a->verb, "run") || !strcmp(a->verb, "chat")) && a->repo[0]) {

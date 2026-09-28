@@ -30,6 +30,13 @@
 static int g_offload_experts = 0;
 void fmlx_engine_set_offload_experts(int on) { g_offload_experts = on ? 1 : 0; }
 
+/* THINKING. Regola: DISATTIVARLO sempre, se il modello lo permette. Nei chat template dei Qwen il
+ * flag `enable_thinking=false` pre-riempie `<think>\n\n</think>\n\n` -> niente ragionamento. Lo si
+ * inietta SEMPRE nel render Jinja (i template che non lo usano lo ignorano). `--think` lo riattiva. */
+static int g_think = 0;
+void fmlx_engine_set_think(int on) { g_think = on ? 1 : 0; }
+int fmlx_engine_think_enabled(void) { return g_think; }
+
 /* 1 = sessione interattiva (run/chat da terminale): abilita il PROMPT Y/N per l'offload. Il server
  * (`serve`) NON lo imposta: un server non deve bloccarsi su una domanda. */
 static int g_interactive = 0;
