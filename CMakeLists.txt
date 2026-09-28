@@ -1,6 +1,11 @@
 cmake_minimum_required(VERSION 3.20)
 project(FastLLM LANGUAGES C)
 
+# Il codec GGUF è UNA SOLA SORGENTE in LLMEnv: FastLLM lo CONSUMA. Progetto CMake autonomo
+# fratello (nessuna copia nel repo). Si aggancia QUI, PRIMA di `add_compile_options(-Werror)`,
+# così i sorgenti di LLMCodec non ereditano la politica di warning di FastLLM.
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../LLMEnv/LLMCodec ${CMAKE_BINARY_DIR}/llmcodec)
+
 # Le estensioni GNU/POSIX servono: mmap/open/lseek non sono visibili con -std=c17 puro.
 set(CMAKE_C_STANDARD 17)
 set(CMAKE_C_EXTENSIONS ON)
@@ -11,54 +16,25 @@ if(FASTMLX_WERROR)
   add_compile_options(-Werror)
 endif()
 
-# Le lane statiche finiscono dentro la libreria condivisa `mlxengine`, e una libreria condivisa
-# vuole object position-independent: si dichiara qui, una volta, non con una proprietà per target
-# (che è il modo in cui una lane nuova nasce linkabile a metà).
+# Le lane statiche finiscono dentro le librerie linkate ai binari/test di FastLLM e nei plugin
+# del codec condiviso: object position-independent, dichiarato una volta qui e non con una
+# proprietà per target (che è il modo in cui una lane nuova nasce linkabile a metà).
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-# --- lane_gguf: il lettore GGUF di riferimento (nessun cap, allineamento onorato) ----
-# Tre file perché due contratti diversi: `quant.c` smista e conosce il rifiuto, `quant_ext.c`
-# è SOLA aritmetica, `quant_iq.c` ha bisogno delle codebook generate da tools/gen_codebooks.py
-# (e per questo legge un header accanto a sé, da cui il include dir qui sotto).
-add_library(fmlx_gguf STATIC src/lane_gguf/fmlx_gguf.c src/lane_gguf/fmlx_quant.c
-                             src/lane_gguf/fmlx_quant_ext.c src/lane_gguf/fmlx_quant_iq.c)
-target_include_directories(fmlx_gguf PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_include_directories(fmlx_gguf PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/lane_gguf)
+# --- codec GGUF: FastLLM CONSUMA `llmcodec` (LLMEnv), non ne tiene una copia ----------------
+# Il parsing GGUF, la TASSONOMIA d'ERRORE e il dequant dei tipi ggml sono UNA SOLA SORGENTE in
+# `LLMEnv/LLMCodec` (agganciato come subdirectory in cima a questo file). La vecchia lane
+# `src/lane_gguf/` e l'ABI `mlxengine_*` sono state ELIMINATE. `llmcodec` è il core (contenitori,
+# parser, rolemap); `llmcodec_ggml` è il plugin che implementa i codec ggml (dequant/encode).
 
 enable_testing()
 
-add_executable(test_gguf tests/gguf/test_gguf.c)
-target_link_libraries(test_gguf PRIVATE fmlx_gguf)
-add_test(NAME gguf COMMAND test_gguf)
-
-add_executable(test_quant tests/gguf/test_quant.c)
-target_link_libraries(test_quant PRIVATE fmlx_gguf)
-add_test(NAME quant COMMAND test_quant)
-
-# Ispeziona la testata di GGUF reali (stampa tipi, allineamento, codici di rifiuto).
-add_executable(fmlx_gguf_inspect tools/gguf_inspect.c)
-target_link_libraries(fmlx_gguf_inspect PRIVATE fmlx_gguf)
-
-# --- MLXEngine: il deliverable ① — la libreria condivisa, non una lane interna ----------------
-# `SHARED` è il punto, non un dettaglio di gusti: una lane interna la si può linkare statica e
-# cambiarle la forma a ogni commit, un motore che DOMANI GMBasic userà via P/Invoke no. Qui
-# dentro vive l'ABI (`include/mlxengine.h`), che è l'unica cosa del progetto pensata per durare
-# più della sua implementazione: il numero di versione sale solo quando una firma cambia.
-#
-# Il primo blocco è il lettore GGUF + il dequant. E non c'è niente da nascondere dietro un
-# target vuoto: `mlxengine.c` non implementa un byte di aritmetica, si appoggia a `fmlx_gguf` (che
-# è già bit-exact contro tre implementazioni indipendenti). Quando entreranno i pesi packed, la
-# cache KV e i kernel, entreranno QUI con lo stesso numero d'ABI e un gate di parità proprio.
-add_library(mlxengine SHARED src/engine/mlxengine.c)
-set_target_properties(mlxengine PROPERTIES VERSION 1.0.0 SOVERSION 1)
-target_include_directories(mlxengine PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(mlxengine PUBLIC fmlx_gguf)
-
-# L'ABI si prova DA FUORI: gli stessi byte letti attraverso il confine e dalla parte di dentro
-# devono dare gli STESSI bit, e nessun altro tipo di asserzione lo dice.
-add_executable(test_engine tests/engine/test_engine.c)
-target_link_libraries(test_engine PRIVATE mlxengine)
-add_test(NAME engine COMMAND test_engine)
+# Il consumo del codec: scrive un GGUF col writer di LLMCodec, lo rilegge col parser (con la
+# tassonomia d'errore) e dequantizza un blocco. Se il link a `llmcodec` si rompe, questo test
+# non compila: è la prova che FastLLM non ha più un codec proprio.
+add_executable(test_codec tests/gguf/test_codec.c)
+target_link_libraries(test_codec PRIVATE llmcodec llmcodec_ggml)
+add_test(NAME codec COMMAND test_codec)
 
 # --- lane_hf: cache Hugging Face letto senza rete (il download non ha ancora codice) ---------
 # `fmlx_hf_catalog.c` sta QUI e non nella lane download perché non tocca la rete e non scrive:
@@ -165,7 +141,7 @@ if(Python3_Interpreter_FOUND)
         PASS_REGULAR_EXPRESSION "divergenze dure 8, round-trip 0")
 endif()
 
-# Il motore (lane engine + la libreria condivisa `mlxengine`) è più in su, insieme al suo test.
+# Il codec GGUF è più in su: FastLLM CONSUMA `llmcodec` (LLMEnv) col suo test (`codec`).
 # Le lane che non hanno ancora codice si aggiungono QUI quando esistono, non come target vuoti:
 # oggi resta `lane_mlx` (i pesi packed, la cache KV, l'attenzione, il MoE, la generazione). La
 # CLI c'è ed è in fondo a questo file.
