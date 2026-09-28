@@ -57,6 +57,25 @@ FmlxEngineModel *fmlx_engine_model(const char *cache_root, const char *name, cha
 int fmlx_engine_count_tokens(FmlxEngineModel *m, const FmlxApiChat *c, int *out, char *err,
                              size_t errcap);
 
+/* Embedding di `text` col modello, L2-normalizzato (come il percorso llama.cpp). Scrive `dim`
+ * float in `out` (cap >= dim), scrive in `*out_tokens` i token usati (se non NULL) e ritorna dim,
+ * oppure -1 (motore senza CAP_EMBED, testo vuoto, tokenizzazione fallita). IDS-based: tokenizza
+ * col tokenizer del modello e chiama `embed_ids`/`embed_text` dell'ABI. */
+int fmlx_engine_embed(FmlxEngineModel *m, const char *text, float *out, int cap, int *out_tokens);
+
+/* Dimensione dell'embedding del modello, o -1 se il motore non espone CAP_EMBED. */
+int fmlx_engine_embed_dim(FmlxEngineModel *m);
+
+/* Offload esperti MoE da disco (flag `--offload-experts`): va impostato PRIMA del primo load.
+ * Il motore streama gli esperti dalla dir del modello invece di materializzarli (per modelli più
+ * grandi della RAM). No-op per i modelli dense. */
+void fmlx_engine_set_offload_experts(int on);
+
+/* 1 = sessione interattiva (run/chat da terminale): abilita il PROMPT Y/N per l'offload quando il
+ * modello supera il 50% della memoria libera+reclamabile e `--offload-experts` non è già dato.
+ * `serve` NON lo chiama: un server non deve bloccarsi su una domanda. */
+void fmlx_engine_set_interactive(int on);
+
 /* Avvia una generazione di chat. `c` è la richiesta normalizzata del layer ②; il sistema è
  * ricavato con `fmlx_api_join_system`. Ritorna NULL + `err` su fallimento (modello
  * irraggiungibile, prompt non tokenizzabile, decode fallito). */

@@ -13,15 +13,101 @@
 #include "fmlx/fmlx_hf.h"
 #include "fmlx/fmlx_json.h"
 
+#include <dirent.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
-/* Offload esperti (--offload-experts): scelta dell'utente, propagata al motore al load. */
+#ifdef __APPLE__
+#include <mach/mach.h>
+#include <mach/mach_host.h>
+#endif
+
+/* Offload esperti: `--offload-experts` (CLI) o attivato dal prompt Y/N (vedi sotto). */
 static int g_offload_experts = 0;
 void fmlx_engine_set_offload_experts(int on) { g_offload_experts = on ? 1 : 0; }
+
+/* 1 = sessione interattiva (run/chat da terminale): abilita il PROMPT Y/N per l'offload. Il server
+ * (`serve`) NON lo imposta: un server non deve bloccarsi su una domanda. */
+static int g_interactive = 0;
+void fmlx_engine_set_interactive(int on) { g_interactive = on ? 1 : 0; }
+
+/* Memoria unificata DISPONIBILE **e reclamabile** (pagina libera + inattiva + purgeable +
+ * speculative), come la vede la VM. 0 se non determinabile. */
+static size_t available_memory_bytes(void) {
+#ifdef __APPLE__
+    mach_port_t host = mach_host_self();
+    vm_size_t page = 0;
+    vm_statistics64_data_t vm;
+    mach_msg_type_number_t count = HOST_VM_INFO64_COUNT;
+
+    if (host_page_size(host, &page) != KERN_SUCCESS) return 0;
+    if (host_statistics64(host, HOST_VM_INFO64, (host_info64_t)&vm, &count) != KERN_SUCCESS) return 0;
+    {
+        uint64_t pages = (uint64_t)vm.free_count + (uint64_t)vm.inactive_count +
+                         (uint64_t)vm.purgeable_count + (uint64_t)vm.speculative_count;
+        return (size_t)(pages * (uint64_t)page);
+    }
+#else
+    return 0;
+#endif
+}
+
+/* Impronta su disco del modello: per un `.gguf` la sua dimensione; per una dir MLX la somma dei
+ * file `*.safetensors` (i pesi). 0 se non determinabile. */
+static size_t model_footprint_bytes(const char *dir) {
+    struct stat st;
+
+    if (!dir || !*dir) return 0;
+    if (stat(dir, &st) == 0 && S_ISREG(st.st_mode)) return (size_t)st.st_size;
+    if (stat(dir, &st) != 0 || !S_ISDIR(st.st_mode)) return 0;
+    {
+        DIR *d = opendir(dir);
+        struct dirent *e;
+        size_t total = 0;
+        if (!d) return 0;
+        while ((e = readdir(d)) != NULL) {
+            size_t nl = strlen(e->d_name);
+            char p[FMLX_ENGINE_PATH_MAX];
+            struct stat fs;
+            if (nl < 12 || strcmp(e->d_name + nl - 12, ".safetensors")) continue;
+            if (snprintf(p, sizeof p, "%s/%s", dir, e->d_name) >= (int)sizeof p) continue;
+            if (stat(p, &fs) == 0 && S_ISREG(fs.st_mode)) total += (size_t)fs.st_size;
+        }
+        closedir(d);
+        return total;
+    }
+}
+
+/* Se il modello supera il 50% della memoria libera+reclamabile e l'utente NON ha già chiesto
+ * `--offload-experts`, chiede SÌ/NO (una volta). Default = SÌ (invio vuoto attiva). Solo su
+ * terminale interattivo (run/chat): `serve` non deve bloccarsi su una domanda. */
+static void maybe_prompt_offload(const char *dir) {
+    size_t need, avail;
+
+    if (g_offload_experts || !g_interactive || !isatty(STDIN_FILENO)) return;
+    if (getenv("FASTLLM_NO_OFFLOAD_PROMPT") != NULL) return;
+    need = model_footprint_bytes(dir);
+    avail = available_memory_bytes();
+    if (need == 0 || avail == 0 || need <= avail / 2) return;
+    fprintf(stderr,
+            "\nIl modello pesa %.1f GiB — oltre il 50%% della memoria disponibile (~%.1f GiB).\n"
+            "Attivare --offload-experts (streaming degli esperti MoE da disco, più lento ma entra)? [Y/n] ",
+            (double)need / 1073741824.0, (double)avail / 1073741824.0);
+    fflush(stderr);
+    {
+        char line[32];
+        if (fgets(line, sizeof line, stdin) == NULL || (line[0] != 'n' && line[0] != 'N')) {
+            g_offload_experts = 1;
+            fprintf(stderr, "--offload-experts: attivato.\n");
+        } else {
+            fprintf(stderr, "offload non attivato (il load potrebbe non entrare in memoria).\n");
+        }
+    }
+}
 
 /* ---- stringa dinamica ---- */
 
@@ -452,7 +538,10 @@ int fmlx_engine_load(const char *cache_root, const char *name, FmlxEngineModel *
         return -1;
     }
     /* Offload esperti (ABI v5): se richiesto, il motore streama gli esperti da disco dalla dir del
-     * modello. Va PRIMA di load_model. Per i modelli dense è un no-op. */
+     * modello. Va PRIMA di load_model. Per i modelli dense è un no-op.
+     * Prima del load: se il modello supera il 50% della memoria libera+reclamabile e l'utente non
+     * ha già dato --offload-experts, lo si chiede (Y/N) su terminale interattivo (run/chat). */
+    maybe_prompt_offload(out->dir);
     if (out->eng->set_expert_swap)
         out->eng->set_expert_swap(g_offload_experts ? out->dir : NULL);
     out->model = out->eng->load_model(out->dir);

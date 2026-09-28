@@ -16,6 +16,8 @@
  */
 #include "fmlx/fmlx_cli.h"
 
+#include "engine/fmlx_engine.h" /* fmlx_engine_set_interactive (prompt Y/N per --offload-experts) */
+
 #include <errno.h>
 #include <inttypes.h>
 #include <limits.h>
@@ -37,23 +39,38 @@ const char *fmlx_cli_status_str(FmlxCliStatus s) {
 
 void fmlx_cli_usage(FILE *out) {
     fprintf(out,
+            "\n"
             "uso: fastllm <comando> [argomenti] [opzioni]\n"
             "\n"
+            "GESTIONE MODELLI\n"
             "  pull <repo>            scarica (o ritrova) TUTTO il repo nel cache HF, con resume\n"
             "  models [<filtro>]      cosa c'e' gia' nel cache HF, senza rete\n"
             "  list, ls               i modelli DISPONIBILI, NUMERATI (registro locale + cache HF)\n"
             "  add <nome> <path>      registra un modello locale per percorso (dir MLX, .gguf, VLM)\n"
             "  rm <nome|#n>           toglie un modello dal registro (--purge: cancella i file)\n"
             "  show <nome|#n>         i dettagli di una voce del registro\n"
-            "  run <nome|#n> [prompt] una generazione col motore; testo token-live\n"
+            "\n"
+            "GENERAZIONE\n"
+            "  run <nome|#n> [prompt] una generazione col motore; il testo esce token-live\n"
             "  chat <nome|#n>         conversazione multi-turno col motore\n"
-            "  serve                  server OpenAI/Anthropic: /v1/models, /v1/chat/completions, /v1/messages\n"
+            "\n"
+            "SERVER E UTILITY\n"
+            "  serve                  server OpenAI/Anthropic (/v1/models, /v1/chat/completions, /v1/messages)\n"
             "  ps                     dice se un `serve` e' in ascolto e i modelli residenti\n"
             "  doctor [<filtro>]      hasha i blob del cache HF e dice se SONO quelli promessi\n"
             "  help [<comando>]       questo testo, o gli esempi di UN comando\n"
             "\n"
-            "ESEMPI COMPLETI:  `fastllm help <comando>`  (oppure  `fastllm <comando> --help`).\n"
-            "Esempio:           fastllm help pull\n"
+            "OPZIONI COMUNI\n"
+            "  --offload-experts      streama gli esperti MoE da disco (per modelli piu' grandi della\n"
+            "                         RAM: residente piccolo, piu' lento). Se il modello supera META'\n"
+            "                         della memoria libera+reclamabile e l'opzione non e' data, run/chat\n"
+            "                         chiedono [Y/n] sul terminale. Si disabilita la domanda con\n"
+            "                         FASTLLM_NO_OFFLOAD_PROMPT=1.\n"
+            "  --cache <dir>          radice del cache (pull/models/list/serve/doctor)\n"
+            "  --quiet                niente righe di progresso/riepilogo\n"
+            "\n"
+            "ESEMPI COMPLETI:  fastllm help <comando>   (oppure  fastllm <comando> --help)\n"
+            "                  Esempio: fastllm help pull\n"
             "\n"
             "Il token si passa SOLO con la variabile d'ambiente HF_TOKEN.\n"
             "Modelli locali registrati in $FASTLLM_HOME/models.tsv (default ~/.fastllm/models.tsv).\n");
@@ -61,6 +78,7 @@ void fmlx_cli_usage(FILE *out) {
 
 /* L'aiuto di UN comando: le sue bandiere E almeno un esempio con TUTTI i parametri. */
 static void usage_verb(FILE *out, const char *v) {
+    fprintf(out, "\n");
     if (!strcmp(v, "pull"))
         fprintf(out,
             "fastllm pull <repo> [opzioni]\n"
@@ -76,6 +94,7 @@ static void usage_verb(FILE *out, const char *v) {
             "  --repair               permesso di sostituire un blob che non verifica\n"
             "  --quiet                niente righe di progresso\n"
             "  -h, --help             questo testo\n"
+            "\n"
             "esempi:\n"
             "  fastllm pull mlx-community/Qwen3-8B-4bit\n"
             "  fastllm pull org/modello --revision main --cache ~/.cache/huggingface \\\n"
@@ -90,6 +109,7 @@ static void usage_verb(FILE *out, const char *v) {
             "  --quiet                solo gli id, uno per riga\n"
             "  --json                 la stessa lista in JSON\n"
             "  -h, --help             questo testo\n"
+            "\n"
             "esempi:\n"
             "  fastllm models\n"
             "  fastllm models qwen\n"
@@ -102,6 +122,7 @@ static void usage_verb(FILE *out, const char *v) {
             "  --json                 la stessa lista in JSON\n"
             "  --quiet                (accettata; la lista e' gia' compatta)\n"
             "  -h, --help             questo testo\n"
+            "\n"
             "esempi:\n"
             "  fastllm list\n"
             "  fastllm list --cache ~/.cache/huggingface --json\n");
@@ -113,6 +134,7 @@ static void usage_verb(FILE *out, const char *v) {
             "  --mmproj <path>        proiettore multimodale (per --modality vlm|ocr)\n"
             "  --modality <m>         chat | vlm | ocr | audio (default chat)\n"
             "  -h, --help             questo testo\n"
+            "\n"
             "esempi:\n"
             "  fastllm add llama1b ~/ai/Models/Llama-3.2-1B-Instruct-4bit\n"
             "  fastllm add ds4 ~/ds4/ds4flash.gguf --modality chat\n"
@@ -124,6 +146,7 @@ static void usage_verb(FILE *out, const char *v) {
             "  <nome|#n>              l'alias o l'indice dalla `list`\n"
             "  --purge                cancella anche i file (default: solo la voce)\n"
             "  -h, --help             questo testo\n"
+            "\n"
             "esempi:\n"
             "  fastllm rm ds4\n"
             "  fastllm rm 2\n"
@@ -133,6 +156,7 @@ static void usage_verb(FILE *out, const char *v) {
             "fastllm show <nome|#n>\n"
             "  <nome|#n>              l'alias o l'indice dalla `list`\n"
             "  -h, --help             questo testo\n"
+            "\n"
             "esempi:\n"
             "  fastllm show ds4\n"
             "  fastllm show 0\n");
@@ -147,6 +171,7 @@ static void usage_verb(FILE *out, const char *v) {
             "  --think                mostra il ragionamento dei modelli reasoning\n"
             "  --offload-experts      streama gli esperti MoE da disco (modelli > RAM)\n"
             "  -h, --help             questo testo\n"
+            "\n"
             "esempi:\n"
             "  fastllm run llama1b \"Ciao, presentati in una frase.\"\n"
             "  fastllm run 0 --cache ~/.cache/huggingface --system \"Sei conciso.\" \\\n"
@@ -161,6 +186,7 @@ static void usage_verb(FILE *out, const char *v) {
             "  --think                mostra il ragionamento dei modelli reasoning\n"
             "  --offload-experts      streama gli esperti MoE da disco (modelli > RAM)\n"
             "  -h, --help             questo testo\n"
+            "\n"
             "esempi:\n"
             "  fastllm chat llama1b\n"
             "  fastllm chat 0 --cache ~/.cache/huggingface --system \"Sei un assistente.\" \\\n"
@@ -176,6 +202,7 @@ static void usage_verb(FILE *out, const char *v) {
             "  --offload-experts      streama gli esperti MoE da disco (modelli > RAM)\n"
             "  --quiet                niente riepilogo finale su stdout (i log restano su stderr)\n"
             "  -h, --help             questo testo\n"
+            "\n"
             "esempi:\n"
             "  fastllm serve\n"
             "  fastllm serve --host 0.0.0.0 --port 8000 --cache ~/.cache/huggingface \\\n"
@@ -187,6 +214,7 @@ static void usage_verb(FILE *out, const char *v) {
             "  --host <if>            dove cercare il server (default 127.0.0.1)\n"
             "  --port <n>             porta (default FASTLLM_PORT, poi 8000)\n"
             "  -h, --help             questo testo\n"
+            "\n"
             "esempi:\n"
             "  fastllm ps\n"
             "  fastllm ps --host 127.0.0.1 --port 8000\n");
@@ -197,6 +225,7 @@ static void usage_verb(FILE *out, const char *v) {
             "  --cache <dir>          radice del cache\n"
             "  --quiet                SOLO le righe di problema (uscita 0 = niente corruzione)\n"
             "  -h, --help             questo testo\n"
+            "\n"
             "esempi:\n"
             "  fastllm doctor\n"
             "  fastllm doctor qwen\n"
@@ -523,6 +552,9 @@ FmlxCliStatus fmlx_cli_exec_with(const FmlxCliArgs *a_in, const FmlxHfTransport 
     if (!a_in) return FMLX_CLI_USAGE;
     ac = *a_in;
     a = &ac;
+    /* Solo `run`/`chat` sono interattivi: possono CHIEDERE (Y/N) di attivare `--offload-experts`
+     * quando il modello supera metà della memoria libera. `serve` no. */
+    fmlx_engine_set_interactive((!strcmp(a->verb, "run") || !strcmp(a->verb, "chat")) ? 1 : 0);
     /* `run`/`chat`: `<nome|#n>` del registro → percorso. Se non è nel registro resta com'è (path
      * locale, cache HF, $FMLX_MODELS_DIR): un nome non registrato non è un errore, è un'altra via. */
     if ((!strcmp(a->verb, "run") || !strcmp(a->verb, "chat")) && a->repo[0]) {
