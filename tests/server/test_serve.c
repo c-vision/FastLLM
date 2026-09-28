@@ -307,7 +307,8 @@ static void case_health(void) {
      * per omissione), non 503 (un supervisor ucciderebbe un processo sano). */
     CK(r_status(&r) == 200, "health status=%d", r_status(&r));
     CK(HAS(r_body(&r), "\"status\":\"degraded\""), "%s", r_body(&r));
-    CK(HAS(r_body(&r), "\"engine\":\"not_wired\""), "la lane del motore deve dirsi scoperta");
+    CK(HAS(r_body(&r), "\"engine\":\"ready\""), "la lane del motore deve dirsi pronta: %s",
+       r_body(&r));
     CK(HAS(r_body(&r), "\"catalog\":\"ready\""), "%s", r_body(&r));
     CK(HAS(r_body(&r), "\"auth\":\"disabled\""), "senza chiave deve dire disabled");
     /* I CONTI dei filtrati: filtrare non vuol dire tacere. La partizione deve TORNARE — 1 elencato,
@@ -415,7 +416,12 @@ static void case_auth(void) {
     fmlx_serve_buf_free(&b);
 }
 
-/* ---- ciò che chiede il motore: 501 con la ragione, nel dialetto giusto ---- */
+/* ---- il motore: le rotte GENERANO; ciò che non è in questa tappa resta 501 ----
+ *
+ * Il motore è cablato (lane LLMEngine). chat/completions/messages generano — con un modello
+ * che non esiste sono un 404 del dialetto, NON il vecchio 501 «manca il motore»; count_tokens
+ * conta con lo stesso render. Le rotte non ancora cablate (responses, embeddings, load, unload,
+ * status, metrics) restano 501 col loro codice stabile: mai un 200 vuoto. */
 
 static void case_engine_refusals(void) {
     FmlxServeBuf b;
@@ -424,21 +430,21 @@ static void case_engine_refusals(void) {
 
     CK(fmlx_serve_buf_init(&b, 0, 0) == 0, "buf_init");
 
+    /* Un modello che NON esiste: 404 con il tipo del dialetto. Il motore c'è, è il nome a
+     * essere sbagliato — e i due casi devono dire cose diverse. */
     CK(ask(rq("POST /v1/chat/completions", NULL,
               "{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"x\"}]}"),
            &o, &b, &r) == FMLX_SERVE_OK,
        "st chat");
-    CK(r_status(&r) == 501, "la generazione è 501, non un 200 vuoto (%d)\n%s", r_status(&r), r.s);
-    CK(HAS(r_body(&r), FMLX_SERVE_CODE_ENGINE), "il codice stabile deve esserci: %s", r_body(&r));
-    CK(HAS(r_body(&r), "chat completion"), "il PERCHÉ è specifico per rotta: %s", r_body(&r));
+    CK(r_status(&r) == 404 && HAS(r_body(&r), "\"type\":\"model_not_found\""),
+       "modello assente -> 404 model_not_found (%d)\n%s", r_status(&r), r.s);
     ck_length(&r);
 
-    /* Ogni rotta che genera, rifiutata: l'elenco è la tabella del router, non la mia memoria. */
+    /* Le rotte NON ancora cablate restano 501: l'elenco è la tabella del router, non memoria. */
     {
         static const struct { const char *path; int post; } R[] = {
-            {"/v1/completions", 1},   {"/v1/responses", 1},        {"/v1/embeddings", 1},
-            {"/v1/models/load", 1},   {"/v1/models/unload", 1},    {"/v1/models/status", 0},
-            {"/metrics", 0},
+            {"/v1/responses", 1},     {"/v1/embeddings", 1},    {"/v1/models/load", 1},
+            {"/v1/models/unload", 1}, {"/v1/models/status", 0}, {"/metrics", 0},
         };
         size_t i;
         for (i = 0; i < sizeof R / sizeof R[0]; i++) {
@@ -454,7 +460,15 @@ static void case_engine_refusals(void) {
         }
     }
 
-    /* Il dialetto si vede da CIÒ CHE IL CLIENT MANDA (`anthropic-version`), non dal path. */
+    /* `/v1/completions` genera anche lei: stesso 404 se il modello non c'è. */
+    CK(ask(rq("POST /v1/completions", NULL, "{\"model\":\"m\",\"prompt\":\"x\"}"), &o, &b, &r) ==
+               FMLX_SERVE_OK,
+           "st completions");
+    CK(r_status(&r) == 404 && HAS(r_body(&r), "\"type\":\"model_not_found\""),
+       "/v1/completions -> 404 model_not_found (%d)\n%s", r_status(&r), r_body(&r));
+
+    /* Il dialetto si vede da CIÒ CHE IL CLIENT MANDA (`anthropic-version`), non dal path:
+     * `/v1/messages` e `count_tokens` sono Anthropic e il 404 prende la LORO forma. */
     {
         const char *hd[] = {"anthropic-version: 2023-06-01", NULL};
         CK(ask(rq("POST /v1/messages", hd,
@@ -462,26 +476,17 @@ static void case_engine_refusals(void) {
                    "\"messages\":[{\"role\":\"user\",\"content\":\"x\"}]}"),
                &o, &b, &r) == FMLX_SERVE_OK,
            "st messages");
-        CK(r_status(&r) == 501, "messages -> 501 (%d)", r_status(&r));
-        CK(HAS(r_body(&r), "\"type\":\"error\""), "la forma dell'errore è Anthropic: %s",
-           r_body(&r));
-        /* Il `code` NON c'è: la forma Anthropic (piano:518) è `{type:"error",
-         * error:{type,message}}` e non ha quel campo — la lane ③ non aggiunge un campo al
-         * dialetto altrui. La distinzione, per un client Anthropic, sta nel 501 (che nessun altro
-         * nostro errore usa) e nella frase. Se il piano vorrà il `code` anche lì, si cambia il
-         * layer ② e il suo test, non qui. */
-        CK(HAS(r_body(&r), "\"type\":\"api_error\"") && HAS(r_body(&r), "inference engine"),
-           "il messaggio deve nominare il pezzo mancante: %s", r_body(&r));
+        CK(r_status(&r) == 404 && HAS(r_body(&r), "\"type\":\"error\"") &&
+               HAS(r_body(&r), "not_found_error"),
+           "messages -> 404 nella forma Anthropic (%d): %s", r_status(&r), r_body(&r));
         ck_length(&r);
 
-        /* `count_tokens`: la ragione VERA è già scritta nel layer ② e viene riusata. Qui si
-         * verifica che non ne arriva una DIVERSA sullo stesso fatto (due autorità = divergenza). */
-        CK(ask(rq("POST /v1/messages/count_tokens", hd, "{\"model\":\"m\"}"), &o, &b, &r) ==
-                   FMLX_SERVE_OK,
-               "st count_tokens");
-        CK(r_status(&r) == 501, "count_tokens -> 501 (%d)", r_status(&r));
-        CK(HAS(r_body(&r), "chat template"), "la ragione del layer ② arriva intatta: %s",
-           r_body(&r));
+        CK(ask(rq("POST /v1/messages/count_tokens", hd,
+                   "{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"x\"}]}"),
+               &o, &b, &r) == FMLX_SERVE_OK,
+           "st count_tokens");
+        CK(r_status(&r) == 404 && HAS(r_body(&r), "not_found_error"),
+           "count_tokens -> 404 nella forma Anthropic (%d): %s", r_status(&r), r_body(&r));
     }
     fmlx_serve_buf_free(&b);
 }
@@ -809,9 +814,9 @@ static void case_continue_100(void) {
         const char *fin = got + have;
         size_t n = read_all(fd, got + have, sizeof got - have);
         close(fd);
-        CK(strncmp(fin, "HTTP/1.1 501", 12) == 0, "manca il 501 dopo il via libera:\n%s", fin);
-        ck_framing(fin, n, "HTTP/1.1 501");
-        CK(HAS(fin, "\"code\":\"engine_not_wired\""), "il 501 non nomina il pezzo: %s", fin);
+        CK(strncmp(fin, "HTTP/1.1 404", 12) == 0, "manca il 404 dopo il via libera:\n%s", fin);
+        ck_framing(fin, n, "HTTP/1.1 404");
+        CK(HAS(fin, "\"type\":\"model_not_found\""), "il 404 non nomina il tipo: %s", fin);
     }
 
     /* Il secondo pezzo della regola: un corpo da zero byte NON merita il via libera. Se lo mandassi

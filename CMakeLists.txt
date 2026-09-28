@@ -1,10 +1,39 @@
 cmake_minimum_required(VERSION 3.20)
+
+# SDK 27 + Metal 27 non compilano i kernel NAX di MLX (`steel/gemm/nax.h`: "too many errors").
+# MLX costruisce quei kernel SOLO quando deployment target >= 26.2, e li salta (definendo
+# MLX_METAL_NO_NAX) sotto. Pinnare un deployment target normale è il fix robusto: la metallib
+# si costruisce dallo STESSO sorgente MLX del motore, senza dipendere da artefatti esterni.
+# Un valore passato sulla riga di comando vince (il blocco è condizionale).
+if(NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET OR CMAKE_OSX_DEPLOYMENT_TARGET STREQUAL "")
+  set(CMAKE_OSX_DEPLOYMENT_TARGET "15.0" CACHE STRING "macOS deployment target (senza NAX)")
+endif()
+
 project(FastLLM LANGUAGES C)
 
 # Il codec GGUF è UNA SOLA SORGENTE in LLMEnv: FastLLM lo CONSUMA. Progetto CMake autonomo
 # fratello (nessuna copia nel repo). Si aggancia QUI, PRIMA di `add_compile_options(-Werror)`,
 # così i sorgenti di LLMCodec non ereditano la politica di warning di FastLLM.
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../LLMEnv/LLMCodec ${CMAKE_BINARY_DIR}/llmcodec)
+
+# --- motore di inferenza: il tokenizer e l'engine MLX di LLMEnv -------------------------------
+# L'engine vive in LLMEnv/LLMEngine/mlx (target `llm_ai_mlx`), che a sua volta aggancia LLMCodec
+# (già presente) e LLMEngine/moe. Si aggancia QUI, PRIMA di `add_compile_options(-Werror)`, così
+# i sorgenti del motore non ereditano la politica di warning di FastLLM (stesso motivo del codec).
+# Il `set(LLMENV_BUILD_ENGINE ON)` documenta l'intenzione del superbuild di LLMEnv; l'aggancio è
+# DIRETTO sulla sottocartella perché il superbuild (plugin+moe+llama+mlx) colliderebbe sul target
+# `llmengine_plugin` (LLMModelIO lo aggiunge prima del blocco engine) e tirerebbe dentro anche
+# llama.cpp, che questa tappa non usa. Il target del motore resta UNO: `llm_ai_mlx`.
+set(LLMENV_BUILD_ENGINE ON CACHE BOOL "" FORCE)
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../LLMEnv/LLMToken ${CMAKE_BINARY_DIR}/llmtoken)
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../LLMEnv/LLMEngine/mlx ${CMAKE_BINARY_DIR}/llmengine_mlx)
+
+# MLX carica `mlx.metallib` a runtime dal path ASSOLUTO compilato in libmlx (target `mlx-metallib`
+# di MLX). Senza il file, OGNI forward Metal fallisce. Il target esiste, ma MLX lo lascia
+# SCOLLEGATO di proposito (vedi il commento in kernels/CMakeLists.txt): qui lo riagganciamo,
+# perché per FastLLM "il motore compila" deve significare "il motore parte".
+add_dependencies(llm_ai_mlx mlx-metallib)
+
 
 # Le estensioni GNU/POSIX servono: mmap/open/lseek non sono visibili con -std=c17 puro.
 set(CMAKE_C_STANDARD 17)
@@ -179,9 +208,15 @@ add_test(NAME api COMMAND test_api)
 # senza orologio, senza malloc), `fmlx_serve.c` è il LOOP (socket, segnali, byte fin dove la testata
 # promette). Nello stesso file, l'unica parte provabile in-process dipenderebbe dalla build di
 # quella che chiede una porta libera: e un test di framing diventerebbe un test di rete.
-add_library(fmlx_serve STATIC src/server/fmlx_serve_respond.c src/server/fmlx_serve.c)
-target_include_directories(fmlx_serve PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(fmlx_serve PUBLIC fmlx_api fmlx_hf)
+add_library(fmlx_serve STATIC src/server/fmlx_serve_respond.c src/server/fmlx_serve.c
+                             src/engine/fmlx_engine.c src/engine/fmlx_engine_gen.c)
+target_include_directories(fmlx_serve PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
+                              PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
+                                      ${CMAKE_CURRENT_SOURCE_DIR}/../LLMEnv/LLMEngine/include)
+# Il motore è una dipendenza PUBBLICA: chi linka `fmlx_serve` linka anche `llm_ai_mlx` e
+# `llmtoken` (dylib nel build tree). La generazione non è opzionale in questa lane: un
+# `fastmlx serve` che non potesse generare sarebbe il comando-che-risponde-di-sì.
+target_link_libraries(fmlx_serve PUBLIC fmlx_api fmlx_hf llm_ai_mlx llmtoken)
 
 # Il work directory qui serve DAVVERO: `/v1/models` e `/health` leggono il cache da disco, quindi
 # o il test costruisce un cache finto su disco, o sta provando un cammino che non ha mai corso.

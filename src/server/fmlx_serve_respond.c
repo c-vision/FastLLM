@@ -21,11 +21,15 @@
  */
 #include "fmlx/fmlx_serve.h"
 
+#include "engine/fmlx_engine.h"
+
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h> /* `strncasecmp`: i nomi di header non distinguono maiuscole da minuscole */
+#include <time.h>
+#include <unistd.h>
 
 /* Spazio tenuto libero davanti al corpo, perché `fmlx_http_write_head` scrive dall'inizio dello
  * stesso buffer e il corpo va poi spostato dietro la testata: è il pattern di
@@ -354,8 +358,8 @@ static FmlxServeSt body_health(FmlxServeBuf *buf, const Cat *c, int auth_on, int
          fmlx_jsonw_cstr(&jw, catalog_ok ? "degraded" : "unavailable") == FMLX_JSON_OK &&
          fmlx_jsonw_key(&jw, "reason") == FMLX_JSON_OK &&
          fmlx_jsonw_cstr(&jw, catalog_ok
-                              ? "serving /v1/models and /health only: the inference engine (lane 1) "
-                                "is not wired, so every generation route answers 501"
+                              ? "serving /v1/models, /health and inference: chat, completions "
+                                "and messages generate through the LLM engine"
                               : "the local catalog cannot be read: no route here has a true answer") ==
              FMLX_JSON_OK &&
          fmlx_jsonw_key(&jw, "lanes") == FMLX_JSON_OK && fmlx_jsonw_obj_begin(&jw) == FMLX_JSON_OK &&
@@ -368,7 +372,7 @@ static FmlxServeSt body_health(FmlxServeBuf *buf, const Cat *c, int auth_on, int
          fmlx_jsonw_key(&jw, "auth") == FMLX_JSON_OK &&
          fmlx_jsonw_cstr(&jw, auth_on ? "enabled" : "disabled") == FMLX_JSON_OK &&
          fmlx_jsonw_key(&jw, "engine") == FMLX_JSON_OK &&
-         fmlx_jsonw_cstr(&jw, "not_wired") == FMLX_JSON_OK && fmlx_jsonw_obj_end(&jw) == FMLX_JSON_OK &&
+         fmlx_jsonw_cstr(&jw, "ready") == FMLX_JSON_OK && fmlx_jsonw_obj_end(&jw) == FMLX_JSON_OK &&
          fmlx_jsonw_key(&jw, "cache") == FMLX_JSON_OK && fmlx_jsonw_obj_begin(&jw) == FMLX_JSON_OK &&
          fmlx_jsonw_key(&jw, "root") == FMLX_JSON_OK && fmlx_jsonw_cstr(&jw, c->root) == FMLX_JSON_OK &&
          fmlx_jsonw_key(&jw, "status_code") == FMLX_JSON_OK &&
@@ -436,6 +440,337 @@ static FmlxServeSt refuse_engine(FmlxServeBuf *buf, FmlxApiAction act, int anthr
              missing_route_reason(act));
     e.message = msg;
     return refuse(buf, &e, anthropic, out_len);
+}
+
+/* ---- la generazione vera: il ponte verso il motore (lane LLMEngine) ----
+ *
+ * Qui il 501 diventa una risposta. Il confine è quello di `fmlx_api.h`: il motore produce
+ * EVENTI NEUTRI, il layer ② li veste nel dialetto. Questo file fa da trasportatore: risolve il
+ * modello (cache residente), prepara il prompt, e consuma `fmlx_engine_next` o in un
+ * accumulatore (risposta completa) o dentro lo stream SSE del dialetto giusto.
+ *
+ * L'ORDINE è deliberato: il modello si carica e la generazione si avvia PRIMA di scrivere la
+ * testata. Un errore di load/decode è quindi un 404/500 NORMALE; solo dopo che la generazione
+ * è in mano si apre lo stream (una `data:` SSE non si ritira). */
+
+/* Il nome del modello copiato dal DOM (la slice non è NUL-terminata) in un buffer da path. */
+static int copy_model_name(const FmlxSlice s, char *out, size_t cap) {
+    if (s.n == 0 || s.n >= cap) return -1;
+    memcpy(out, s.p, s.n);
+    out[s.n] = '\0';
+    return 0;
+}
+
+/* Errore del motore reso nel dialetto giusto e con un codice macchina-leggibile. */
+static FmlxServeSt engine_fail(FmlxServeBuf *buf, FmlxApiErr err, const char *code,
+                               const char *msg, int anthropic, size_t *out_len) {
+    return refuse_simple(buf, err, anthropic, code, msg, out_len);
+}
+
+/* La risposta NON-stream: consuma tutti gli eventi, accumula, e rende il corpo del dialetto. */
+static FmlxServeSt gen_nonstream(FmlxServeBuf *buf, FmlxEngineGen *g, const FmlxApiChat *c,
+                                 const FmlxApiMeta *m, int anthropic, int ka, size_t *out_len) {
+    char *text = malloc(1u << 18);
+    char *think = malloc(4096);
+    char *args = malloc(FMLX_API_MAX_TOOLCALLS * 2048u);
+    FmlxApiAcc a;
+    FmlxApiErr err = FMLX_API_OK;
+    FmlxJsonW w;
+    size_t blen = 0;
+
+    if (!text || !think || !args) {
+        free(text);
+        free(think);
+        free(args);
+        return FMLX_SERVE_BUF_SMALL;
+    }
+    fmlx_api_acc_init(&a, text, 1u << 18, think, 4096, args, 2048u);
+    for (;;) {
+        FmlxApiEvent ev;
+        FmlxApiErrCtx ec;
+        FmlxApiGenSt gs;
+        memset(&ev, 0, sizeof ev);
+        memset(&ec, 0, sizeof ec);
+        gs = fmlx_engine_next(g, &ev, &ec);
+        if (gs == FMLX_API_GEN_ERR) {
+            err = ec.err ? ec.err : FMLX_API_INTERNAL;
+            break;
+        }
+        if (gs == FMLX_API_GEN_END) break;
+        if (fmlx_api_acc_push(&a, &ev) != FMLX_API_OK) {
+            err = FMLX_API_INTERNAL;
+            break;
+        }
+        if (ev.ev == FMLX_API_EV_DONE) break;
+    }
+    if (err == FMLX_API_OK && a.overflow) err = FMLX_API_INTERNAL;
+    if (err != FMLX_API_OK) {
+        free(text);
+        free(think);
+        free(args);
+        return engine_fail(buf, FMLX_API_INTERNAL, NULL,
+                           "the engine produced more text than this server's buffers hold",
+                           anthropic, out_len);
+    }
+    fmlx_jsonw_init(&w, buf->resp + RESERVE, buf->resp_cap - RESERVE, buf->resp_cap - RESERVE);
+    if (anthropic) err = fmlx_api_anthropic_message(c, m, &a, &w);
+    else err = fmlx_api_openai_completion(c, m, &a, &w);
+    if (err == FMLX_API_OK && fmlx_jsonw_finish(&w, &blen) == FMLX_JSON_OK) {
+        fmlx_jsonw_free(&w);
+        free(text);
+        free(think);
+        free(args);
+        return finish_ok(buf, 200, "application/json", blen, ka, out_len);
+    }
+    fmlx_jsonw_free(&w);
+    free(text);
+    free(think);
+    free(args);
+    if (err != FMLX_API_OK)
+        return engine_fail(buf, FMLX_API_INTERNAL, NULL,
+                           "the response body could not be rendered for the client protocol",
+                           anthropic, out_len);
+    return engine_fail(buf, FMLX_API_INTERNAL, NULL,
+                       "the response does not fit this server's response buffer", anthropic,
+                       out_len);
+}
+
+/* La risposta streaming: la testata SSE e poi i frame del dialetto, tutti nel buffer della
+ * risposta. Il loop li manda interi (chunked): il client vede un flusso SSE valido e chiuso. */
+static FmlxServeSt gen_stream(FmlxServeBuf *buf, FmlxEngineGen *g, const FmlxApiChat *c,
+                              const FmlxApiMeta *m, int anthropic, size_t *out_len) {
+    FmlxHttpRes w;
+    FmlxApiErr err;
+
+    fmlx_http_res_init(&w, buf->resp, buf->resp_cap);
+    if (fmlx_api_sse_head(&w) != FMLX_HTTP_OK) return FMLX_SERVE_BUF_SMALL;
+    err = anthropic ? fmlx_api_anthropic_stream(c, m, fmlx_engine_next, g, &w)
+                    : fmlx_api_openai_stream(c, m, fmlx_engine_next, g, &w);
+    if (err != FMLX_API_OK) return FMLX_SERVE_BUF_SMALL; /* nessun byte a metà esce */
+    *out_len = w.len;
+    return FMLX_SERVE_OK;
+}
+
+/* Il corpo di una richiesta di CHAT (OpenAI `/v1/chat/completions` o Anthropic `/v1/messages`).
+ * `body` è già stato validato come oggetto JSON; qui si ri-parsa per avere il DOM vivo durante
+ * la generazione (l'adapter conserva SLICE nel DOM del chiamante). */
+static FmlxServeSt body_chat(FmlxServeBuf *buf, const char *body, size_t body_len, int act,
+                             int anthropic, const FmlxServeOpts *o, int ka, size_t *out_len) {
+    FmlxJsonDoc doc;
+    const FmlxJsonValue *root;
+    FmlxApiChat chat;
+    FmlxApiErrCtx e;
+    FmlxApiErr api;
+    FmlxEngineModel *model;
+    FmlxEngineGen *g;
+    char name[FMLX_ENGINE_NAME_MAX] = "";
+    char err[512] = "";
+    FmlxApiMeta meta;
+    static unsigned long seq = 0;
+    FmlxServeSt st;
+
+    fmlx_json_doc_init(&doc);
+    if (fmlx_json_parse(body, body_len, 0, &doc) != FMLX_JSON_OK) {
+        fmlx_json_doc_free(&doc);
+        return engine_fail(buf, FMLX_API_INTERNAL, NULL,
+                           "the request body could not be parsed again", anthropic, out_len);
+    }
+    root = fmlx_json_root(&doc);
+    fmlx_api_chat_init(&chat);
+    memset(&e, 0, sizeof e);
+    api = act == FMLX_API_ACT_CHAT ? fmlx_api_openai_parse(root, &chat, &e)
+                                   : fmlx_api_anthropic_parse(root, &chat, &e);
+    if (api != FMLX_API_OK) {
+        fmlx_json_doc_free(&doc);
+        return refuse(buf, &e, anthropic, out_len);
+    }
+    if (copy_model_name(chat.model, name, sizeof name) != 0) {
+        fmlx_json_doc_free(&doc);
+        return engine_fail(buf, FMLX_API_INVALID_REQUEST, "model_not_found",
+                           "model is required and must name a local model", anthropic, out_len);
+    }
+    model = fmlx_engine_model(o ? o->cache_root : NULL, name, err, sizeof err);
+    if (!model) {
+        char msg[600];
+        snprintf(msg, sizeof msg, "the requested model is not available: %s", err);
+        fmlx_json_doc_free(&doc);
+        return engine_fail(buf, FMLX_API_MODEL_NOT_FOUND, NULL, msg, anthropic, out_len);
+    }
+    g = fmlx_engine_chat(model, &chat, err, sizeof err);
+    if (!g) {
+        char msg[600];
+        snprintf(msg, sizeof msg, "the engine could not start the generation: %s", err);
+        fmlx_json_doc_free(&doc);
+        return engine_fail(buf, FMLX_API_INTERNAL, NULL, msg, anthropic, out_len);
+    }
+
+    memset(&meta, 0, sizeof meta);
+    {
+        static char idbuf[FMLX_API_MAX_NAME];
+        snprintf(idbuf, sizeof idbuf, "%s-%ld-%lu", anthropic ? "msg" : "chatcmpl", (long)getpid(),
+                 ++seq);
+        meta.id = idbuf;
+        meta.created = (int64_t)time(NULL);
+        meta.prompt_tokens_known = 0; /* lo conosce il motore, non questo layer */
+    }
+    st = chat.stream ? gen_stream(buf, g, &chat, &meta, anthropic, out_len)
+                     : gen_nonstream(buf, g, &chat, &meta, anthropic, ka, out_len);
+    fmlx_engine_gen_free(g);
+    fmlx_json_doc_free(&doc);
+    return st;
+}
+
+/* Il corpo di `/v1/completions`: prompt grezzo, nessun chat template. Il dialetto è OpenAI. */
+static FmlxServeSt body_completions(FmlxServeBuf *buf, const char *body, size_t body_len,
+                                    const FmlxServeOpts *o, int ka, size_t *out_len) {
+    FmlxJsonDoc doc;
+    const FmlxJsonValue *root, *v, *p;
+    FmlxSlice mslice;
+    char name[FMLX_ENGINE_NAME_MAX] = "";
+    char err[512] = "";
+    const char *prompt = NULL;
+    size_t prompt_len = 0;
+    int max_tokens = 256, stream = 0;
+    double temperature = 1.0, top_p = 1.0, presence = 0.0, frequency = 0.0;
+    int64_t seed = 0, tmp;
+    FmlxEngineModel *model;
+    FmlxEngineGen *g;
+    FmlxApiChat chat;
+    FmlxApiMeta meta;
+    static unsigned long seq = 0;
+    FmlxServeSt st;
+
+    fmlx_json_doc_init(&doc);
+    if (fmlx_json_parse(body, body_len, 0, &doc) != FMLX_JSON_OK) {
+        fmlx_json_doc_free(&doc);
+        return engine_fail(buf, FMLX_API_INVALID_REQUEST, FMLX_SERVE_CODE_BODY_INVALID,
+                           "request body is not valid JSON", 0, out_len);
+    }
+    root = fmlx_json_root(&doc);
+    p = fmlx_json_obj_get(root, "prompt");
+    if (!p || p->type != FMLX_JSON_STR) {
+        fmlx_json_doc_free(&doc);
+        return engine_fail(buf, FMLX_API_INVALID_REQUEST, "invalid_prompt",
+                           "prompt is required and must be a string", 0, out_len);
+    }
+    prompt = fmlx_json_str(p);
+    prompt_len = fmlx_json_str_len(p);
+    (void)prompt_len;
+    v = fmlx_json_obj_get(root, "model");
+    {
+        const char *mp = NULL;
+        size_t mn = 0;
+        if (!v || !fmlx_json_as_str(v, &mp, &mn) || mn > 0xffffffffu ||
+            copy_model_name((FmlxSlice){mp, (uint32_t)mn}, name, sizeof name) != 0) {
+            fmlx_json_doc_free(&doc);
+            return engine_fail(buf, FMLX_API_INVALID_REQUEST, "model_not_found",
+                               "model is required and must name a local model", 0, out_len);
+        }
+        mslice.p = mp;
+        mslice.n = (uint32_t)mn;
+    }
+    if ((v = fmlx_json_obj_get(root, "max_tokens")) && fmlx_json_as_i64(v, &tmp) && tmp > 0)
+        max_tokens = (int)(tmp > FMLX_ENGINE_MAX_NEW ? FMLX_ENGINE_MAX_NEW : tmp);
+    if ((v = fmlx_json_obj_get(root, "temperature")) && fmlx_json_as_f64(v, &temperature)) {}
+    if ((v = fmlx_json_obj_get(root, "top_p")) && fmlx_json_as_f64(v, &top_p)) {}
+    if ((v = fmlx_json_obj_get(root, "presence_penalty")) && fmlx_json_as_f64(v, &presence)) {}
+    if ((v = fmlx_json_obj_get(root, "frequency_penalty")) && fmlx_json_as_f64(v, &frequency)) {}
+    if ((v = fmlx_json_obj_get(root, "seed")) && fmlx_json_as_i64(v, &seed)) {}
+    if ((v = fmlx_json_obj_get(root, "stream"))) fmlx_json_as_bool(v, &stream);
+
+    model = fmlx_engine_model(o ? o->cache_root : NULL, name, err, sizeof err);
+    if (!model) {
+        char msg[600];
+        snprintf(msg, sizeof msg, "the requested model is not available: %s", err);
+        fmlx_json_doc_free(&doc);
+        return engine_fail(buf, FMLX_API_MODEL_NOT_FOUND, NULL, msg, 0, out_len);
+    }
+    g = fmlx_engine_prompt(model, prompt, max_tokens, (float)temperature, (float)top_p, 0,
+                           (float)presence, (float)frequency, seed, err, sizeof err);
+    if (!g) {
+        char msg[600];
+        snprintf(msg, sizeof msg, "the engine could not start the generation: %s", err);
+        fmlx_json_doc_free(&doc);
+        return engine_fail(buf, FMLX_API_INTERNAL, NULL, msg, 0, out_len);
+    }
+    fmlx_api_chat_init(&chat);
+    chat.model = mslice;
+    chat.stream = stream;
+    memset(&meta, 0, sizeof meta);
+    {
+        static char idbuf[FMLX_API_MAX_NAME];
+        snprintf(idbuf, sizeof idbuf, "cmpl-%ld-%lu", (long)getpid(), ++seq);
+        meta.id = idbuf;
+        meta.created = (int64_t)time(NULL);
+    }
+    st = stream ? gen_stream(buf, g, &chat, &meta, 0, out_len)
+                : gen_nonstream(buf, g, &chat, &meta, 0, ka, out_len);
+    fmlx_engine_gen_free(g);
+    fmlx_json_doc_free(&doc);
+    return st;
+}
+
+/* `/v1/messages/count_tokens`: il conteggio ESATTO, applicando lo stesso render del template
+ * che la generazione userebbe. Niente stime. */
+static FmlxServeSt body_count_tokens(FmlxServeBuf *buf, const char *body, size_t body_len,
+                                     const FmlxServeOpts *o, size_t *out_len) {
+    FmlxJsonDoc doc;
+    const FmlxJsonValue *root;
+    FmlxApiChat chat;
+    FmlxApiErrCtx e;
+    FmlxEngineModel *model;
+    char name[FMLX_ENGINE_NAME_MAX] = "";
+    char err[512] = "";
+    int n = 0;
+    FmlxJsonW w;
+    size_t blen = 0;
+    FmlxApiErr api;
+
+    fmlx_json_doc_init(&doc);
+    if (fmlx_json_parse(body, body_len, 0, &doc) != FMLX_JSON_OK) {
+        fmlx_json_doc_free(&doc);
+        return engine_fail(buf, FMLX_API_INVALID_REQUEST, FMLX_SERVE_CODE_BODY_INVALID,
+                           "request body is not valid JSON", 1, out_len);
+    }
+    root = fmlx_json_root(&doc);
+    fmlx_api_chat_init(&chat);
+    memset(&e, 0, sizeof e);
+    api = fmlx_api_anthropic_parse(root, &chat, &e);
+    if (api != FMLX_API_OK) {
+        fmlx_json_doc_free(&doc);
+        return refuse(buf, &e, 1, out_len);
+    }
+    if (copy_model_name(chat.model, name, sizeof name) != 0) {
+        fmlx_json_doc_free(&doc);
+        return engine_fail(buf, FMLX_API_INVALID_REQUEST, "model_not_found",
+                           "model is required and must name a local model", 1, out_len);
+    }
+    model = fmlx_engine_model(o ? o->cache_root : NULL, name, err, sizeof err);
+    if (!model) {
+        char msg[600];
+        snprintf(msg, sizeof msg, "the requested model is not available: %s", err);
+        fmlx_json_doc_free(&doc);
+        return engine_fail(buf, FMLX_API_MODEL_NOT_FOUND, NULL, msg, 1, out_len);
+    }
+    if (fmlx_engine_count_tokens(model, &chat, &n, err, sizeof err) != 0) {
+        char msg[600];
+        snprintf(msg, sizeof msg, "the prompt could not be tokenized: %s", err);
+        fmlx_json_doc_free(&doc);
+        return engine_fail(buf, FMLX_API_INTERNAL, NULL, msg, 1, out_len);
+    }
+    fmlx_jsonw_init(&w, buf->resp + RESERVE, buf->resp_cap - RESERVE, buf->resp_cap - RESERVE);
+    if (fmlx_jsonw_obj_begin(&w) != FMLX_JSON_OK || fmlx_jsonw_key(&w, "input_tokens") != FMLX_JSON_OK ||
+        fmlx_jsonw_i64(&w, n) != FMLX_JSON_OK || fmlx_jsonw_obj_end(&w) != FMLX_JSON_OK ||
+        fmlx_jsonw_finish(&w, &blen) != FMLX_JSON_OK) {
+        fmlx_jsonw_free(&w);
+        fmlx_json_doc_free(&doc);
+        return engine_fail(buf, FMLX_API_INTERNAL, NULL,
+                           "the token count response does not fit this server's buffer", 1,
+                           out_len);
+    }
+    fmlx_jsonw_free(&w);
+    fmlx_json_doc_free(&doc);
+    return finish_ok(buf, 200, "application/json", blen, 1, out_len);
 }
 
 /* ---- validazione del corpo: la parte che NON dipende dal motore ---- */
@@ -601,19 +936,8 @@ static FmlxServeSt respond_one(const FmlxHttpReq *req, const char *body, size_t 
         return st;
     }
 
-    /* `count_tokens` ha già il SUO rifiuto scritto nel layer ②, con la ragione vera («il
-     * conteggio deve usare lo stesso render del template del modello, e il render non c'è»):
-     * riusarlo è la regola della sorgente unica, non pigrizia. Qui non si riscrive una frase
-     * diversa sullo stesso fatto. */
-    if (act == FMLX_API_ACT_COUNT_TOKENS) {
-        FmlxApiErrCtx e;
-        memset(&e, 0, sizeof e);
-        fmlx_api_anthropic_count_tokens(&e);
-        st = refuse(&buf, &e, 1, out_len);
-        *keep_alive = st == FMLX_SERVE_OK ? ka : 0;
-        return st;
-    }
-
+    /* `count_tokens`: ora il render del template C'È, quindi il conteggio è ESATTO. La rotta
+     * resta Anthropic e il corpo è un oggetto JSON da validare come gli altri. */
     if (route_has_body(act)) {
         if (body_len > fmlx_serve_body_limit(o)) {
             st = refuse_simple(&buf, FMLX_API_INVALID_REQUEST, ant, FMLX_SERVE_CODE_BODY_LARGE,
@@ -638,6 +962,27 @@ static FmlxServeSt respond_one(const FmlxHttpReq *req, const char *body, size_t 
             return FMLX_SERVE_OK; /* il corpo era sbagliato: il 400 è già nel buffer */
         }
         if (v == V_BUF_SMALL) return FMLX_SERVE_BUF_SMALL;
+    }
+
+    /* Le rotte che ORA generano davvero. L'ordine è quello del router: chat e messages sono
+     * il cuore, completions il prompt grezzo, count_tokens il tokenizzatore esatto. Tutte le
+     * altre (responses, embeddings, load, unload, status, metrics) restano 501: non sono in
+     * questa tappa e rispondono il loro codice stabile, mai un 200 vuoto. */
+    switch (act) {
+    case FMLX_API_ACT_CHAT:
+    case FMLX_API_ACT_MESSAGES:
+        st = body_chat(&buf, body, body_len, act, ant, o, ka, out_len);
+        *keep_alive = st == FMLX_SERVE_OK ? ka : 0;
+        return st;
+    case FMLX_API_ACT_COMPLETIONS:
+        st = body_completions(&buf, body, body_len, o, ka, out_len);
+        *keep_alive = st == FMLX_SERVE_OK ? ka : 0;
+        return st;
+    case FMLX_API_ACT_COUNT_TOKENS:
+        st = body_count_tokens(&buf, body, body_len, o, out_len);
+        *keep_alive = st == FMLX_SERVE_OK ? ka : 0;
+        return st;
+    default: break;
     }
 
     st = refuse_engine(&buf, act, ant, out_len);
