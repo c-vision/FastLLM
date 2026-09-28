@@ -216,10 +216,32 @@ static void read_bos(const char *dir, char *out, size_t cap) {
 
 /* ---- chat template ---- */
 
-/* Estrae `chat_template` (stringa o lista di {name,template}) e ne riconosce la FAMIGLIA.
- * Un template sconosciuto NON è un errore: si usa il fallback generico e lo si dice nel log
- * del server. Inoltre ritorna una COPIA malloc del template (per il motore Jinja) con la sua
- * lunghezza; `*out_tpl` resta NULL se il modello non ne ha uno. */
+/* Classifica la FAMIGLIA di un template dai token letterali che usa e ne ritorna una COPIA
+ * malloc (per il motore Jinja). `*out_tpl` resta NULL se `tpl` è NULL. */
+static FmlxTplKind classify_tpl(const char *tpl, size_t tpl_len, char **out_tpl, size_t *out_len) {
+    FmlxTplKind kind = FMLX_TPL_GENERIC;
+
+    if (!tpl) return kind;
+    /* Una scansione per prefisso: il template è testo, e la firma di famiglia sta nei token
+     * letterali che usa. `tpl_len` limita la ricerca a ciò che il DOM possiede. */
+    char *tmp = malloc(tpl_len + 1);
+    if (tmp) {
+        memcpy(tmp, tpl, tpl_len);
+        tmp[tpl_len] = '\0';
+        if (strstr(tmp, "<|start_header_id|>") && strstr(tmp, "<|begin_of_text|>"))
+            kind = FMLX_TPL_LLAMA3;
+        else if (strstr(tmp, "<|im_start|>"))
+            kind = FMLX_TPL_CHATML;
+        if (out_tpl) *out_tpl = tmp;
+        else free(tmp);
+        if (out_len) *out_len = tpl_len;
+    }
+    return kind;
+}
+
+/* Estrae `chat_template` (stringa o lista di {name,template}) da tokenizer_config.json; se non
+ * c'è, prova il file `chat_template.jinja` (la forma che HF scrive oggi). Ritorna la famiglia e
+ * una copia malloc del template in `*out_tpl` (NULL se il modello non ne ha uno). */
 static FmlxTplKind detect_template(const char *dir, char **out_tpl, size_t *out_len) {
     char path[FMLX_ENGINE_PATH_MAX];
     char *txt;
@@ -235,44 +257,41 @@ static FmlxTplKind detect_template(const char *dir, char **out_tpl, size_t *out_
     if (snprintf(path, sizeof path, "%s/tokenizer_config.json", dir) >= (int)sizeof path)
         return kind;
     txt = read_file(path, &len);
-    if (!txt) return kind;
-    fmlx_json_doc_init(&doc);
-    if (fmlx_json_parse(txt, len, 0, &doc) != FMLX_JSON_OK) {
+    if (txt) {
+        fmlx_json_doc_init(&doc);
+        if (fmlx_json_parse(txt, len, 0, &doc) == FMLX_JSON_OK) {
+            root = fmlx_json_root(&doc);
+            v = fmlx_json_obj_get(root, "chat_template");
+            if (v && v->type == FMLX_JSON_STR) {
+                tpl = fmlx_json_str(v);
+                tpl_len = fmlx_json_str_len(v);
+            } else if (v && v->type == FMLX_JSON_ARR && fmlx_json_arr_n(v)) {
+                const FmlxJsonValue *e = fmlx_json_arr_at(v, 0);
+                const FmlxJsonValue *t = fmlx_json_obj_get(e, "template");
+                if (t && t->type == FMLX_JSON_STR) {
+                    tpl = fmlx_json_str(t);
+                    tpl_len = fmlx_json_str_len(t);
+                }
+            }
+            kind = classify_tpl(tpl, tpl_len, out_tpl, out_len);
+            if (tpl) {
+                fmlx_json_doc_free(&doc);
+                free(txt);
+                return kind;
+            }
+        }
         fmlx_json_doc_free(&doc);
         free(txt);
-        return kind;
     }
-    root = fmlx_json_root(&doc);
-    v = fmlx_json_obj_get(root, "chat_template");
-    if (v && v->type == FMLX_JSON_STR) {
-        tpl = fmlx_json_str(v);
-        tpl_len = fmlx_json_str_len(v);
-    } else if (v && v->type == FMLX_JSON_ARR && fmlx_json_arr_n(v)) {
-        const FmlxJsonValue *e = fmlx_json_arr_at(v, 0);
-        const FmlxJsonValue *t = fmlx_json_obj_get(e, "template");
-        if (t && t->type == FMLX_JSON_STR) {
-            tpl = fmlx_json_str(t);
-            tpl_len = fmlx_json_str_len(t);
+    /* Fallback: il template in un file SUO (`chat_template.jinja`), come nei repo HF recenti. */
+    if (snprintf(path, sizeof path, "%s/chat_template.jinja", dir) < (int)sizeof path &&
+        path_is_file(path)) {
+        txt = read_file(path, &len);
+        if (txt) {
+            kind = classify_tpl(txt, len, out_tpl, out_len);
+            free(txt);
         }
     }
-    if (tpl) {
-        /* Una scansione per prefisso: il template è testo, e la firma di famiglia sta nei
-         * token letterali che usa. `tpl_len` limita la ricerca a ciò che il DOM possiede. */
-        char *tmp = malloc(tpl_len + 1);
-        if (tmp) {
-            memcpy(tmp, tpl, tpl_len);
-            tmp[tpl_len] = '\0';
-            if (strstr(tmp, "<|start_header_id|>") && strstr(tmp, "<|begin_of_text|>"))
-                kind = FMLX_TPL_LLAMA3;
-            else if (strstr(tmp, "<|im_start|>"))
-                kind = FMLX_TPL_CHATML;
-            if (out_tpl) *out_tpl = tmp;
-            else free(tmp);
-            if (out_len) *out_len = tpl_len;
-        }
-    }
-    fmlx_json_doc_free(&doc);
-    free(txt);
     return kind;
 }
 
