@@ -38,6 +38,7 @@
  */
 #include "fmlx/fmlx_cli.h"
 #include "fmlx/fmlx_hf.h"
+#include "fmlx/fmlx_json.h"
 #include "fmlx_cli_internal.h" /* fmlx_cli_fmt_bytes: la formattazione è UNA, chi la usa sono due */
 
 #include <stdio.h>
@@ -164,6 +165,72 @@ static void print_row(const FmlxHfRepo *r, int64_t now, size_t wname, FILE *out)
             age);
 }
 
+/* L'uscita JSON: la STESSA lista, per uno script. I campi sono quelli che la tabella mostra, coi
+ * nomi in snake_case: un campo che c'è nella tabella e non nel JSON (o viceversa) sarebbe una
+ * seconda verità sui fatti del cache, ed è il modo in cui due interfacce divergono. `unreadable`
+ * resta un booleano e i suoi numeri restano il VERO (zero, perché non li abbiamo letti), ma la
+ * distinzione «non so» vs «zero» la porta `unreadable`, come il trattino della tabella. */
+static FmlxCliStatus models_json(FILE *out, FILE *err, const FmlxHfRepo *v, size_t n,
+                                 const char *filt, const char *root, size_t *kept) {
+    FmlxJsonW w;
+    size_t blen = 0, i;
+    int rc = 0;
+
+    *kept = 0;
+    fmlx_jsonw_init(&w, NULL, 0, 1u << 24);
+    do {
+        if (fmlx_jsonw_obj_begin(&w) != FMLX_JSON_OK) break;
+        if (fmlx_jsonw_key(&w, "model_dir") != FMLX_JSON_OK ||
+            fmlx_jsonw_cstr(&w, root ? root : "") != FMLX_JSON_OK ||
+            fmlx_jsonw_key(&w, "models") != FMLX_JSON_OK || fmlx_jsonw_arr_begin(&w) != FMLX_JSON_OK)
+            break;
+        for (i = 0; i < n; i++) {
+            if (!fmlx_cli_filter_match(filt, v[i].repo_id)) continue;
+            (*kept)++;
+            if (fmlx_jsonw_obj_begin(&w) != FMLX_JSON_OK ||
+                fmlx_jsonw_key(&w, "id") != FMLX_JSON_OK ||
+                fmlx_jsonw_cstr(&w, v[i].repo_id) != FMLX_JSON_OK ||
+                fmlx_jsonw_key(&w, "kind") != FMLX_JSON_OK ||
+                fmlx_jsonw_cstr(&w, v[i].kind) != FMLX_JSON_OK ||
+                fmlx_jsonw_key(&w, "bytes") != FMLX_JSON_OK ||
+                fmlx_jsonw_i64(&w, v[i].bytes) != FMLX_JSON_OK ||
+                fmlx_jsonw_key(&w, "blobs") != FMLX_JSON_OK ||
+                fmlx_jsonw_u64(&w, (uint64_t)v[i].n_blobs) != FMLX_JSON_OK ||
+                fmlx_jsonw_key(&w, "refs") != FMLX_JSON_OK ||
+                fmlx_jsonw_u64(&w, (uint64_t)v[i].n_refs) != FMLX_JSON_OK ||
+                fmlx_jsonw_key(&w, "mtime") != FMLX_JSON_OK ||
+                fmlx_jsonw_i64(&w, v[i].mtime) != FMLX_JSON_OK ||
+                fmlx_jsonw_key(&w, "refs_only") != FMLX_JSON_OK ||
+                fmlx_jsonw_bool(&w, v[i].refs_only) != FMLX_JSON_OK ||
+                fmlx_jsonw_key(&w, "ambiguous_name") != FMLX_JSON_OK ||
+                fmlx_jsonw_bool(&w, v[i].ambiguous_name) != FMLX_JSON_OK ||
+                fmlx_jsonw_key(&w, "unreadable") != FMLX_JSON_OK ||
+                fmlx_jsonw_bool(&w, v[i].unreadable) != FMLX_JSON_OK ||
+                fmlx_jsonw_key(&w, "dirname") != FMLX_JSON_OK ||
+                fmlx_jsonw_cstr(&w, v[i].dirname) != FMLX_JSON_OK ||
+                fmlx_jsonw_obj_end(&w) != FMLX_JSON_OK)
+                break;
+        }
+        if (fmlx_jsonw_arr_end(&w) != FMLX_JSON_OK || fmlx_jsonw_obj_end(&w) != FMLX_JSON_OK ||
+            fmlx_jsonw_finish(&w, &blen) != FMLX_JSON_OK)
+            break;
+        rc = 1;
+    } while (0);
+    if (!rc) {
+        fmlx_jsonw_free(&w);
+        fprintf(err, "fastmlx models: la lista JSON non entra nel buffer\n");
+        return FMLX_CLI_FAILED;
+    }
+    fwrite(w.buf ? w.buf : "{}", 1, blen, out);
+    fputc('\n', out);
+    fmlx_jsonw_free(&w);
+    if (filt && *kept == 0) {
+        fprintf(err, "fastmlx models: nessun repo nel cache che matcha '%s'\n", filt);
+        return FMLX_CLI_FAILED;
+    }
+    return FMLX_CLI_OK;
+}
+
 FmlxCliStatus fmlx_models_exec(const FmlxCliArgs *a, FILE *out, FILE *err) {
     FmlxHfRepo *v;
     const char *given, *filt;
@@ -211,6 +278,12 @@ FmlxCliStatus fmlx_models_exec(const FmlxCliArgs *a, FILE *out, FILE *err) {
     }
     if (given) snprintf(root, sizeof root, "%s", given);
     else (void)fmlx_hf_cache_root(root, sizeof root);
+
+    if (a->json) { /* la stessa lista, per uno script: il filtro vale come per la tabella */
+        FmlxCliStatus js = models_json(out, err, v, n, filt, root, &kept);
+        free(v);
+        return js;
+    }
 
     if (a->quiet) { /* una riga per repo: niente da parsare */
         for (i = 0; i < n; i++) {

@@ -250,10 +250,14 @@ add_test(NAME tools COMMAND test_tools)
 # grandezza di costo — due verbi nello stesso file avrebbero indotto l'uno a pagare il lavoro
 # dell'altro.
 add_library(fmlx_cli STATIC src/cli/fmlx_pull.c src/cli/fmlx_models.c src/cli/fmlx_cli.c
-                            src/cli/fmlx_pull_progress.c src/cli/fmlx_serve.c src/cli/fmlx_doctor.c)
-target_include_directories(fmlx_cli PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+                            src/cli/fmlx_pull_progress.c src/cli/fmlx_serve.c src/cli/fmlx_doctor.c
+                            src/cli/fmlx_gen.c src/cli/fmlx_run.c src/cli/fmlx_chat.c
+                            src/cli/fmlx_ps.c)
+target_include_directories(fmlx_cli PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
+                            PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 # `fmlx_serve` tra le dipendenze PUBBLICHE: il verbo c'è solo se il loop c'è, e un `serve` che
-# compilasse senza il socket sarebbe il "comando che risponde di sì" che il piano vieta.
+# compilasse senza il socket sarebbe il "comando che risponde di sì" che il piano vieta. Da lì
+# arrivano anche `llm_ai_mlx`/`llmtoken`/`llmjinja`, cioè il motore di cui `run`/`chat` si servono.
 target_link_libraries(fmlx_cli PUBLIC fmlx_hf_fetch fmlx_serve)
 
 add_executable(fastmlx src/cli/fastmlx_main.c)

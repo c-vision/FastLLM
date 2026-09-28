@@ -177,26 +177,19 @@ static void case_bandiere_rifiutate(void) {
 
 /* ---- dispatch ---- */
 
-/* Ogni verbo in attesa del motore: stessa classe di esito, messaggi DIVERSI. Se il messaggio non
- * cambiasse al cambiare del verbo, l'utente non potrebbe sapere cosa manca — e la lista di ciò che
- * manca è il lavoro del piano.
+/* I verbi che chiedono il motore e NON lo hanno ancora. Dopo il passo 5 (CLI run/chat/ps) la lista
+ * è scesa a `cp`/`rm`: sono gli unici che aspettano una capacità che il motore non fornisce (chi
+ * scrive/cancella nel cache). `run`/`chat`/`ps` sono USCITI da qui perché ora GENERANO davvero:
+ * tenerli in questa lista passerebbe anche se il dispatch fosse rotto, perché NOT_WIRED sarebbe il
+ * codice "giusto" per il verbo sbagliato. Le prove di run/chat stanno nella loro sezione.
  *
- * `models`/`list` NON sono in questa lista da quando esiste `fmlx_models_exec`: sono verbi che
- * girano, e un test che li lasciasse qui passerebbe anche se il dispatch fosse rotto (perché
- * NOT_WIRED sarebbe comunque il codice "giusto" per la lista sbagliata).
- * `serve` è uscito dalla lista per lo stesso motivo, ma con un sintomo diverso: ora è cablato, e
- * chiamarlo qui NON darebbe NOT_WIRED — si siederebbe su `accept` in attesa di un client che non
- * arriva, che è il modo in cui un test diventa un blocco da uccidere a mano. `doctor` è uscito
- * infine con un TERZO sintomo: legge il disco e scrive su `out`, e tenerlo qui avrebbe chiesto
- * NOT_WIRED su una cache che sa aprire — verde per il motivo sbagliato. Le sue prove stanno in
- * `test_doctor.c`. */
+ * `cp` e `rm` condividono la STESSA ragione (è una sola cosa che manca: la scrittura del cache fuori
+ * dal download), quindi qui non si prova più che i messaggi siano distinti — si prova che ciascuno
+ * nomini il PROPRIO verbo e dica che un pezzo manca. */
 static void case_motori_non_collegati(void) {
-    static const char *const verbs[] = {"run", "chat", "ps", "cp", "rm"};
+    static const char *const verbs[] = {"cp", "rm"};
     size_t i;
-    char first[FMLX_HF_PATH_MAX];
-    int distinct = 0;
 
-    first[0] = '\0';
     for (i = 0; i < sizeof verbs / sizeof verbs[0]; i++) {
         FmlxCliArgs a;
         char msg[256];
@@ -213,15 +206,9 @@ static void case_motori_non_collegati(void) {
            "%s: il messaggio non dice che il pezzo manca: %s", verbs[i], errb);
         /* Niente stdout: un comando che non può girare non emette mezzo risultato. */
         CK(on == 0, "%s: ha scritto anche su stdout (%zu byte)", verbs[i], on);
-        if (i == 0) snprintf(first, sizeof first, "%s", errb);
-        else if (strcmp(first, errb) != 0) distinct++;
         free(outb);
         free(errb);
     }
-    /* Cinque verbi, almeno TRE messaggi diversi: è la prova che il testo dipende dal verbo e non è
-     * una stringa sola ripetuta. */
-    CK(distinct >= 3, "messaggi distinti=%d su %d verbi", distinct,
-       (int)(sizeof verbs / sizeof verbs[0]));
 }
 
 /* ---- serve ---- */
@@ -263,12 +250,27 @@ static void case_serve_bandiere(void) {
     CK(HAS(msg, "--once"), "il rifiuto deve nominare la bandiera: %s", msg);
     CK(HAS(msg, "models"), "e il verbo: %s", msg);
 
-    /* Il CONFINE della regola: `run` e `chat` non hanno ancora UNA superficie di opzioni, e
-     * «--port non è un'opzione di run» sarebbe un'affermazione sul futuro di un verbo che non è
-     * scritto. Il parse deve passare e lasciare al dispatch l'unica cosa vera oggi: manca il
-     * motore. (`models` invece le opzioni le HA, ed è per lui che la regola esiste.) */
-    CK_PARSE(FMLX_CLI_OK, "fastmlx", "run", "--port", "8000");
-    CK_PARSE(FMLX_CLI_OK, "fastmlx", "chat", "--once");
+    /* Il CONFINE NUOVO della regola: `run` e `chat` HANNO ora una superficie di opzioni (il motore
+     * è cablato), quindi una bandiera che non leggono è un errore anche per loro. `--port` di
+     * `serve` non ha senso per `run` (non ascolta su nessuna porta) e `--once` nemmeno. Se questa
+     * regola non li coprisse, `fastmlx run m --port 8000` passerebbe col flag ignorato — la stessa
+     * menzogna che la regola esiste per impedire. */
+    CK_PARSE(FMLX_CLI_USAGE, "fastmlx", "run", "m", "--port", "8000");
+    CK(HAS(msg, "--port"), "il rifiuto deve nominare la bandiera: %s", msg);
+    CK(HAS(msg, "run"), "e il verbo: %s", msg);
+    CK_PARSE(FMLX_CLI_USAGE, "fastmlx", "chat", "m", "--once");
+    /* E il verso positivo: le bandiere che run/chat LEGGONO passano e arrivano all'exec. */
+    CK_PARSE(FMLX_CLI_OK, "fastmlx", "run", "m", "--max-tokens", "7", "--system", "sii breve");
+    CK(a.max_tokens == 7, "--max-tokens non arrivato a run: %lld", a.max_tokens);
+    CK(a.system && !strcmp(a.system, "sii breve"), "--system non arrivato a run: %s",
+       a.system ? a.system : "(null)");
+    CK_PARSE(FMLX_CLI_OK, "fastmlx", "chat", "m", "--max-tokens", "9");
+    CK(a.max_tokens == 9, "--max-tokens non arrivato a chat: %lld", a.max_tokens);
+    /* `ps` guarda dove ascolta `serve`, quindi prende --host/--port. */
+    CK_PARSE(FMLX_CLI_OK, "fastmlx", "ps", "--host", "127.0.0.1", "--port", "8123");
+    CK(a.serve.port == 8123, "ps: --port non arrivata: %d", a.serve.port);
+    CK_PARSE(FMLX_CLI_USAGE, "fastmlx", "ps", "un-modello");
+    CK(HAS(msg, "non prende argomenti"), "ps con un posizionale: %s", msg);
 
     /* Una booleana NON prende valore, e la forma `--flag=x` ESISTE nel parser: `--once=0` sarebbe
      * letto come "dato", con lo STESSO effetto di `--once=1`. Due semantiche con la stessa grafia
@@ -313,6 +315,46 @@ static void case_serve_bandiere(void) {
         free(ob);
         free(eb);
     }
+}
+
+/* ---- run / chat / ps: l'argv (l'esecuzione ha bisogno del motore) ---- */
+
+/* Il parse è l'unica parte di run/chat/ps provabile senza un modello: l'esecuzione GENERA, e un
+ * test che genera dipenderebbe da un modello installato (che è il contrario di deterministico). Qui
+ * si prova il CONTRATTO: `run` ha due posizionali, il resto uno; le bandiere giuste arrivano; quelle
+ * sbagliate sono rifiutate nominandole. */
+static void case_run_chat_parse(void) {
+    FmlxCliArgs a;
+    char msg[256];
+
+    CK_PARSE(FMLX_CLI_OK, "fastmlx", "run", "org/m", "ciao mondo");
+    CK(!strcmp(a.verb, "run") && !strcmp(a.repo, "org/m") && !strcmp(a.prompt, "ciao mondo"),
+       "run: verbo/repo/prompt = %s/%s/%s", a.verb, a.repo, a.prompt);
+    CK_PARSE(FMLX_CLI_OK, "fastmlx", "run", "org/m");
+    CK(a.prompt[0] == '\0', "run senza prompt: prompt='%s'", a.prompt);
+
+    /* Il primo posizionale è OBBLIGATORIO: `run` senza modello non ha cosa caricare. */
+    CK_PARSE(FMLX_CLI_USAGE, "fastmlx", "run");
+    CK(HAS(msg, "modello"), "run senza modello non lo dice: %s", msg);
+    CK_PARSE(FMLX_CLI_USAGE, "fastmlx", "chat");
+    CK(HAS(msg, "modello"), "chat senza modello non lo dice: %s", msg);
+
+    /* Un TERZO posizionale su run, e un secondo su chat: sono errori, non una cosa ignorata. */
+    CK_PARSE(FMLX_CLI_USAGE, "fastmlx", "run", "m", "a", "b");
+    CK(HAS(msg, "posizionali"), "run con tre posizionali: %s", msg);
+    CK_PARSE(FMLX_CLI_USAGE, "fastmlx", "chat", "m", "extra");
+    CK(HAS(msg, "posizionali"), "chat con due posizionali: %s", msg);
+
+    /* `--max-tokens 0` è "genera zero token": un limite così è un typo. */
+    CK_PARSE(FMLX_CLI_USAGE, "fastmlx", "run", "m", "--max-tokens", "0");
+
+    /* `--json` è di `models` e NON di pull: la regola «una bandiera che il verbo non legge è un
+     * errore» vale anche per le bandiere nuove. */
+    CK_PARSE(FMLX_CLI_OK, "fastmlx", "models", "--json");
+    CK(a.json == 1, "models --json non ha impostato il campo");
+    CK_PARSE(FMLX_CLI_USAGE, "fastmlx", "pull", "o/r", "--json");
+    CK(HAS(msg, "--json"), "il rifiuto deve nominare la bandiera: %s", msg);
+    CK_PARSE(FMLX_CLI_USAGE, "fastmlx", "run", "m", "--json");
 }
 
 /* ---- models ---- */
@@ -655,6 +697,56 @@ static void case_models_filtro(void) {
     free(c.err);
 }
 
+/* La lista in JSON esiste per uno script, quindi si prova la FORMA, non una frase: si parsà l'output
+ * con lo STESSO parser dei client (un JSON che il nostro parser rifiuta non è un JSON) e si
+ * controllano i campi che la tabella mostra. */
+static void case_models_json(void) {
+    FmlxCliArgs a;
+    char msg[256], *outb = NULL, *errb = NULL;
+    size_t on = 0, en = 0;
+    FILE *out, *err;
+    FmlxJsonDoc doc;
+
+    build_cache_fixture();
+    CK_PARSE(FMLX_CLI_OK, "fastmlx", "models", "--cache", at("cache"), "--json");
+    out = open_memstream(&outb, &on);
+    err = open_memstream(&errb, &en);
+    CK_ST(fmlx_cli_exec_with(&a, &DEAD, out, err), FMLX_CLI_OK);
+    fclose(out);
+    fclose(err);
+    if (outb) outb[on] = '\0';
+    if (errb) errb[en] = '\0';
+    CK(en == 0, "models --json ha scritto sull'errore: %s", errb ? errb : "(null)");
+    fmlx_json_doc_init(&doc);
+    CK(outb && fmlx_json_parse(outb, on, 0, &doc) == FMLX_JSON_OK,
+       "l'uscita --json non è JSON valido: %s", outb ? outb : "(vuoto)");
+    if (outb && fmlx_json_root(&doc)) {
+        const FmlxJsonValue *root = fmlx_json_root(&doc);
+        const FmlxJsonValue *models = fmlx_json_obj_get(root, "models");
+        CK(fmlx_json_arr_n(models) == 4, "attesi 4 repo nel JSON, trovati %zu",
+           fmlx_json_arr_n(models));
+        CK(HAS(outb, "\"refs_only\":true"), "il marker «solo ref» non è nel JSON:\n%s", outb);
+        CK(HAS(outb, "\"id\":\"mm/uno\""), "manca un repo nel JSON:\n%s", outb);
+    }
+    fmlx_json_doc_free(&doc);
+    free(outb);
+    free(errb);
+
+    /* Zero match con filtro: JSON VUOTO ma valido, e uscita 1 — come la tabella, che non stampa
+     * nulla. Il codice d'uscita è l'unica cosa che distingue «non c'è» da «va tutto bene». */
+    out = open_memstream(&outb, &on);
+    err = open_memstream(&errb, &en);
+    CK_PARSE(FMLX_CLI_OK, "fastmlx", "models", "--cache", at("cache"), "--json", "nope/nope");
+    CK_ST(fmlx_cli_exec_with(&a, &DEAD, out, err), FMLX_CLI_FAILED);
+    fclose(out);
+    fclose(err);
+    if (outb) outb[on] = '\0';
+    CK(outb && strstr(outb, "\"models\":[]") != NULL, "zero match: atteso un array vuoto:\n%s",
+       outb ? outb : "(vuoto)");
+    free(outb);
+    free(errb);
+}
+
 /* La radice che non esiste NON è "cache vuoto": due messaggi diversi, perché sono due consigli
  * diversi. E l'elenco vuoto deve restare un SUCCESSO (exit 0): `fastmlx models` su un cache appena
  * creato non è un fallimento. */
@@ -843,15 +935,28 @@ static void case_aiuto(void) {
     CK(b && strstr(b, "models, list") != NULL, "l'aiuto non nomina models: %s", b ? b : "(vuoto)");
     CK(b && strstr(b, "in attesa del motore") != NULL, "l'aiuto non distingue i verbi non cablati");
     /* Un verbo che ORA gira non può restare nella lista di quelli in attesa: sarebbe il contrario
-     * della regola per cui l'aiuto dice ciò che esiste. */
+     * della regola per cui l'aiuto dice ciò che esiste. Vale per `models`, `serve`, `doctor` e — dal
+     * passo 5 — per `run`, `chat`, `ps`, che ora usano il motore davvero. La lista di attesa è
+     * scesa a `cp, rm`. */
     {
         const char *tail = strstr(b, "in attesa del motore");
         CK(tail && strstr(tail, "models") == NULL, "`models` ancora tra i verbi non cablati");
-        /* Vale per `serve` come per `models`: lasciarlo nella lista dei verbi in attesa sarebbe
-         * l'aiuto che promette male il lavoro già fatto (e un `serve` che invece ASCOLTA). */
         CK(tail && strstr(tail, "serve") == NULL, "`serve` ancora tra i verbi non cablati");
+        CK(tail && strstr(tail, "run") == NULL, "`run` ancora tra i verbi non cablati");
+        CK(tail && strstr(tail, "chat") == NULL, "`chat` ancora tra i verbi non cablati");
+        CK(tail && strstr(tail, "ps") == NULL, "`ps` ancora tra i verbi non cablati");
+        CK(tail && strstr(tail, "cp") != NULL, "`cp` manca dalla lista di attesa");
     }
     CK(b && strstr(b, "  serve ") != NULL, "l'aiuto non nomina serve: %s", b ? b : "(vuoto)");
+    CK(b && strstr(b, "  run <modello> [prompt]") != NULL, "l'aiuto non nomina run: %s",
+       b ? b : "(vuoto)");
+    CK(b && strstr(b, "  chat <modello>") != NULL, "l'aiuto non nomina chat: %s", b ? b : "(vuoto)");
+    CK(b && strstr(b, "  ps ") != NULL, "l'aiuto non nomina ps: %s", b ? b : "(vuoto)");
+    /* Le bandiere nuove devono essere leggibili: `--max-tokens`/`--system` esistono solo per chi ha
+     * letto il sorgente se l'aiuto non le nomina. */
+    CK(b && strstr(b, "--max-tokens") != NULL && strstr(b, "--system") != NULL,
+       "l'aiuto non elenca le bandiere di run/chat");
+    CK(b && strstr(b, "--json") != NULL, "l'aiuto non nomina --json di models");
     /* Le bandiere nuove devono essere leggibili: un `--port` che non è scritto nell'aiuto è una
      * bandiera che esiste solo per chi ha letto il sorgente. */
     CK(b && strstr(b, "--port") != NULL && strstr(b, "--max-body") != NULL &&
@@ -905,9 +1010,11 @@ int main(int argc, char **argv) {
     case_bandiere_rifiutate();
     case_motori_non_collegati();
     case_serve_bandiere();
+    case_run_chat_parse();
     case_models_tabella();
     case_models_quiet();
     case_models_filtro();
+    case_models_json();
     case_models_senza_cache();
     case_models_murato();
     case_canali();

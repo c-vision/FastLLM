@@ -42,8 +42,15 @@ void fmlx_cli_usage(FILE *out) {
             "  pull <repo>            scarica (o ritrova) TUTTO il repo nel cache HF\n"
             "  models, list [<filtro>] cosa c'e' gia' nel cache, senza rete; <filtro> = org/nome,\n"
             "                         nome (l'ultima parte dell'id) o org/*\n"
+            "  run <modello> [prompt] una generazione col motore; il testo esce token-live.\n"
+            "                         Con [prompt] e' one-shot; senza, legge una riga per volta da\n"
+            "                         stdin (nessuna cronologia fra le righe)\n"
+            "  chat <modello>         conversazione multi-turno col motore: chat template del\n"
+            "                         modello + prefix cache; comandi /exit /clear /system /help\n"
             "  serve                  serve /v1/models e /health e GENERA: chat, completions e\n"
             "                         messages passano dal motore LLM; il resto e' 501\n"
+            "  ps                     dice se un `serve` e' in ascolto (--host/--port, default\n"
+            "                         127.0.0.1:8000) e i modelli residenti, via /v1/models/status\n"
             "  doctor [<filtro>]      hasha i blob del cache e dice se SONO quelli promessi;\n"
             "                         legge e basta: non cancella e non ripara\n"
             "\n"
@@ -68,6 +75,19 @@ void fmlx_cli_usage(FILE *out) {
             "                         «non c'e'» non puo' sembrare «va tutto bene»\n"
             "  --cache <dir>          radice del cache (default: quella di Hugging Face)\n"
             "  --quiet                solo gli id, uno per riga\n"
+            "  --json                 la stessa lista in JSON, per uno script\n"
+            "\n"
+            "per run:\n"
+            "  <modello> [prompt]     il modello E' il primo posizionale; senza prompt si legge stdin\n"
+            "  --cache <dir>          radice da cui risolvere il modello\n"
+            "  --system <testo>       messaggio di sistema anteposto\n"
+            "  --max-tokens <n>       tetto sui token generati (default: quello del motore)\n"
+            "\n"
+            "per chat:\n"
+            "  <modello>              il modello (un solo posizionale)\n"
+            "  --cache <dir>          radice da cui risolvere il modello\n"
+            "  --system <testo>       system iniziale (modificabile con /system)\n"
+            "  --max-tokens <n>       tetto sui token generati (default: quello del motore)\n"
             "\n"
             "per serve:\n"
             "  --host <if>            con quale interfaccia ascoltare (default 127.0.0.1)\n"
@@ -76,6 +96,10 @@ void fmlx_cli_usage(FILE *out) {
             "  --max-body <n>         tetto di byte di un corpo di richiesta\n"
             "  --once                 serve UNA richiesta e esce (per gli smoke test)\n"
             "  --quiet                niente riepilogo finale su stdout (i log restano su stderr)\n"
+            "\n"
+            "per ps:\n"
+            "  --host <if>            dove cercare il server (default 127.0.0.1)\n"
+            "  --port <n>             porta del server (default FASTMLX_PORT, poi 8000)\n"
             "\n"
             "per doctor:\n"
             "  <filtro>               gli STESSI tre modi di `models` (org/nome, nome, org/*);\n"
@@ -90,17 +114,15 @@ void fmlx_cli_usage(FILE *out) {
             "L'auth viene SOLO da FASTMLX_API_KEY (vuota = nessuna): una bandiera finirebbe in argv.\n"
             "\n"
             "in attesa del motore (rispondono un errore esplicito, mai un risultato finto):\n"
-            "  run, chat, ps, cp, rm\n"
+            "  cp, rm\n"
             "\n"
             "il token si passa SOLO con la variabile d'ambiente HF_TOKEN.\n");
 }
 
 /* Cosa risponde un verbo che oggi non può girare, e PERCHÉ. È il punto in cui la CLI smette di
- * essere una lista di stringhe: nomina il pezzo mancante, che è poi il piano di lavoro. */
+ * essere una lista di stringhe: nomina il pezzo mancante, che è poi il piano di lavoro. `run`,
+ * `chat` e `ps` NON sono più qui: il motore è collegato e i tre verbi girano davvero. */
 static const char *missing_piece(const char *verb) {
-    if (!strcmp(verb, "run") || !strcmp(verb, "chat"))
-        return "la libreria del motore (mlxengine) non è ancora collegata: i token non si generano";
-    if (!strcmp(verb, "ps")) return "manca il registro delle sessioni, che non esiste fuori dal motore";
     if (!strcmp(verb, "cp") || !strcmp(verb, "rm"))
         return "manca chi scrive/cancella nel cache al di fuori del percorso di download";
     return "il comando non esiste in questa versione";
@@ -151,23 +173,30 @@ enum {
     F_QUIET = 0, F_CACHE,                                  /* shared */
     F_REVISION, F_ENDPOINT, F_MAXBYTES, F_STALLTO, F_STALLRE, F_DEST, F_OFFLINE, F_REPAIR,
     F_HOST, F_PORT, F_MAXBODY, F_ONCE,
+    F_JSON, F_MAXTOKENS, F_SYSTEM,
     F_N
 };
 #define F_PULL_ONLY                                                                                            \
     ((1u << F_REVISION) | (1u << F_ENDPOINT) | (1u << F_MAXBYTES) | (1u << F_STALLTO) |                        \
      (1u << F_STALLRE) | (1u << F_DEST) | (1u << F_OFFLINE) | (1u << F_REPAIR))
 #define F_SERVE_ONLY ((1u << F_HOST) | (1u << F_PORT) | (1u << F_MAXBODY) | (1u << F_ONCE))
-/* Le bandiere che SONO un fatto, non un dato: la forma `--flag=valore` è un errore per tutte e
- * quattro con UNA regola, invece che una rinuncia per una. `--quiet=1` e `--quiet=0` sono la
- * stessa cosa, e `--offline=` (vuoto) direbbe che qualcuno ha dato un valore a una parola che non
- * lo prende: due semantiche con la stessa grafia sono peggio di un rifiuto. */
+#define F_MODELS_ONLY ((1u << F_JSON))
+#define F_RUNCHAT_ONLY ((1u << F_MAXTOKENS) | (1u << F_SYSTEM))
+/* `ps` non ha una superficie sua: guarda dove `serve` ascolta, quindi prende gli STESSI due bit
+ * (`--host`/`--port`). Due maschere con gli stessi bit sono la stessa decisione (dove sta il
+ * server), detta una volta e usata da due verbi. */
+#define F_PS_ONLY ((1u << F_HOST) | (1u << F_PORT))
+/* Le bandiere che SONO un fatto, non un dato: la forma `--flag=valore` è un errore per tutte con
+ * UNA regola, invece che una rinuncia per una. `--quiet=1` e `--quiet=0` sono la stessa cosa, e
+ * `--offline=` (vuoto) direbbe che qualcuno ha dato un valore a una parola che non lo prende: due
+ * semantiche con la stessa grafia sono peggio di un rifiuto. */
 #define F_BOOLEANI                                                                                             \
-    ((1u << F_QUIET) | (1u << F_OFFLINE) | (1u << F_REPAIR) | (1u << F_ONCE))
+    ((1u << F_QUIET) | (1u << F_OFFLINE) | (1u << F_REPAIR) | (1u << F_ONCE) | (1u << F_JSON))
 
 static const char *const FLN[F_N] = {
     "--quiet",    "--cache",        "--revision", "--endpoint", "--max-bytes", "--stall-timeout",
     "--stall-retries", "--dest",     "--offline",  "--repair",   "--host",      "--port",
-    "--max-body", "--once"};
+    "--max-body", "--once",         "--json",     "--max-tokens", "--system"};
 
 /* Il bit della bandiera `n`, 0 se la bandiera non esiste. */
 static unsigned flag_bit(const char *n) {
@@ -209,7 +238,20 @@ FmlxCliStatus fmlx_cli_parse(int argc, char **argv, FmlxCliArgs *out, char *msg,
                 verb_seen = 1;
                 continue;
             }
-            if (repo_seen) return fail(out, msg, msg_len, "troppi argomenti posizionali: %s", a);
+            if (repo_seen) {
+                /* `run` ha DUE posizionali: `<modello> [prompt]`. La seconda parola non è un
+                 * secondo modello (sarebbe un errore, come per `models`) ma il prompt one-shot:
+                 * deciderlo dall'ordine, non da un flag, è ciò che rende `fastmlx run m "ciao"`
+                 * scrivibile. Per ogni altro verbo il secondo posizionale resta un errore. */
+                if (!strcmp(out->verb, "run") && !out->prompt[0]) {
+                    if (snprintf(out->prompt, sizeof out->prompt, "%s", a) >=
+                        (int)sizeof out->prompt)
+                        return fail(out, msg, msg_len, "run: il prompt supera %d byte",
+                                    (int)sizeof out->prompt);
+                    continue;
+                }
+                return fail(out, msg, msg_len, "troppi argomenti posizionali: %s", a);
+            }
             snprintf(out->repo, sizeof out->repo, "%s", a);
             repo_seen = 1;
             continue;
@@ -234,6 +276,7 @@ FmlxCliStatus fmlx_cli_parse(int argc, char **argv, FmlxCliArgs *out, char *msg,
         if (!strcmp(name, "--offline")) { out->pull.fetch.offline = 1; continue; }
         if (!strcmp(name, "--repair")) { out->pull.fetch.repair = 1; continue; }
         if (!strcmp(name, "--once")) { out->serve.max_conns = 1; continue; }
+        if (!strcmp(name, "--json")) { out->json = 1; continue; }
 
         /* Una bandiera che vuole un valore e non ce l'ha è un errore ANCHE se il valore sarebbe
          * vuoto: `--dest ""` non significa "dest: nessuna", significa che qualcuno ha costruito il
@@ -281,6 +324,15 @@ FmlxCliStatus fmlx_cli_parse(int argc, char **argv, FmlxCliArgs *out, char *msg,
             if (!parse_num(val, 1, LLONG_MAX, &n))
                 return fail(out, msg, msg_len, "--max-body: '%s' non è un numero >= 1", val);
             out->serve.max_body = (size_t)n;
+        } else if (!strcmp(name, "--max-tokens")) {
+            /* Il tetto vero lo applica il motore (`FMLX_ENGINE_MAX_NEW`): qui si valida solo che
+             * sia un intero >= 1, perché `--max-tokens 0` è "genera zero token", cioè nessuna
+             * risposta, e un limite che non lascia passare niente è un typo, non una richiesta. */
+            if (!parse_num(val, 1, LLONG_MAX, &n))
+                return fail(out, msg, msg_len, "--max-tokens: '%s' non è un numero >= 1", val);
+            out->max_tokens = n;
+        } else if (!strcmp(name, "--system")) {
+            out->system = val;
         } else { /* --stall-retries: 0 qui È un valore, e vuol dire "una prova sola" */
             if (!parse_num(val, 0, INT_MAX, &n))
                 return fail(out, msg, msg_len, "--stall-retries: '%s' non è un numero >= 0", val);
@@ -292,35 +344,45 @@ FmlxCliStatus fmlx_cli_parse(int argc, char **argv, FmlxCliArgs *out, char *msg,
     if (!verb_seen) return fail(out, msg, msg_len, "nessun comando");
     if (!strcmp(out->verb, "pull") && !out->repo[0])
         return fail(out, msg, msg_len, "pull: manca il repo (es. org/modello)");
-    /* `serve` non ha un argomento posizionale: accettare `serve mlx-model` e ascoltare comunque
-     * sarebbe una bandiera che mente, solo scritta senza trattini. `models`/`list` LO hanno dal
-     * 2026-09-24 (il filtro per repo), e la regola che resta è la stessa: UNO solo, il secondo è un
-     * errore — due filtri non vogliono dire niente. */
-    if (repo_seen && !strcmp(out->verb, "serve")) {
+    if ((!strcmp(out->verb, "run") || !strcmp(out->verb, "chat")) && !out->repo[0]) {
         char v[16];
         snprintf(v, sizeof v, "%s", out->verb); /* `fail` azzera `out`: vedi sopra */
-        return fail(out, msg, msg_len, "%s: non prende argomenti (le opzioni di serve sono bandiere)",
+        return fail(out, msg, msg_len, "%s: manca il modello (es. org/modello)", v);
+    }
+    /* `serve` e `ps` non hanno un argomento posizionale: accettare `serve mlx-model` e ascoltare
+     * comunque sarebbe una bandiera che mente, solo scritta senza trattini, e per `ps` il modello
+     * non c'entra — lui guarda dove ascolta `serve`. `models`/`list` LO hanno dal 2026-09-24 (il
+     * filtro per repo) e `doctor` da subito: per loro UNO solo, il secondo è un errore — due filtri
+     * non vogliono dire niente. */
+    if (repo_seen && (!strcmp(out->verb, "serve") || !strcmp(out->verb, "ps"))) {
+        char v[16];
+        snprintf(v, sizeof v, "%s", out->verb); /* `fail` azzera `out`: vedi sopra */
+        return fail(out, msg, msg_len, "%s: non prende argomenti (le opzioni di %s sono bandiere)", v,
                     v);
     }
     /* Una bandiera che IL VERBO NON LEGGE è un errore, non un'opzione ignorata: il motivo è lo
      * stesso per cui una bandiera sconosciuta lo è. `fastmlx serve --dest x` sembra un comando che
      * dice due cose e ne fa una, e chi legge l'output non ha modo di sapere quale delle due è
-     * saltata. Le bandiere condivise (`--quiet`, `--cache`) non stanno in nessun insieme.
+     * saltata. Le bandiere condivise (`--quiet`, `--cache`) valgono per tutti i verbi e non stanno
+     * in nessun insieme esclusivo.
      *
-     * LA REGOLA VALE FRA I VERBI CHE HANNO UNA SUPERFICIE DI OPZIONI (pull, models/list, serve,
-     * doctor).
-     * `fastmlx run --port 8000` non deve sentire «--port non è un'opzione di run»: `run` non ha
-     * ancora opzioni, e dire quali NON ha è un'affermazione sul futuro di un verbo che non è scritto.
-     * Per quelli la risposta onesta è UNA sola — manca il motore — ed è `NOT_WIRED` nel dispatch. */
-    if (verb_seen && (!strcmp(out->verb, "pull") || !strcmp(out->verb, "serve") ||
-                      !strcmp(out->verb, "models") || !strcmp(out->verb, "list") ||
-                      !strcmp(out->verb, "doctor"))) {
-        unsigned bad = 0;
-        int k;
-        if (strcmp(out->verb, "pull")) bad |= F_PULL_ONLY;
-        if (strcmp(out->verb, "serve")) bad |= F_SERVE_ONLY;
-        for (k = 0; k < F_N; k++)
-            if ((bad & (1u << k)) && (seen & (1u << k))) {
+     * LA REGOLA VALE FRA I VERBI CHE HANNO UNA SUPERFICIE DI OPZIONI. `run`/`chat` e `ps` ne hanno
+     * una da quando il motore è cablato: `--port` dato a `run` È un errore, perché `run` non ascolta
+     * su nessuna porta. Restano fuori i verbi SENZA opzioni proprie (`cp`, `rm`): per loro la
+     * risposta onesta è ancora una sola — non esistono — ed è `NOT_WIRED` nel dispatch, non un
+     * elenco di bandiere che NON accettano. */
+    if (verb_seen) {
+        unsigned allowed = (1u << F_QUIET) | (1u << F_CACHE); /* condivise: sempre */
+        int has_surface = 1, k;
+        if (!strcmp(out->verb, "pull")) allowed |= F_PULL_ONLY;
+        else if (!strcmp(out->verb, "serve")) allowed |= F_SERVE_ONLY;
+        else if (!strcmp(out->verb, "models") || !strcmp(out->verb, "list")) allowed |= F_MODELS_ONLY;
+        else if (!strcmp(out->verb, "doctor")) allowed |= 0; /* solo le condivise */
+        else if (!strcmp(out->verb, "run") || !strcmp(out->verb, "chat")) allowed |= F_RUNCHAT_ONLY;
+        else if (!strcmp(out->verb, "ps")) allowed |= F_PS_ONLY;
+        else has_surface = 0; /* cp/rm: nessuna superficie da difendere */
+        for (k = 0; has_surface && k < F_N; k++)
+            if (!(allowed & (1u << k)) && (seen & (1u << k))) {
                 char vv[16];
                 snprintf(vv, sizeof vv, "%s", out->verb); /* `fail` azzera `out`: vedi sopra */
                 return fail(out, msg, msg_len, "%s non è un'opzione di %s", FLN[k], vv);
@@ -357,6 +419,15 @@ FmlxCliStatus fmlx_cli_exec_with(const FmlxCliArgs *a, const FmlxHfTransport *t,
         /* Nemmeno qui `t` viene guardato: il `serve` legge il cache da disco e scrive su socket.
          * Passare un transport falso a `serve` non è un test, è un'illusione di test. */
         return fmlx_serve_exec(a, out, err);
+    if (!strcmp(a->verb, "run"))
+        /* Il motore è cablato: nessun transport di rete (la generazione non è un download), quindi
+         * `t` non viene guardato — come per `serve`. */
+        return fmlx_run_exec(a, out, err);
+    if (!strcmp(a->verb, "chat")) return fmlx_chat_exec(a, out, err);
+    if (!strcmp(a->verb, "ps"))
+        /* `ps` PARLA in rete, ma non con Hugging Face: usa un socket verso il server locale, e il
+         * transport HF non ha niente a che vedere. */
+        return fmlx_ps_exec(a, out, err);
     if (strcmp(a->verb, "pull")) {
         fprintf(err ? err : stderr,
                 "fastmlx %s: %s\n", a->verb, missing_piece(a->verb));

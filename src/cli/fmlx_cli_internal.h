@@ -13,7 +13,8 @@
 #ifndef FMLX_CLI_INTERNAL_H
 #define FMLX_CLI_INTERNAL_H
 
-#include "fmlx/fmlx_hf.h" /* FmlxHfStatus: il codice che `copy_stream` ritorna */
+#include "fmlx/fmlx_cli.h" /* FmlxCliStatus + FmlxCliArgs: la base condivisa da run/chat/gen */
+#include "fmlx/fmlx_hf.h"  /* FmlxHfStatus: il codice che `copy_stream` ritorna */
 
 #include <stdint.h>
 #include <stdio.h>
@@ -79,5 +80,43 @@ int fmlx_pull_progress_inplace(const FmlxPullProgress *p);
  * sono gli stessi, che il temporaneo `.fmlx-part` non resta in giro e che l'avanzamento dice il
  * numero giusto. `prog` può essere NULL: è il caso del terminale che non chiede righe. */
 FmlxHfStatus fmlx_pull_copy_stream(const char *src, const char *dst, FmlxPullProgress *prog);
+
+/* --- la cronologia e la generazione a terminale (definite in fmlx_gen.c) ----------------------
+ *
+ * `run` e `chat` sono due modi di usare lo STESSO motore: cambia come si compone la richiesta (una
+ * riga contro una conversazione), non come si generano i token. La parte che sa parlare al motore e
+ * consumare gli eventi sta in UN posto, così un miglioramento dello streaming non va scritto due
+ * volte — che è il modo in cui `run` e `chat` divergono fino a non assomigliarsi più.
+ *
+ * La cronologia è di TURNI in memoria (role/content), non un DOM JSON: il DOM si costruisce al
+ * momento della generazione, perché le slice del parser puntano nel documento e il documento deve
+ * vivere quanto la richiesta — la conversazione invece sopravvive a tutti i turni. */
+
+typedef struct {
+    char *role;
+    char *content;
+} FmlxChatTurn;
+
+typedef struct {
+    FmlxChatTurn *v;
+    size_t n, cap;
+} FmlxChatHist;
+
+void fmlx_chat_hist_init(FmlxChatHist *h);
+/* Copia `role` e `content` (possono essere NULL = stringa vuota). Ritorna 0, -1 su memoria. */
+int fmlx_chat_hist_push(FmlxChatHist *h, const char *role, const char *content);
+void fmlx_chat_hist_clear(FmlxChatHist *h);
+void fmlx_chat_hist_free(FmlxChatHist *h);
+
+/* Genera una risposta dalla `hist` (+ `system`) col motore già integrato, stampa il testo
+ * token-live su `out`, e — se `out_text` non è NULL — ne restituisce una COPIA mallocata del testo
+ * completo (il chiamante la libera). `max_tokens` <= 0 usa il default del motore.
+ *
+ * Criterio identico a un client della porta: si risolve il modello con la stessa `cache_root` e lo
+ * stesso `name` di `serve`, si rende il chat template (Jinja) del modello, e si consuma
+ * `fmlx_engine_next`. Nessuna seconda via al motore, nessuna copia della logica di render. */
+FmlxCliStatus fmlx_cli_generate_stream(const char *cache_root, const char *name, const char *system,
+                                       const FmlxChatHist *hist, long long max_tokens, FILE *out,
+                                       FILE *err, char **out_text);
 
 #endif /* FMLX_CLI_INTERNAL_H */

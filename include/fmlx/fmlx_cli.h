@@ -26,6 +26,8 @@
 /* Uscita del processo: 0 = fatto, 1 = fallito o non possibile, 2 = argv sbagliato (la convenzione
  * di getopt). `USAGE` non è lo stesso codice di un download fallito: uno è un errore di chi
  *digita, l'altro è il mondo esterno. */
+#define FMLX_CLI_PROMPT_MAX 8192 /* il prompt one-shot di `run`; oltre, è un argv che non si legge */
+
 typedef enum {
     FMLX_CLI_OK = 0,
     FMLX_CLI_USAGE = 1,     /* argv malformato, verbo sconosciuto, argomento obbligatorio assente */
@@ -78,13 +80,40 @@ FmlxHfStatus fmlx_pull(const char *repo_id, const char *revision, const FmlxPull
 typedef struct {
     char verb[16];
     char repo[FMLX_HF_PATH_MAX]; /* l'argomento posizionale: vuoto se il verbo non ne vuole */
+    char prompt[FMLX_CLI_PROMPT_MAX]; /* il SECONDO posizionale, solo di `run`: il prompt one-shot */
     const char *revision;        /* default "main": il default di Hugging Face, non una scelta nostra */
+    const char *system;          /* --system di run/chat: il testo di sistema, NULL se assente */
+    long long max_tokens;        /* --max-tokens di run/chat: 0 = il default del motore */
     FmlxPullOpts pull;
     FmlxServeOpts serve; /* le opzioni di `serve` stanno LÌ: una bandiera che esiste a CLI deve
                           * esistere anche nel server, o sarebbe una bandiera che mente (§1.1) */
     int quiet;
+    int json;      /* `models --json`: la stessa tabella in forma macchina-leggibile */
     int want_help; /* -h/--help: NON è un errore, e l'uscita è 0 */
 } FmlxCliArgs;
+
+/* ---- run ---- */
+
+/* `run <modello> [prompt]`: UNA generazione con il motore (chat template del modello, non una
+ * stringa composta a mano), e il testo esce token-live su `out`. Con `[prompt]` è one-shot; senza,
+ * legge una riga per volta da `stdin` e genera per ciascuna. La risoluzione del modello è quella
+ * di `serve` (`fmlx_engine_model`: path, cache HF, $FMLX_MODELS_DIR), non una seconda regola. */
+FmlxCliStatus fmlx_run_exec(const FmlxCliArgs *a, FILE *out, FILE *err);
+
+/* ---- chat ---- */
+
+/* `chat <modello>`: REPL multi-turno sopra lo STESSO motore. La cronologia è tenuta qui in
+ * `FmlxChatHist` e resa a ogni turno col chat template (Jinja) del modello, così la prefix cache
+ * riusa il prefisso. Comandi slash: `/exit` (o `/quit`), `/clear`, `/system <testo>`, `/help`. */
+FmlxCliStatus fmlx_chat_exec(const FmlxCliArgs *a, FILE *out, FILE *err);
+
+/* ---- ps ---- */
+
+/* `ps`: se un `serve` è in ascolto sulla porta nota (`--port`/`FASTMLX_PORT`, default 8000) e quali
+ * modelli sono residenti (interrogando `/v1/models/status`). La cache residente vive NEL processo del
+ * server: questo verbo la OSSERVA via HTTP, non la possiede — è il criterio onesto finché non esiste
+ * un registro di processi esterno. Nessun server in ascolto NON è un fallimento: è la risposta. */
+FmlxCliStatus fmlx_ps_exec(const FmlxCliArgs *a, FILE *out, FILE *err);
 
 /* ---- models / list ---- */
 
