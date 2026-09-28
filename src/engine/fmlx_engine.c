@@ -8,6 +8,8 @@
  */
 #include "fmlx_engine_internal.h"
 
+#include "llmengine_mlx.h" /* llm_ai_mlx_gguf_tokenizer_json: tokenizer DS4 dal GGUF */
+
 #include "fmlx/fmlx_hf.h"
 #include "fmlx/fmlx_json.h"
 
@@ -16,6 +18,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+
+/* Offload esperti (--offload-experts): scelta dell'utente, propagata al motore al load. */
+static int g_offload_experts = 0;
+void fmlx_engine_set_offload_experts(int on) { g_offload_experts = on ? 1 : 0; }
 
 /* ---- stringa dinamica ---- */
 
@@ -54,6 +60,13 @@ static int path_is_dir(const char *p) {
 static int path_is_file(const char *p) {
     struct stat st;
     return p && stat(p, &st) == 0 && S_ISREG(st.st_mode);
+}
+
+/* 1 se il path è un GGUF single-file (ds4/DeepSeek V4 Flash). Un modello MLX è una
+ * DIRECTORY; il GGUF è un FILE: i due convivono in questa lane. */
+static int is_gguf_path(const char *p) {
+    size_t n = p ? strlen(p) : 0;
+    return n > 5 && strcmp(p + n - 5, ".gguf") == 0;
 }
 
 /* Legge un file intero in una stringa malloc (NUL-terminata). NULL su errore. */
@@ -309,6 +322,11 @@ static int resolve_dir(const char *cache_root, const char *name, char *out, size
         snprintf(out, cap, "%s", expanded);
         return 0;
     }
+    /* GGUF single-file (ds4): un FILE `.gguf` è un modello valido in questa lane. */
+    if (path_is_file(expanded) && is_gguf_path(expanded)) {
+        snprintf(out, cap, "%s", expanded);
+        return 0;
+    }
 
     /* cache HF (layout models--org--name): la radice che il server dichiara, non una a caso */
     {
@@ -340,13 +358,13 @@ static int resolve_dir(const char *cache_root, const char *name, char *out, size
         if (mdir[0]) {
             char try1[FMLX_ENGINE_PATH_MAX];
             if (snprintf(try1, sizeof try1, "%s/%s", mdir, name) < (int)sizeof try1 &&
-                path_is_dir(try1)) {
+                (path_is_dir(try1) || (path_is_file(try1) && is_gguf_path(try1)))) {
                 snprintf(out, cap, "%s", try1);
                 return 0;
             }
             if (snprintf(try1, sizeof try1, "%s/%s", mdir, base_name(name)) <
                     (int)sizeof try1 &&
-                path_is_dir(try1)) {
+                (path_is_dir(try1) || (path_is_file(try1) && is_gguf_path(try1)))) {
                 snprintf(out, cap, "%s", try1);
                 return 0;
             }
@@ -364,6 +382,18 @@ static llmtoken_handle load_tokenizer(const char *dir) {
     char path[FMLX_ENGINE_PATH_MAX];
     llmtoken_handle t;
 
+    /* GGUF single-file (ds4): il tokenizer si COSTRUISCE dal GGUF (BPE + special token DS4)
+     * e si carica come JSON — non c'è un tokenizer.json accanto al file. */
+    if (is_gguf_path(dir) && path_is_file(dir)) {
+        size_t jl = 0;
+        char *js = llm_ai_mlx_gguf_tokenizer_json(dir, &jl);
+        if (js) {
+            if (jl) t = llmtoken_load_json(js, jl);
+            else t = NULL;
+            free(js);
+            if (t) return t;
+        }
+    }
     if (snprintf(path, sizeof path, "%s/tokenizer.json", dir) < (int)sizeof path &&
         path_is_file(path)) {
         t = llmtoken_load(path);
@@ -389,23 +419,42 @@ int fmlx_engine_load(const char *cache_root, const char *name, FmlxEngineModel *
 
     out->tok = load_tokenizer(out->dir);
     if (!out->tok) {
-        snprintf(err, errcap, "no usable tokenizer (tokenizer.json / tiktoken.model) in %s",
+        snprintf(err, errcap, "no usable tokenizer (tokenizer.json / tiktoken.model / GGUF) in %s",
                  out->dir);
         return -1;
     }
-    out->n_eos = read_eos_list(out->dir, out->eos_list, FMLX_ENGINE_EOS_MAX);
-    /* L'ABI accetta UN eos: si passa l'ULTIMO della lista (nei modelli instruct è il token di
-     * fine turno, es. `<|eot_id|>`, mentre i primi sono fine-testo/fine-sequenza). Gli altri
-     * restano in `eos_list` e li ferma il consumer token per token. */
-    out->eos = out->n_eos > 0 ? out->eos_list[out->n_eos - 1] : -1;
-    out->tpl = detect_template(out->dir, &out->chat_tpl, &out->chat_tpl_len);
-    read_bos(out->dir, out->bos, sizeof out->bos);
+    if (is_gguf_path(out->dir)) {
+        /* GGUF/DS4: niente config.json/tokenizer_config.json accanto al file — template di
+         * famiglia DS4 e eos dedotto dal tokenizer (l'`<｜end▁of▁sentence｜>` è nel vocabolario). */
+        int32_t eid = -1;
+        out->tpl = FMLX_TPL_DS4;
+        out->chat_tpl = NULL;
+        out->chat_tpl_len = 0;
+        if (llmtoken_encode(out->tok, "<｜end▁of▁sentence｜>", &eid, 1) == 1) {
+            out->eos_list[0] = eid;
+            out->n_eos = 1;
+        }
+        out->eos = out->n_eos > 0 ? out->eos_list[out->n_eos - 1] : -1;
+        out->bos[0] = '\0';
+    } else {
+        out->n_eos = read_eos_list(out->dir, out->eos_list, FMLX_ENGINE_EOS_MAX);
+        /* L'ABI accetta UN eos: si passa l'ULTIMO della lista (nei modelli instruct è il token di
+         * fine turno, es. `<|eot_id|>`, mentre i primi sono fine-testo/fine-sequenza). Gli altri
+         * restano in `eos_list` e li ferma il consumer token per token. */
+        out->eos = out->n_eos > 0 ? out->eos_list[out->n_eos - 1] : -1;
+        out->tpl = detect_template(out->dir, &out->chat_tpl, &out->chat_tpl_len);
+        read_bos(out->dir, out->bos, sizeof out->bos);
+    }
 
     out->eng = llmengine_llm_engine_mlx();
     if (!out->eng || !out->eng->load_model) {
         snprintf(err, errcap, "the MLX engine vtable is not available in this build");
         return -1;
     }
+    /* Offload esperti (ABI v5): se richiesto, il motore streama gli esperti da disco dalla dir del
+     * modello. Va PRIMA di load_model. Per i modelli dense è un no-op. */
+    if (out->eng->set_expert_swap)
+        out->eng->set_expert_swap(g_offload_experts ? out->dir : NULL);
     out->model = out->eng->load_model(out->dir);
     if (!out->model) {
         snprintf(err, errcap, "the engine could not load the model at %s", out->dir);

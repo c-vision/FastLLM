@@ -20,6 +20,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <math.h>
 
 /* ---- contenuto dei messaggi ---- */
 
@@ -470,6 +471,31 @@ int fmlx_engine_render_chat(const FmlxEngineModel *m, const FmlxApiChat *c, Fmlx
                 goto oom;
         }
         if (fmlx_sb_cstr(b, "<|im_start|>assistant\n") != 0) goto oom;
+    } else if (m->tpl == FMLX_TPL_DS4) {
+        /* DeepSeek V4 (ds4/GGUF singolo): BOS, system, i turni `<｜User｜>`/`<｜Assistant｜>`, opener
+         * assistant. I delimitatori usano la barra verticale e l'underscore FULLWIDTH (U+FF5C/U+2581),
+         * che sono i token letterali del vocabolario DS4. */
+        if (fmlx_sb_cstr(b, "<｜begin▁of▁sentence｜>") != 0) goto oom;
+        if (sys.p && sys.n) {
+            if (fmlx_sb_add(b, sys.p, sys.n) != 0 || fmlx_sb_cstr(b, "\n") != 0) goto oom;
+        }
+        for (size_t i = 0; c->messages && i < fmlx_json_arr_n(c->messages); i++) {
+            const FmlxJsonValue *msg = fmlx_json_arr_at(c->messages, i);
+            const char *role;
+            size_t rn;
+            role_of(msg, &role, &rn);
+            if (!role || is_system_role(role, rn)) continue;
+            if (rn == 4 && strncmp(role, "user", 4) == 0) {
+                if (fmlx_sb_cstr(b, "<｜User｜>") != 0 ||
+                    content_text(fmlx_json_obj_get(msg, "content"), b, 1) != 0)
+                    goto oom;
+            } else if (rn == 9 && strncmp(role, "assistant", 9) == 0) {
+                if (fmlx_sb_cstr(b, "<｜Assistant｜>") != 0 ||
+                    content_text(fmlx_json_obj_get(msg, "content"), b, 1) != 0)
+                    goto oom;
+            }
+        }
+        if (fmlx_sb_cstr(b, "<｜Assistant｜>") != 0) goto oom;
     } else {
         /* Fallback generico (template sconosciuto): NON è il template del modello, ed è per
          * questo che il server logga la famiglia scelta. Forma minima e leggibile. */
@@ -561,6 +587,67 @@ static int is_secondary_eos(const FmlxEngineModel *m, int32_t id) {
 
 static int utf8_is_cont(unsigned char c) { return (c & 0xC0) == 0x80; }
 
+/* ---- THINK SPLIT: ragionamento (THINK) vs risposta (TEXT) ----
+ *
+ * I modelli reasoning aprono il blocco NEL PROMPT (il chat template scrive `<think>` / ` thinking`)
+ * e lo chiudono NELL'OUTPUT (`</think>` / ` response`). Qui si separa il flusso: i byte del
+ * ragionamento escono come eventi THINK, quelli della risposta come TEXT, e il marcatore di
+ * chiusura NON viene consegnato. Sono marker ASCII, quindi il taglio non rompe l'UTF-8. */
+static const char *const THINK_OPEN[] = {"<think>", " thinking"};
+static const char *const THINK_CLOSE[] = {"</think>", " response"};
+#define THINK_NOPEN ((int)(sizeof THINK_OPEN / sizeof THINK_OPEN[0]))
+#define THINK_NCLOSE ((int)(sizeof THINK_CLOSE / sizeof THINK_CLOSE[0]))
+#define THINK_MARKER_MAX 9 /* la lunghezza del marker più lungo */
+
+static const char *find_bytes(const char *hay, size_t hn, const char *needle, size_t nn) {
+    if (nn == 0 || hn < nn) return NULL;
+    for (size_t i = 0; i + nn <= hn; i++)
+        if (hay[i] == needle[0] && memcmp(hay + i, needle, nn) == 0) return hay + i;
+    return NULL;
+}
+
+static size_t last_find(const char *hay, const char *needle) {
+    size_t nn = strlen(needle), last = (size_t)-1;
+    for (const char *q = hay; (q = strstr(q, needle)) != NULL; q += nn) last = (size_t)(q - hay);
+    return last;
+}
+
+/* 1 se il prompt renderizzato termina DENTRO un blocco di ragionamento (l'apertura più recente
+ * non è seguita da una chiusura): è il caso di Qwen/DeepSeek con thinking attivo. */
+static int prompt_opens_think(const char *p) {
+    size_t o = (size_t)-1, c = (size_t)-1;
+    if (!p) return 0;
+    for (int i = 0; i < THINK_NOPEN; i++) {
+        size_t x = last_find(p, THINK_OPEN[i]);
+        if (x != (size_t)-1 && (o == (size_t)-1 || x > o)) o = x;
+    }
+    for (int i = 0; i < THINK_NCLOSE; i++) {
+        size_t x = last_find(p, THINK_CLOSE[i]);
+        if (x != (size_t)-1 && (c == (size_t)-1 || x > c)) c = x;
+    }
+    return o != (size_t)-1 && (c == (size_t)-1 || o > c);
+}
+
+/* Lunghezza della coda di `s[0..len)` che è un PREFISSO PROPRIO del prossimo marker atteso:
+ * quei byte non si possono ancora consegnare (un token successivo può completare il marker). */
+static size_t think_holdback(const char *s, size_t len, int in_think) {
+    const char *const *set = in_think ? THINK_CLOSE : THINK_OPEN;
+    int n = in_think ? THINK_NCLOSE : THINK_NOPEN;
+    size_t best = 0;
+    for (int i = 0; i < n; i++) {
+        size_t ml = strlen(set[i]);
+        size_t maxp = ml - 1;
+        if (maxp > len) maxp = len;
+        for (size_t p = maxp; p > 0; p--) {
+            if (memcmp(s + len - p, set[i], p) == 0) {
+                if (p > best) best = p;
+                break;
+            }
+        }
+    }
+    return best;
+}
+
 /* Ricalcola il testo dell'intera sequenza, decide la stop e consegna la coda nuova (tagliata a
  * un confine di codepoint) in `g->text`. Ritorna 0/-1. */
 static int text_update(FmlxEngineGen *g, char *err, size_t errcap) {
@@ -620,15 +707,23 @@ static int text_update(FmlxEngineGen *g, char *err, size_t errcap) {
         if (hb <= limit) limit -= hb;
     }
 
+    /* Think split: si tiene indietro anche un possibile PREFISSO del prossimo marker (`</think>`
+     * o l'apertura), così un marker spezzato fra due token non diventa testo. */
+    if (g->want_think && !g->ended) {
+        hb = think_holdback(g->full, limit, g->in_think);
+        if (hb > limit - g->emitted) hb = limit - g->emitted;
+        limit -= hb;
+    }
+
     /* confine di codepoint: mai consegnare un UTF-8 a metà */
     while (limit > g->emitted && limit < g->full_len &&
            utf8_is_cont((unsigned char)g->full[limit]))
         limit--;
 
     if (limit > g->emitted) {
-        /* In modalità logprobs il testo esce dagli offset dei token (`tok_end`), non dal
-         * buffer a chunk: si aggiorna solo il confine sicuro. */
-        if (!g->want_logprobs) {
+        /* In modalità logprobs/think il testo esce da `full` (offset dei token o scanner dei
+         * marker), non dal buffer a chunk: si aggiorna solo il confine sicuro. */
+        if (!g->want_logprobs && !g->want_think) {
             size_t cnt = limit - g->emitted;
             char *nb = malloc(cnt);
             if (!nb) {
@@ -670,6 +765,14 @@ static int advance(FmlxEngineGen *g, char *err, size_t errcap) {
     }
     if (g->want_logprobs) {
         float lp = 0.0f;
+        /* TOP-K (ABI v3): prima del passo, la distribuzione pending fotografata ha lo stesso
+         * pending che `generate_ids_probs` usa per la logprob del token emesso. */
+        if (g->want_top_logprobs) {
+            int32_t *ti = g->top_ids + (size_t)g->n_gen * (size_t)g->top_k;
+            float *tl = g->top_lp + (size_t)g->n_gen * (size_t)g->top_k;
+            int rc = g->m->eng->token_topk(g->session, g->top_k, ti, tl);
+            for (int j = (rc < 0 ? 0 : rc); j < g->top_k; j++) ti[j] = -1;
+        }
         got = g->m->eng->generate_ids_probs(g->session, 1, g->m->eos, &id, &lp);
         if (got > 0) g->logprobs[g->n_gen] = lp;
     } else {
@@ -724,12 +827,14 @@ static uint64_t fnv1a_ids(const int32_t *ids, int n) {
 
 static FmlxEngineGen *start(const FmlxEngineModel *m, const int32_t *ids, int n_prompt,
                             int max_tokens, const LlmEngineLlmSampling *sp, const FmlxApiChat *c,
-                            int want_logprobs, char *err, size_t errcap) {
+                            int want_logprobs, int want_top_logprobs, int think_open, char *err,
+                            size_t errcap) {
     LlmEngineLlmSession s;
     FmlxEngineGen *g;
     int can_prefix;
     int reused = 0;
     int can_lp;
+    int can_top;
 
     if (n_prompt <= 0) {
         snprintf(err, errcap, "empty prompt");
@@ -739,11 +844,23 @@ static FmlxEngineGen *start(const FmlxEngineModel *m, const int32_t *ids, int n_
     if (max_tokens > FMLX_ENGINE_MAX_NEW) max_tokens = FMLX_ENGINE_MAX_NEW;
 
     /* LOGPROBS: onorabili solo se il runner espone l'estensione ABI v2. Chiedere una cosa che
-     * il motore non sa dare è un errore esplicito, mai un campo nullo che finge. */
+     * il motore non sa dare è un errore esplicito, mai un campo nullo che finge. Le top-k
+     * esigono `logprobs` (la logprob del token scelto accompagna sempre le alternative) e il
+     * metodo ABI v3 `token_topk`. */
+    if (want_top_logprobs > 0) want_logprobs = 1;
     can_lp = want_logprobs && (m->eng->caps & LLMMODELIO_CAP_LOGPROBS) &&
              m->eng->generate_ids_probs;
     if (want_logprobs && !can_lp) {
         snprintf(err, errcap, "logprobs were requested but this engine does not expose them");
+        return NULL;
+    }
+    if (want_top_logprobs > (int)FMLX_API_MAX_TOP_K) want_top_logprobs = (int)FMLX_API_MAX_TOP_K;
+    can_top = want_top_logprobs > 0 && can_lp && (m->eng->caps & LLMMODELIO_CAP_LOGPROBS) &&
+              m->eng->token_topk;
+    if (want_top_logprobs > 0 && !can_top) {
+        snprintf(err, errcap,
+                 "top_logprobs were requested but this engine does not expose the top-k "
+                 "distribution");
         return NULL;
     }
 
@@ -816,6 +933,23 @@ static FmlxEngineGen *start(const FmlxEngineModel *m, const int32_t *ids, int n_
             return NULL;
         }
     }
+    if (can_top) {
+        g->top_k = want_top_logprobs;
+        g->top_ids = malloc((size_t)max_tokens * (size_t)g->top_k * sizeof *g->top_ids);
+        g->top_lp = malloc((size_t)max_tokens * (size_t)g->top_k * sizeof *g->top_lp);
+        if (!g->top_ids || !g->top_lp) {
+            m->eng->destroy_session(s);
+            free(g->ids);
+            free(g->logprobs);
+            free(g->tok_end);
+            free(g->top_ids);
+            free(g->top_lp);
+            free(g);
+            snprintf(err, errcap, "out of memory for %d top_logprobs", max_tokens);
+            return NULL;
+        }
+        g->want_top_logprobs = 1;
+    }
     g->m = m;
     g->session = s;
     g->c = c;
@@ -824,6 +958,12 @@ static FmlxEngineGen *start(const FmlxEngineModel *m, const int32_t *ids, int n_
     g->prefix_hit = reused;
     g->finish = FMLX_API_FINISH_LENGTH;
     g->want_logprobs = can_lp;
+    /* Think split: attivo solo se il prompt ha aperto il blocco, e non in modalità logprobs
+     * (che emette un token per evento e ha bisogno del testo intero del token). */
+    g->want_think = (think_open && !can_lp) ? 1 : 0;
+    g->in_think = g->want_think;
+    g->skip_ws = 0;
+    g->think_out = 0;
     return g;
 }
 
@@ -846,6 +986,7 @@ FmlxEngineGen *fmlx_engine_chat(FmlxEngineModel *m, const FmlxApiChat *c, char *
     int32_t *ids;
     int n = 0;
     int max_tokens;
+    int think_open;
     LlmEngineLlmSampling sp;
     FmlxEngineGen *g;
 
@@ -854,19 +995,25 @@ FmlxEngineGen *fmlx_engine_chat(FmlxEngineModel *m, const FmlxApiChat *c, char *
         fmlx_sb_free(&prompt);
         return NULL;
     }
+    think_open = prompt_opens_think(prompt.p);
     ids = tokenize(m->tok, prompt.p ? prompt.p : "", &n, err, errcap);
     fmlx_sb_free(&prompt);
     if (!ids) return NULL;
     max_tokens = c->has_max_tokens ? (int)c->max_tokens : 256;
     sampling_of(c, &sp);
-    g = start(m, ids, n, max_tokens, &sp, c, c->want_logprobs, err, errcap);
+    g = start(m, ids, n, max_tokens, &sp, c, c->want_logprobs, c->want_top_logprobs, think_open,
+              err, errcap);
     free(ids);
-    if (g && fmlx_api_tool_mode(c, NULL) != FMLX_API_TOOL_NONE)
+    if (g && fmlx_api_tool_mode(c, NULL) != FMLX_API_TOOL_NONE) {
         /* Qwen/ChatML marca i tool con `<tool_call>`: lì il JSON nudo non si riconosce (una
          * risposta JSON della stessa famiglia non deve diventare una chiamata). Le altre
          * famiglie (Llama-3 nativa, Hermes, generico) possono o marcare o emettere l'oggetto
          * nudo, quindi lì il riconoscimento nudo è attivo. */
         g->tools = fmlx_toolstream_new(m->tpl != FMLX_TPL_CHATML);
+        /* Con i tool attivi il testo passa dal riconoscitore: il think split interferirebbe,
+         * quindi si disattiva (il ragionamento resterebbe col marcatore). */
+        g->want_think = 0;
+    }
     return g;
 }
 
@@ -890,7 +1037,8 @@ FmlxEngineGen *fmlx_engine_prompt(FmlxEngineModel *m, const char *prompt, int ma
     sp.presence_penalty = presence;
     sp.frequency_penalty = frequency;
     sp.seed = seed;
-    g = start(m, ids, n, max_tokens, &sp, c, c ? c->want_logprobs : 0, err, errcap);
+    g = start(m, ids, n, max_tokens, &sp, c, c ? c->want_logprobs : 0,
+              c ? c->want_top_logprobs : 0, prompt_opens_think(prompt), err, errcap);
     free(ids);
     return g;
 }
@@ -913,6 +1061,50 @@ int fmlx_engine_count_tokens(FmlxEngineModel *m, const FmlxApiChat *c, int *out,
     }
     *out = n;
     return 0;
+}
+
+int fmlx_engine_embed_dim(FmlxEngineModel *m) {
+    if (!m || !(m->eng->caps & LLMMODELIO_CAP_EMBED) || !m->eng->emb_dim) return -1;
+    return m->eng->emb_dim(m->model);
+}
+
+int fmlx_engine_embed(FmlxEngineModel *m, const char *text, float *out, int cap, int *out_tokens) {
+    int dim, rc = -1, ntok = 0;
+
+    if (!m || !text || !out) return -1;
+    if (!(m->eng->caps & LLMMODELIO_CAP_EMBED) || !m->eng->emb_dim) return -1;
+    dim = m->eng->emb_dim(m->model);
+    if (dim <= 0 || cap < dim) return -1;
+
+    if (m->eng->embed_text) {
+        /* Motori con tokenizer proprio (llama.cpp): testo in ingresso. */
+        rc = m->eng->embed_text(m->model, text, out, cap);
+    } else if (m->eng->embed_ids) {
+        /* Runner IDS-only (MLX): tokenizza qui e passa gli id. */
+        int n = llmtoken_encode(m->tok, text, NULL, 0);
+        int32_t *ids;
+        if (n <= 0) return -1;
+        ids = malloc((size_t)n * sizeof *ids);
+        if (!ids) return -1;
+        if (llmtoken_encode(m->tok, text, ids, n) != n) {
+            free(ids);
+            return -1;
+        }
+        rc = m->eng->embed_ids(m->model, ids, n, out, cap);
+        ntok = n;
+        free(ids);
+    }
+    if (rc <= 0) return -1;
+
+    /* L2-normalizzazione (il mean-pool grezzo del runner non è normalizzato). */
+    double s = 0.0;
+    for (int i = 0; i < dim; i++) s += (double)out[i] * out[i];
+    if (s > 0.0) {
+        double inv = 1.0 / sqrt(s);
+        for (int i = 0; i < dim; i++) out[i] = (float)((double)out[i] * inv);
+    }
+    if (out_tokens) *out_tokens = ntok;
+    return dim;
 }
 
 /* Avanza di una sequenza UTF-8 completa (o fino a `limit`). */
@@ -952,9 +1144,80 @@ static int emit_logprob(FmlxEngineGen *g, FmlxApiEvent *ev) {
         ev->n = (uint32_t)(end - start);
         ev->has_logprob = 1;
         ev->logprob = g->logprobs[g->tok_emit];
+        /* TOP-K (ABI v3): le alternative della STESSA posizione del token emesso. Si decodifica
+         * qui (il layer ① possiede il tokenizer) e si copia inline nell'evento. Una voce che non
+         * entra nel buffer si omette — mai un token mozzato. */
+        ev->n_top = 0;
+        if (g->want_top_logprobs) {
+            const int32_t *ti = g->top_ids + (size_t)g->tok_emit * (size_t)g->top_k;
+            const float *tl = g->top_lp + (size_t)g->tok_emit * (size_t)g->top_k;
+            int nt = 0;
+            for (int t = 0; t < g->top_k; t++) {
+                if (ti[t] < 0) continue;
+                int need = llmtoken_decode_ex(g->m->tok, &ti[t], 1, ev->top[nt].token,
+                                              (int)sizeof ev->top[nt].token, 0);
+                if (need < 0 || (size_t)need >= sizeof ev->top[nt].token) continue;
+                ev->top[nt].n = (uint32_t)need;
+                ev->top[nt].logprob = tl[t];
+                nt++;
+            }
+            ev->n_top = nt;
+        }
         g->tok_byte = end;
         g->tok_emit = j + 1;
         return 1;
+    }
+    return 0;
+}
+
+/* Un evento dal flusso THINK-split: chunk omogeneo (ragionamento o risposta), con il marker di
+ * chiusura/apertura consumato (mai consegnato). Ritorna 1 se un evento è pronto, 0 se serve
+ * avanzare. La coda di `full` è già limitata a un confine sicuro da `text_update`. */
+static int emit_think(FmlxEngineGen *g, FmlxApiEvent *ev) {
+    while (g->think_out < g->emitted) {
+        /* Dopo `</think>` il template mette `\n\n`: è formattazione, non risposta. Si salta lo
+         * spazio bianco in testa alla risposta (solo quello immediatamente dopo il marker). */
+        if (g->skip_ws) {
+            unsigned char c = (unsigned char)g->full[g->think_out];
+            if (c == ' ' || c == '\n' || c == '\r' || c == '\t') {
+                g->think_out++;
+                continue;
+            }
+            g->skip_ws = 0;
+        }
+        const char *const *set = g->in_think ? THINK_CLOSE : THINK_OPEN;
+        int nset = g->in_think ? THINK_NCLOSE : THINK_NOPEN;
+        size_t mpos = (size_t)-1, mlen = 0;
+        for (int i = 0; i < nset; i++) {
+            size_t ml = strlen(set[i]);
+            const char *q = find_bytes(g->full + g->think_out, g->emitted - g->think_out, set[i], ml);
+            if (q) {
+                size_t pos = (size_t)(q - g->full);
+                if (pos < mpos) {
+                    mpos = pos;
+                    mlen = ml;
+                }
+            }
+        }
+        if (mpos == g->think_out) { /* il marker è esattamente qui: si consuma e si cambia stato */
+            g->think_out += mlen;
+            g->in_think = !g->in_think;
+            if (!g->in_think) g->skip_ws = 1; /* `</think>` consumato: salta lo spazio del template */
+            continue;
+        }
+        size_t upto = (mpos == (size_t)-1) ? g->emitted : mpos;
+        if (upto > g->think_out) {
+            size_t n = upto - g->think_out;
+            if (n > FMLX_ENGINE_CHUNK) n = FMLX_ENGINE_CHUNK;
+            while (n < upto - g->think_out && ((unsigned char)g->full[g->think_out + n] & 0xC0) == 0x80)
+                n--; /* mai spezzare una codepoint */
+            ev->ev = g->in_think ? FMLX_API_EV_THINK : FMLX_API_EV_TEXT;
+            ev->text = g->full + g->think_out;
+            ev->n = (uint32_t)n;
+            g->think_out += n;
+            return 1;
+        }
+        break;
     }
     return 0;
 }
@@ -994,6 +1257,9 @@ FmlxApiGenSt fmlx_engine_next(void *ctx, FmlxApiEvent *ev, FmlxApiErrCtx *err) {
             /* Un token per evento, con la sua logprob. `tools` è mutuamente escluso con
              * `logprobs` a monte, quindi non c'è da passare dal riconoscitore. */
             if (emit_logprob(g, ev)) return FMLX_API_GEN_MORE;
+        } else if (g->want_think) {
+            /* Ragionamento → THINK, risposta → TEXT, marker consumato (non esce). */
+            if (emit_think(g, ev)) return FMLX_API_GEN_MORE;
         } else if (g->pos < g->text_len) {
             if (g->tools) {
                 /* Tutto il delta decodificato passa dal riconoscitore: lui decide testo vs
@@ -1066,6 +1332,8 @@ void fmlx_engine_gen_free(FmlxEngineGen *g) {
     free(g->text);
     free(g->logprobs);
     free(g->tok_end);
+    free(g->top_ids);
+    free(g->top_lp);
     if (g->tools) fmlx_toolstream_free(g->tools);
     free(g);
 }

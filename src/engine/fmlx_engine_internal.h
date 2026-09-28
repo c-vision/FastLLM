@@ -20,7 +20,8 @@
 typedef enum {
     FMLX_TPL_GENERIC = 0, /* fallback: "role: content\n" + opener assistant */
     FMLX_TPL_LLAMA3 = 1,  /* <|begin_of_text|> ... <|eot_id|> */
-    FMLX_TPL_CHATML = 2   /* <|im_start|>role ... <|im_end|> */
+    FMLX_TPL_CHATML = 2,  /* <|im_start|>role ... <|im_end|> */
+    FMLX_TPL_DS4 = 3      /* DeepSeek V4 (ds4/GGUF singolo): <｜begin▁of▁sentence｜> … <｜Assistant｜> */
 } FmlxTplKind;
 
 struct FmlxEngineModel {
@@ -91,6 +92,28 @@ struct FmlxEngineGen {
     uint32_t *tok_end; /* malloc, `max_new` elementi */
     int tok_emit;
     size_t tok_byte;
+
+    /* TOP-LOGPROBS (ABI v3). Quando `want_top_logprobs > 0` si fotografa la distribuzione top-k
+     * alla posizione di partenza di ogni token, PRIMA di generarlo e con lo stesso pending di
+     * `generate_ids_probs`: si salvano id+logprob (non il testo: decodificarlo ha senso solo al
+     * momento dell'emissione, dove `want_logprobs` è già attivo). `top_ids`/`top_lp` sono
+     * `max_new * top_k`; lo slot del token i è `i*top_k`. */
+    int want_top_logprobs;
+    int top_k;
+    int32_t *top_ids;
+    float *top_lp;
+
+    /* THINK SPLIT. I modelli reasoning (Qwen3.x, DeepSeek, …) emettono `…</think>` nel testo:
+     * il ragionamento va in eventi THINK, la risposta in eventi TEXT, e il marcatore NON esce.
+     * `want_think` = 1 quando il prompt renderizzato apre un blocco (`<think>`/` thinking` senza
+     * chiusura); `in_think` è lo stato corrente; `think_out` l'indice assoluto in `full` già
+     * consegnato. In questo modo il server può esporre `reasoning_content` e il CLI nascondere o
+     * attenuare il ragionamento. Nel ramo think NON si costruisce `g->text` (si emette da `full`
+     * a chunk omogenei). Mutuamente escluso con logprobs/tools (che hanno bisogno del testo intero). */
+    int want_think;
+    int in_think;
+    int skip_ws;   /* dopo `</think>` si salta lo spazio/newline di formattazione del template */
+    size_t think_out;
 };
 
 /* Stringa dinamica minimale. */
