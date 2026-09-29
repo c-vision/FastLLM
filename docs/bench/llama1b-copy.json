@@ -1,0 +1,16 @@
+{
+ "model": "Llama-3.2-1B-Instruct-4bit",
+ "prompt_sha256": "0bc504fbed54e4af6afda2302d19c270e6071342fce19836239c4cb510184974",
+ "max_tokens": 96,
+ "spec_order": 3,
+ "repeat": 1,
+ "spec_off_tok_s": 411.1,
+ "spec_on_tok_s": 671.3,
+ "speedup": 1.633,
+ "spec_off_maxrss_mb": 826.5,
+ "spec_on_maxrss_mb": 826.5,
+ "mem_delta_pct": 0.0,
+ "parity_bit_identical": true,
+ "output_sha256": "c38f135f37f435cce2f55bddb90a21121bdf11389e27ca223cefc77ad97d9f9e",
+ "gate": "PASS"
+}
