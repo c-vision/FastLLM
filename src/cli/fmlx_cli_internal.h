@@ -116,7 +116,18 @@ void fmlx_chat_hist_free(FmlxChatHist *h);
  * stesso `name` di `serve`, si rende il chat template (Jinja) del modello, e si consuma
  * `fmlx_engine_next`. Nessuna seconda via al motore, nessuna copia della logica di render. */
 FmlxCliStatus fmlx_cli_generate_stream(const char *cache_root, const char *name, const char *system,
-                                       const FmlxChatHist *hist, long long max_tokens, FILE *out,
-                                       FILE *err, char **out_text);
+                                       const FmlxChatHist *hist, long long max_tokens, int show_think,
+                                       FILE *out, FILE *err, char **out_text);
+
+/* Carica il modello nella cache residente SENZA generare. Serve ai verbi interattivi (`chat`):
+ * la diagnostica di load (stderr) esce all'AVVIO, prima del primo prompt, invece che dopo il primo
+ * messaggio. Idempotente: la generazione successiva trova il modello già residente e non ricarica. */
+FmlxCliStatus fmlx_cli_preload(const char *cache_root, const char *name, FILE *err);
+
+/* --- il banner di avvio (definito in fmlx_banner.c) -------------------------------------------
+ * Big text "FastLLM" (port dell'algoritmo GMBasic) + autore/versione/licenza + una riga extra
+ * `<tag>: <value>` (es. `modello: …` o `ascolto: host:porta`). `tty` = 1 abilita clear screen e
+ * colore; 0 scrive solo il testo (niente escape in una pipe). */
+void fmlx_banner(FILE *out, const char *tag, const char *value, int tty);
 
 #endif /* FMLX_CLI_INTERNAL_H */

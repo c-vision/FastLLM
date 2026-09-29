@@ -339,7 +339,7 @@ static void case_health_unavailable(void) {
     FmlxServeOpts o = opts_default();
     Resp r;
 
-    o.cache_root = "/non-esiste-di-sicuro-fastmlx-test";
+    o.cache_root = "/non-esiste-di-sicuro-fastllm-test";
     CK(fmlx_serve_buf_init(&b, 0, 0) == 0, "buf_init");
     CK(ask(rq("GET /health", NULL, NULL), &o, &b, &r) == FMLX_SERVE_OK, "health st");
     CK(r_status(&r) == 503, "cache illeggibile -> 503, non 200 (%d)", r_status(&r));
@@ -442,12 +442,12 @@ static void case_engine_refusals(void) {
 
     /* Le rotte NON ancora cablate restano 501: l'elenco è la tabella del router, non memoria.
      * `load`/`unload`/`status` NON sono più qui: il motore li espone via l'ABI e sono cablati
-     * (provati sotto). `responses`/`embeddings` restano 501 col loro codice stabile: le
-     * embeddings non hanno un punto d'ingresso nell'ABI (nessun CAP_EMBED). `metrics` è cablata
-     * (testo Prometheus) ed è provata qui sotto. */
+     * (provati sotto). `responses` resta 501 col suo codice stabile. `metrics` è cablata
+     * (testo Prometheus) ed è provata qui sotto; `embeddings` è cablata (ABI v4 `embed_ids`) ed è
+     * provata subito dopo. */
     {
         static const struct { const char *path; int post; } R[] = {
-            {"/v1/responses", 1}, {"/v1/embeddings", 1},
+            {"/v1/responses", 1},
         };
         size_t i;
         for (i = 0; i < sizeof R / sizeof R[0]; i++) {
@@ -463,19 +463,33 @@ static void case_engine_refusals(void) {
         }
     }
 
+    /* `/v1/embeddings` è cablata (ABI v4 `embed_ids`): senza `input` è un 400 del corpo; con
+     * `input` ma modello assente è il 404 del modello (stessa disciplina della chat). */
+    CK(ask(rq("POST /v1/embeddings", NULL, "{\"model\":\"m\"}"), &o, &b, &r) == FMLX_SERVE_OK,
+       "st embeddings");
+    CK(r_status(&r) == 400 && HAS(r_body(&r), "\"param\":\"input\""),
+       "/v1/embeddings senza input -> 400 (%d)\n%s", r_status(&r), r_body(&r));
+    ck_length(&r);
+    CK(ask(rq("POST /v1/embeddings", NULL, "{\"model\":\"m\",\"input\":\"x\"}"), &o, &b, &r) ==
+           FMLX_SERVE_OK,
+       "st embeddings 2");
+    CK(r_status(&r) == 404 && HAS(r_body(&r), "\"type\":\"model_not_found\""),
+       "/v1/embeddings con modello assente -> 404 (%d)\n%s", r_status(&r), r_body(&r));
+    ck_length(&r);
+
     /* `/metrics`: NON è più un 501 — è testo Prometheus coi contatori del server. Il
      * Content-Type è quello che un Prometheus accetta, e i nomi delle metriche sono il
      * contratto: cambiarli rompe la raccolta, quindi si asseriscono. */
     CK(ask(rq("GET /metrics", NULL, NULL), &o, &b, &r) == FMLX_SERVE_OK, "st metrics");
     CK(r_status(&r) == 200 && HAS(r.s, "Content-Type: text/plain"),
        "/metrics -> 200 text/plain (%d)\n%s", r_status(&r), r.s);
-    CK(HAS(r_body(&r), "fastmlx_requests_total") &&
-           HAS(r_body(&r), "fastmlx_requests_by_endpoint_total") &&
-           HAS(r_body(&r), "fastmlx_prefix_cache_hits_total") &&
-           HAS(r_body(&r), "fastmlx_prefix_cache_misses_total") &&
-           HAS(r_body(&r), "fastmlx_tokens_total") && HAS(r_body(&r), "fastmlx_models_loaded") &&
-           HAS(r_body(&r), "fastmlx_kv_tokens_used") &&
-           HAS(r_body(&r), "fastmlx_kv_tokens_capacity"),
+    CK(HAS(r_body(&r), "fastllm_requests_total") &&
+           HAS(r_body(&r), "fastllm_requests_by_endpoint_total") &&
+           HAS(r_body(&r), "fastllm_prefix_cache_hits_total") &&
+           HAS(r_body(&r), "fastllm_prefix_cache_misses_total") &&
+           HAS(r_body(&r), "fastllm_tokens_total") && HAS(r_body(&r), "fastllm_models_loaded") &&
+           HAS(r_body(&r), "fastllm_kv_tokens_used") &&
+           HAS(r_body(&r), "fastllm_kv_tokens_capacity"),
        "/metrics non elenca i contatori attesi:\n%s", r_body(&r));
     ck_length(&r);
 
@@ -631,48 +645,48 @@ static void case_env(void) {
 
     /* Si toglie ciò che l'ambiente di chi legge potrebbe aver messo: un test che passa solo perché
      * la shell era vuota non sta provando niente. */
-    unsetenv("FASTMLX_HOST");
-    unsetenv("FASTMLX_PORT");
-    unsetenv("FASTMLX_API_KEY");
+    unsetenv("FASTLLM_HOST");
+    unsetenv("FASTLLM_PORT");
+    unsetenv("FASTLLM_API_KEY");
     memset(&o, 0, sizeof o);
     CK(fmlx_serve_apply_env(&o, msg, sizeof msg) == FMLX_SERVE_OK && o.host == NULL &&
            o.port == 0 && o.api_key == NULL,
        "niente ambiente, niente da riempire: i default li dà il loop");
 
-    setenv("FASTMLX_HOST", "0.0.0.0", 1);
-    setenv("FASTMLX_PORT", "8123", 1);
-    setenv("FASTMLX_API_KEY", "dda", 1);
+    setenv("FASTLLM_HOST", "0.0.0.0", 1);
+    setenv("FASTLLM_PORT", "8123", 1);
+    setenv("FASTLLM_API_KEY", "dda", 1);
     memset(&o, 0, sizeof o);
     CK(fmlx_serve_apply_env(&o, msg, sizeof msg) == FMLX_SERVE_OK, "apply_env");
     CK(o.host && !strcmp(o.host, "0.0.0.0") && o.port == 8123 && o.api_key &&
            !strcmp(o.api_key, "dda"),
        "l'ambiente riempie ciò che il flag non ha detto");
-    /* Il flag VANCE: `--host` deve valere più di un FASTMLX_HOST lasciato in un file di shell. */
+    /* Il flag VANCE: `--host` deve valere più di un FASTLLM_HOST lasciato in un file di shell. */
     o.host = "127.0.0.1";
     o.port = 9009;
     CK(fmlx_serve_apply_env(&o, msg, sizeof msg) == FMLX_SERVE_OK && !strcmp(o.host, "127.0.0.1") &&
            o.port == 9009,
        "ciò che è già impostato NON viene sovrascritto");
 
-    setenv("FASTMLX_PORT", "8000x", 1);
+    setenv("FASTLLM_PORT", "8000x", 1);
     memset(&o, 0, sizeof o);
-    CK(fmlx_serve_apply_env(&o, msg, sizeof msg) == FMLX_SERVE_BAD_ARG && HAS(msg, "FASTMLX_PORT"),
+    CK(fmlx_serve_apply_env(&o, msg, sizeof msg) == FMLX_SERVE_BAD_ARG && HAS(msg, "FASTLLM_PORT"),
        "`8000x` NON è 8000: è un typo, e va detto (%s)", msg);
-    setenv("FASTMLX_PORT", "0", 1);
+    setenv("FASTLLM_PORT", "0", 1);
     memset(&o, 0, sizeof o);
     CK(fmlx_serve_apply_env(&o, msg, sizeof msg) == FMLX_SERVE_BAD_ARG, "porta 0 rifiutata");
-    setenv("FASTMLX_PORT", "70000", 1);
+    setenv("FASTLLM_PORT", "70000", 1);
     memset(&o, 0, sizeof o);
     CK(fmlx_serve_apply_env(&o, msg, sizeof msg) == FMLX_SERVE_BAD_ARG, "porta oltre 65535");
-    unsetenv("FASTMLX_HOST");
-    unsetenv("FASTMLX_PORT");
-    unsetenv("FASTMLX_API_KEY");
+    unsetenv("FASTLLM_HOST");
+    unsetenv("FASTLLM_PORT");
+    unsetenv("FASTLLM_API_KEY");
     /* Una chiave vuota È "nessuna auth", non "la chiave è la stringa vuota": due stati che qui
      * devono coincidere, o `/health` direbbe `enabled` su un server aperto. */
-    setenv("FASTMLX_API_KEY", "", 1);
+    setenv("FASTLLM_API_KEY", "", 1);
     k = "qualcosa";
     CK(fmlx_serve_key_from_env(&k) == 0 && k == NULL, "chiave vuota = nessuna chiave");
-    unsetenv("FASTMLX_API_KEY");
+    unsetenv("FASTLLM_API_KEY");
 }
 
 /* ---- il loop vero: un socket, una richiesta, la coerenza dei byte ---- */
@@ -695,7 +709,7 @@ static pid_t serve_child(int port, unsigned max_requests) {
         o.host = "127.0.0.1";
         o.port = port;
         o.max_conns = max_requests;
-        /* `buf == NULL`: il loop alloca i propri buffer, ed è il cammino che `fastmlx serve`
+        /* `buf == NULL`: il loop alloca i propri buffer, ed è il cammino che `fastllm serve`
          * percorre davvero. `stop` dato noi: così il figlio non tocca i segnali. */
         _exit(fmlx_serve(&o, NULL, NULL, &stop, NULL) == FMLX_SERVE_OK ? 0 : 1);
     }
@@ -919,7 +933,7 @@ static pid_t serve_child_logged(int port, unsigned max_conns, int *logfd) {
         o.host = "127.0.0.1";
         o.port = port;
         o.max_conns = max_conns;
-        /* `stop == NULL`: è il cammino del binario `fastmlx serve`, e l'unico in cui gli handler
+        /* `stop == NULL`: è il cammino del binario `fastllm serve`, e l'unico in cui gli handler
          * si installano DAVVERO. Se `fdopen` fallisce la log viene NULL e il padre non legge nulla:
          * il caso fallisce dicendo il vero, invece che passare per un niente. */
         _exit(fmlx_serve(&o, NULL, lf, NULL, NULL) == FMLX_SERVE_OK ? 0 : 1);
@@ -977,7 +991,7 @@ static FmlxServeSt serve_once_now(FmlxServeOpts *o, char **log_out, size_t *log_
 }
 
 /* La stessa porta di un ascoltatore vivo: è il caso più frequente di server che non parte (un
- * `fastmlx serve` già aperto in un altro terminale) e fino a ieri usciva come `BAD_ARG`, che
+ * `fastllm serve` già aperto in un altro terminale) e fino a ieri usciva come `BAD_ARG`, che
  * manda l'operatore a rileggere i flag quando i flag erano giusti. */
 static void case_addr_in_use(void) {
     int port = 8700 + (int)(getpid() % 300), logfd = -1, w = 0;

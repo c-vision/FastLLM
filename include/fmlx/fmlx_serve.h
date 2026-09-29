@@ -29,7 +29,7 @@
  * read, write, keep-alive): la parte che in-process non si prova, e che per questo è sottile
  * quanto basta. Le allocazioni stanno TUTTE nel loop; il responder non mallocà, come il codec.
  *
- * AUTENTICAZIONE (piano §14, §18.3.3 "gated-401"): `FASTMLX_API_KEY` vuota o assente =
+ * AUTENTICAZIONE (piano §14, §18.3.3 "gated-401"): `FASTLLM_API_KEY` vuota o assente =
  * nessuna auth — che è il default, perché questo server ascolta su 127.0.0.1 e un key
  * obbligatorio renderebbe impossibile provarlo. Quando è messa, OGNI rotta (comprese
  * `/health` e il 404) la esige: sapere chi è autorizzato non dipende da cosa chiede. La
@@ -100,7 +100,7 @@ typedef enum {
     FMLX_SERVE_BAD_ARG = 2, /* uso scorretto dell'API (NULL, porta fuori range, host che non si
                              * risolve): la correzione sta in chi chiama */
     /* I tre che seguono è il SO che rifiuta un `bind`, non l'uso scorretto. Prima stavano tutti
-     * in BAD_ARG, che è una diagnosi SPOSTATA: dice a chi ha lanciato `fastmlx serve` di aver
+     * in BAD_ARG, che è una diagnosi SPOSTATA: dice a chi ha lanciato `fastllm serve` di aver
      * passato un argomento sbagliato quando l'argomento era giusto e la porta era occupata.
      * Un codice per causa, perché il da-fare è diverso: cambiare porta, o alzare i privilegi, o
      * accorgersi che l'interfaccia nominata da `--host` su questa macchina non c'è. */
@@ -114,11 +114,11 @@ const char *fmlx_serve_status_str(FmlxServeSt s);
 
 /* ---- le decisioni host/port/key (piano §14: flag > ambiente > default) ---- */
 
-/* Applica `FASTMLX_HOST`/`FASTMLX_PORT`/`FASTMLX_API_KEY` a `o` LASCIANDO stare ciò che è già
- * posto (il flag ha già vinto). Una `FASTMLX_PORT` illeggibile — non cifre, o fuori 1..65535 —
+/* Applica `FASTLLM_HOST`/`FASTLLM_PORT`/`FASTLLM_API_KEY` a `o` LASCIANDO stare ciò che è già
+ * posto (il flag ha già vinto). Una `FASTLLM_PORT` illeggibile — non cifre, o fuori 1..65535 —
  * è un ERRORE con il motivo in `msg`, non un ritorno silenzioso al default: un typo che sposta
  * il server sulla porta di casa è il genere di bug che si scopre dal log di un'altro processo.
- * Un `FASTMLX_API_KEY` vuoto È un valore: «nessuna auth», scritta per iscritto.
+ * Un `FASTLLM_API_KEY` vuoto È un valore: «nessuna auth», scritta per iscritto.
  * Ritorna FMLX_SERVE_OK o FMLX_SERVE_BAD_ARG. */
 FmlxServeSt fmlx_serve_apply_env(FmlxServeOpts *o, char *msg, size_t msg_len);
 

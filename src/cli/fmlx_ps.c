@@ -1,13 +1,13 @@
-/* fmlx_ps.c — `fastmlx ps`: cosa sta servendo questa macchina, e con quali modelli in RAM.
+/* fmlx_ps.c — `fastllm ps`: cosa sta servendo questa macchina, e con quali modelli in RAM.
  *
  * IL CRITERIO, che va detto perché è una scelta e non una scorciatoia. FastLLM non ha un registro
  * di processi: la cache residente (`fmlx_engine_model`) vive nella memoria del PROCESSO che genera,
- * e un `fastmlx ps` è un altro processo — non può vedere `g_slot[]` di un `serve` in corso. Le due
+ * e un `fastllm ps` è un altro processo — non può vedere `g_slot[]` di un `serve` in corso. Le due
  * risposte oneste sono (a) fingersi un registro e mentire, o (b) OSSERVARE l'unica cosa
  * introspezionabile da fuori: la porta. Qui si fa (b):
  *
  *   1. si risolve host/porta con la STESSA precedenza del server (`--host`/`--port` >
- *      `FASTMLX_HOST`/`FASTMLX_PORT` > default 127.0.0.1:8000), perché `ps` senza bandiere deve
+ *      `FASTLLM_HOST`/`FASTLLM_PORT` > default 127.0.0.1:8000), perché `ps` senza bandiere deve
  *      guardare dove `serve` senza bandiere ascolta;
  *   2. si apre una connessione TCP e si chiede `GET /v1/models/status`, la rotta che il server ha
  *      già per dire i modelli RESIDENTI. Nessuna rotta nuova: se un giorno la cache cambia forma, la
@@ -18,7 +18,7 @@
  *    domanda, non un'operazione: uscita 0, come `ps` di sistema senza processi);
  *  - i modelli CARICATI DA QUESTO PROCESSO non appaiono, perché questo processo non ne carica: `ps`
  *    non è un `run` e non tocca il motore;
- *  - con `FASTMLX_API_KEY` impostata, la rotta esige la chiave e `ps` la manda (Bearer), altrimenti
+ *  - con `FASTLLM_API_KEY` impostata, la rotta esige la chiave e `ps` la manda (Bearer), altrimenti
  *    vedrebbe un 401 che non è un guasto del server.
  */
 #include "fmlx_cli_internal.h"
@@ -186,7 +186,7 @@ FmlxCliStatus fmlx_ps_exec(const FmlxCliArgs *a, FILE *out, FILE *err) {
 
     o = a->serve;
     if (fmlx_serve_apply_env(&o, why, sizeof why) != FMLX_SERVE_OK) {
-        fprintf(err, "fastmlx ps: %s\n", why);
+        fprintf(err, "fastllm ps: %s\n", why);
         return FMLX_CLI_USAGE;
     }
     host = o.host ? o.host : FMLX_SERVE_HOST_DEFAULT;

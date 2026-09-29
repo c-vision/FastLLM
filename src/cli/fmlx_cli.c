@@ -178,7 +178,7 @@ static void usage_verb(FILE *out, const char *v) {
             "      --max-tokens 256 --think --offload-experts\n");
     else if (!strcmp(v, "chat"))
         fprintf(out,
-            "fastllm chat <nome|#n> [opzioni]   (REPL: /exit /clear /system /help)\n"
+            "fastllm chat <nome|#n> [opzioni]   (REPL: /exit /quit /clear /new /system /thinking /prompt /compact /help)\n"
             "  <nome|#n>              alias del registro, indice (#n), o path/id HF/$FMLX_MODELS_DIR\n"
             "  --cache <dir>          radice da cui risolvere il modello\n"
             "  --system <testo>       system iniziale (modificabile con /system)\n"
@@ -246,7 +246,7 @@ static const char *missing_piece(const char *verb) {
 static int is_verb(const char *v) {
     static const char *const known[] = {"pull", "run", "chat",  "serve", "models",
                                         "list", "ls",  "ps",    "cp",    "rm",    "doctor",
-                                        "add",  "show", "help"};
+                                        "add",  "show", "help",  "options"};
     size_t i;
     for (i = 0; i < sizeof known / sizeof known[0]; i++)
         if (!strcmp(v, known[i])) return 1;
@@ -291,6 +291,7 @@ enum {
     F_HOST, F_PORT, F_MAXBODY, F_ONCE,
     F_JSON, F_MAXTOKENS, F_SYSTEM, F_THINK, F_OFFLOAD,
     F_MMPROJ, F_MODALITY, F_PURGE,
+    F_OPT,
     F_N
 };
 #define F_PULL_ONLY                                                                                            \
@@ -318,7 +319,7 @@ static const char *const FLN[F_N] = {
     "--quiet",    "--cache",        "--revision", "--endpoint", "--max-bytes", "--stall-timeout",
     "--stall-retries", "--dest",     "--offline",  "--repair",   "--host",      "--port",
     "--max-body", "--once",         "--json",     "--max-tokens", "--system",   "--think",
-    "--offload-experts", "--mmproj", "--modality", "--purge"};
+    "--offload-experts", "--mmproj", "--modality", "--purge", "--opt"};
 
 /* Il bit della bandiera `n`, 0 se la bandiera non esiste. */
 static unsigned flag_bit(const char *n) {
@@ -354,8 +355,15 @@ FmlxCliStatus fmlx_cli_parse(int argc, char **argv, FmlxCliArgs *out, char *msg,
         }
         if (a[0] != '-' || !a[1]) {
             if (!verb_seen) {
-                if (!is_verb(a))
-                    return fail(out, msg, msg_len, "comando sconosciuto: %s", a);
+                if (!is_verb(a)) {
+                    /* Non è un verbo: è un NOME DI MODELLO -> si assume `chat <nome>`.
+                     * Se il modello non esiste, l'errore lo dà la risoluzione del nome (registry). */
+                    snprintf(out->verb, sizeof out->verb, "chat");
+                    snprintf(out->repo, sizeof out->repo, "%s", a);
+                    verb_seen = 1;
+                    repo_seen = 1;
+                    continue;
+                }
                 snprintf(out->verb, sizeof out->verb, "%s", a);
                 verb_seen = 1;
                 continue;
@@ -465,6 +473,14 @@ FmlxCliStatus fmlx_cli_parse(int argc, char **argv, FmlxCliArgs *out, char *msg,
             out->max_tokens = n;
         } else if (!strcmp(name, "--system")) {
             out->system = val;
+        } else if (!strcmp(name, "--opt")) {
+            /* Parametro del motore `nome=valore` (registro; nessuna env). Ripetibile. */
+            if (!val || !strchr(val, '='))
+                return fail(out, msg, msg_len, "--opt vuole nome=valore");
+            if (out->n_opts < (int)(sizeof out->opts / sizeof out->opts[0]))
+                snprintf(out->opts[out->n_opts++], sizeof out->opts[0], "%s", val);
+            else
+                return fail(out, msg, msg_len, "--opt: troppe opzioni");
         } else if (!strcmp(name, "--mmproj")) {
             snprintf(out->mmproj, sizeof out->mmproj, "%s", val);
         } else if (!strcmp(name, "--modality")) {
@@ -519,7 +535,7 @@ FmlxCliStatus fmlx_cli_parse(int argc, char **argv, FmlxCliArgs *out, char *msg,
      * risposta onesta è ancora una sola — non esistono — ed è `NOT_WIRED` nel dispatch, non un
      * elenco di bandiere che NON accettano. */
     if (verb_seen) {
-        unsigned allowed = (1u << F_QUIET) | (1u << F_CACHE); /* condivise: sempre */
+        unsigned allowed = (1u << F_QUIET) | (1u << F_CACHE) | (1u << F_OPT); /* condivise: sempre */
         int has_surface = 1, k;
         if (!strcmp(out->verb, "pull")) allowed |= F_PULL_ONLY;
         else if (!strcmp(out->verb, "serve")) allowed |= F_SERVE_ONLY;
@@ -542,6 +558,31 @@ FmlxCliStatus fmlx_cli_parse(int argc, char **argv, FmlxCliArgs *out, char *msg,
     return FMLX_CLI_OK;
 }
 
+static FmlxCliStatus fmlx_options_exec(const FmlxCliArgs *a, FILE *out, FILE *err) {
+    int n, i;
+    (void)a; (void)err;
+    if (!out) out = stdout;
+    fprintf(out, "\nOpzioni del motore (registro: parametri SENZA variabili d'ambiente).\n"
+                 "Si impostano con `--opt <nome>=<valore>` (ripetibile) prima del load, o da BASIC.\n\n");
+    n = fmlx_engine_opt_count();
+    for (i = 0; i < n; i++) {
+        const char *nm = NULL, *desc = NULL;
+        char val[64] = "";
+        fmlx_engine_opt_at(i, &nm, &desc, val, sizeof val);
+        fprintf(out, "  %-18s = %-12s %s\n", nm ? nm : "?", val, desc ? desc : "");
+    }
+    fprintf(out, "\nEsempi:\n"
+                 "  fastllm options\n"
+                 "  fastllm ds4                                    # default (contesto auto, thinking off)\n"
+                 "  fastllm --opt context=131072 ds4               # contesto 128k\n"
+                 "  fastllm --opt thinking=on ds4                  # abilita il reasoning\n"
+                 "  fastllm --opt offload=on --opt offload_cache_mb=16384 ds4\n"
+                 "  fastllm --opt kvquant=8:8192 ds4               # KV quantizzata oltre 8192 token\n"
+                 "  fastllm --opt tqmemory=0 ds4                   # esperti accelerati (piu' RAM)\n"
+                 "  fastllm --opt dtype=bf16 ds4\n");
+    return FMLX_CLI_OK;
+}
+
 FmlxCliStatus fmlx_cli_exec_with(const FmlxCliArgs *a_in, const FmlxHfTransport *t, FILE *out,
                                  FILE *err) {
     FmlxCliArgs ac;
@@ -552,12 +593,39 @@ FmlxCliStatus fmlx_cli_exec_with(const FmlxCliArgs *a_in, const FmlxHfTransport 
     if (!a_in) return FMLX_CLI_USAGE;
     ac = *a_in;
     a = &ac;
+    /* Parametri del motore (`--opt nome=valore`): applicati PRIMA di ogni load (registro, no env). */
+    for (int oi = 0; oi < a->n_opts; oi++) {
+        char kv[192];
+        char *eq;
+        snprintf(kv, sizeof kv, "%s", a->opts[oi]);
+        eq = strchr(kv, '=');
+        if (!eq) continue;
+        *eq = '\0';
+        {
+            int rc = fmlx_engine_opt_set(kv, eq + 1);
+            if (rc != 0) {
+                if (err) fprintf(err, "fastllm: opzione '%s' %s\n", kv,
+                                 rc == -1 ? "sconosciuta" : "valore non valido");
+                return FMLX_CLI_USAGE;
+            }
+        }
+    }
+    /* `offload` del registro = stesso effetto del parametro `--offload-experts`. */
+    {
+        int off = 0;
+        if (fmlx_engine_opt_get_bool("offload", &off) == 0 && off) ac.offload_experts = 1;
+    }
     /* Solo `run`/`chat` sono interattivi: possono CHIEDERE (Y/N) di attivare `--offload-experts`
      * e usano il default "thinking OFF". `serve` no. */
     {
         int rc_verb = (!strcmp(a->verb, "run") || !strcmp(a->verb, "chat"));
         fmlx_engine_set_interactive(rc_verb ? 1 : 0);
-        if (rc_verb) fmlx_engine_set_think(a->show_think); /* thinking OFF salvo --think */
+        /* thinking: il PARAMETRO del registro vince se impostato, altrimenti `--think`. */
+        {
+            int th = -1;
+            int use = fmlx_engine_opt_get_bool("thinking", &th);
+            if (rc_verb) fmlx_engine_set_think(use == 0 ? th : a->show_think);
+        }
     }
     /* `run`/`chat`: `<nome|#n>` del registro → percorso. Se non è nel registro resta com'è (path
      * locale, cache HF, $FMLX_MODELS_DIR): un nome non registrato non è un errore, è un'altra via. */
@@ -604,6 +672,7 @@ FmlxCliStatus fmlx_cli_exec_with(const FmlxCliArgs *a_in, const FmlxHfTransport 
          * `t` non viene guardato — come per `serve`. */
         return fmlx_run_exec(a, out, err);
     if (!strcmp(a->verb, "chat")) return fmlx_chat_exec(a, out, err);
+    if (!strcmp(a->verb, "options")) return fmlx_options_exec(a, out, err);
     if (!strcmp(a->verb, "ps"))
         /* `ps` PARLA in rete, ma non con Hugging Face: usa un socket verso il server locale, e il
          * transport HF non ha niente a che vedere. */

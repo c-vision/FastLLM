@@ -29,6 +29,7 @@ struct FmlxEngineModel {
     char dir[FMLX_ENGINE_PATH_MAX];
     const LlmEngineLlmEngine *eng;
     LlmEngineLlmModel model;
+    int ctx;   /* contesto applicato (token); /new lo riapplica per azzerare la cache KV */
     llmtoken_handle tok;
     /* L'ABI accetta UN solo eos: `eos` è quello passato all'engine, `eos_list` la lista
      * completa di `config.json` (fermarsi su UNO QUALSIASI). Gli eos secondari li fa

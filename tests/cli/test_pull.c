@@ -1,4 +1,4 @@
-/* test_pull.c — `fastmlx pull` senza rete: un manifesto finto, due corpi finti, un cache vero.
+/* test_pull.c — `fastllm pull` senza rete: un manifesto finto, due corpi finti, un cache vero.
  *
  * Le cose che questo file deve provare NON sono "scarica": la lane download è già provata nel
  * test_hf_fetch. Qui si prova l'ORDINE del pull, cioè ciò che esiste solo in questa lane:

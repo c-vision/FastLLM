@@ -128,51 +128,51 @@ FmlxServeSt fmlx_serve_body_metrics(FmlxServeBuf *buf, int ka, size_t *out_len) 
     body = buf->resp + FMLX_SERVE_RESERVE;
     cap = buf->resp_cap - FMLX_SERVE_RESERVE;
 
-    MP("# HELP fastmlx_requests_total HTTP requests handled by this server.\n");
-    MP("# TYPE fastmlx_requests_total counter\n");
-    MP("fastmlx_requests_total %llu\n", g_m.requests_total);
+    MP("# HELP fastllm_requests_total HTTP requests handled by this server.\n");
+    MP("# TYPE fastllm_requests_total counter\n");
+    MP("fastllm_requests_total %llu\n", g_m.requests_total);
 
-    MP("# HELP fastmlx_requests_by_endpoint_total Requests per routed endpoint.\n");
-    MP("# TYPE fastmlx_requests_by_endpoint_total counter\n");
+    MP("# HELP fastllm_requests_by_endpoint_total Requests per routed endpoint.\n");
+    MP("# TYPE fastllm_requests_by_endpoint_total counter\n");
     for (int a = 0; a <= FMLX_API_ACT_EMBEDDINGS; a++)
-        MP("fastmlx_requests_by_endpoint_total{endpoint=\"%s\"} %llu\n", endpoint_label((FmlxApiAction)a),
+        MP("fastllm_requests_by_endpoint_total{endpoint=\"%s\"} %llu\n", endpoint_label((FmlxApiAction)a),
            g_m.by_endpoint[a]);
 
-    MP("# HELP fastmlx_requests_in_flight Generation requests currently running.\n");
-    MP("# TYPE fastmlx_requests_in_flight gauge\n");
-    MP("fastmlx_requests_in_flight %lld\n", g_m.inflight);
+    MP("# HELP fastllm_requests_in_flight Generation requests currently running.\n");
+    MP("# TYPE fastllm_requests_in_flight gauge\n");
+    MP("fastllm_requests_in_flight %lld\n", g_m.inflight);
 
-    MP("# HELP fastmlx_tokens_total Tokens processed by the engine.\n");
-    MP("# TYPE fastmlx_tokens_total counter\n");
-    MP("fastmlx_tokens_total{kind=\"prompt\"} %llu\n", g_m.tokens_prompt);
-    MP("fastmlx_tokens_total{kind=\"completion\"} %llu\n", g_m.tokens_completion);
+    MP("# HELP fastllm_tokens_total Tokens processed by the engine.\n");
+    MP("# TYPE fastllm_tokens_total counter\n");
+    MP("fastllm_tokens_total{kind=\"prompt\"} %llu\n", g_m.tokens_prompt);
+    MP("fastllm_tokens_total{kind=\"completion\"} %llu\n", g_m.tokens_completion);
 
-    MP("# HELP fastmlx_generation_duration_seconds Wall time of completed generation requests.\n");
-    MP("# TYPE fastmlx_generation_duration_seconds summary\n");
-    MP("fastmlx_generation_duration_seconds_sum %.6f\n", g_m.duration_sum);
-    MP("fastmlx_generation_duration_seconds_count %llu\n", g_m.duration_count);
+    MP("# HELP fastllm_generation_duration_seconds Wall time of completed generation requests.\n");
+    MP("# TYPE fastllm_generation_duration_seconds summary\n");
+    MP("fastllm_generation_duration_seconds_sum %.6f\n", g_m.duration_sum);
+    MP("fastllm_generation_duration_seconds_count %llu\n", g_m.duration_count);
 
-    MP("# HELP fastmlx_prefix_cache_hits_total Prompts whose prefix was reused from the KV cache.\n");
-    MP("# TYPE fastmlx_prefix_cache_hits_total counter\n");
-    MP("fastmlx_prefix_cache_hits_total %llu\n", g_m.prefix_hits);
+    MP("# HELP fastllm_prefix_cache_hits_total Prompts whose prefix was reused from the KV cache.\n");
+    MP("# TYPE fastllm_prefix_cache_hits_total counter\n");
+    MP("fastllm_prefix_cache_hits_total %llu\n", g_m.prefix_hits);
 
-    MP("# HELP fastmlx_prefix_cache_misses_total Prompts that required a full prefill.\n");
-    MP("# TYPE fastmlx_prefix_cache_misses_total counter\n");
-    MP("fastmlx_prefix_cache_misses_total %llu\n", g_m.prefix_misses);
+    MP("# HELP fastllm_prefix_cache_misses_total Prompts that required a full prefill.\n");
+    MP("# TYPE fastllm_prefix_cache_misses_total counter\n");
+    MP("fastllm_prefix_cache_misses_total %llu\n", g_m.prefix_misses);
 
-    MP("# HELP fastmlx_models_loaded Models currently resident in memory.\n");
-    MP("# TYPE fastmlx_models_loaded gauge\n");
-    MP("fastmlx_models_loaded %d\n", fmlx_engine_resident_count());
+    MP("# HELP fastllm_models_loaded Models currently resident in memory.\n");
+    MP("# TYPE fastllm_models_loaded gauge\n");
+    MP("fastllm_models_loaded %d\n", fmlx_engine_resident_count());
 
     /* KV reale (ABI v2 `kv_stats`): token usati e capacità dell'ULTIMA generazione completata.
      * 0/0 prima della prima generazione: un gauge non inventa una capacità che non ha letto. */
-    MP("# HELP fastmlx_kv_tokens_used KV positions used by the last completed generation.\n");
-    MP("# TYPE fastmlx_kv_tokens_used gauge\n");
-    MP("fastmlx_kv_tokens_used %d\n", g_m.kv_used);
+    MP("# HELP fastllm_kv_tokens_used KV positions used by the last completed generation.\n");
+    MP("# TYPE fastllm_kv_tokens_used gauge\n");
+    MP("fastllm_kv_tokens_used %d\n", g_m.kv_used);
 
-    MP("# HELP fastmlx_kv_tokens_capacity KV capacity (positions) reported by the engine.\n");
-    MP("# TYPE fastmlx_kv_tokens_capacity gauge\n");
-    MP("fastmlx_kv_tokens_capacity %d\n", g_m.kv_cap);
+    MP("# HELP fastllm_kv_tokens_capacity KV capacity (positions) reported by the engine.\n");
+    MP("# TYPE fastllm_kv_tokens_capacity gauge\n");
+    MP("fastllm_kv_tokens_capacity %d\n", g_m.kv_cap);
 
     return fmlx_serve_finish_ok(buf, 200, "text/plain; version=0.0.4; charset=utf-8", len, ka, out_len);
 }

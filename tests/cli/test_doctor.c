@@ -215,7 +215,7 @@ static void case_pulito(void) {
     FmlxCliStatus s;
 
     build_repo("buono", "org", 0, 0);
-    s = run(&c, &a, 4, (char *[]){"fastmlx", "doctor", "--cache", (char *)at("hub")});
+    s = run(&c, &a, 4, (char *[]){"fastllm", "doctor", "--cache", (char *)at("hub")});
     CK(s == FMLX_CLI_OK, "un cache pulito esce %s [%s]", fmlx_cli_status_str(s), c.err);
     CK(HAS(c.out, "org/buono"), "il repo non è nominato: %s", c.out);
     CK(HAS(c.out, "2 ok"), "non dice due verificati: %s", c.out);
@@ -234,7 +234,7 @@ static void case_corrotto(void) {
     FmlxCliStatus s;
 
     build_repo("rotto", "org", 1, 0);
-    s = run(&c, &a, 4, (char *[]){"fastmlx", "doctor", "--cache", (char *)at("hub")});
+    s = run(&c, &a, 4, (char *[]){"fastllm", "doctor", "--cache", (char *)at("hub")});
     CK(s == FMLX_CLI_FAILED, "un hash che non torna esce %s, atteso fallito",
        fmlx_cli_status_str(s));
     CK(HAS(c.out, "PROBLEMA"), "non marchia il problema: %s", c.out);
@@ -252,7 +252,7 @@ static void case_quiet(void) {
     wipe(at("hub"));
     build_repo("zitto", "org", 0, 1); /* pulito, ma con la nota del mezzo-download */
     (void)run(&c, &a, 5,
-              (char *[]){"fastmlx", "doctor", "--cache", (char *)at("hub"), "--quiet"});
+              (char *[]){"fastllm", "doctor", "--cache", (char *)at("hub"), "--quiet"});
     CK(c.outn == 0, "`--quiet` su un cache senza problemi scrive %zu byte: %s", c.outn, c.out);
     CK(c.errn == 0, "`--quiet` scrive anche su err: %s", c.err);
     cap_free(&c);
@@ -260,7 +260,7 @@ static void case_quiet(void) {
     wipe(at("hub"));
     build_repo("zittorotto", "org", 1, 0);
     (void)run(&c, &a, 5,
-              (char *[]){"fastmlx", "doctor", "--cache", (char *)at("hub"), "--quiet"});
+              (char *[]){"fastllm", "doctor", "--cache", (char *)at("hub"), "--quiet"});
     CK(HAS(c.out, "PROBLEMA"), "`--quiet` nasconde un problema: %s", c.out);
     CK(!HAS(c.out, "nota"), "`--quiet` stampa le note: %s", c.out);
     CK(!HAS(c.out, "doctor:"), "`--quiet` stampa il riepilogo: %s", c.out);
@@ -277,7 +277,7 @@ static void case_nota_non_fallisce(void) {
     wipe(at("hub"));
     build_repo("annotato", "org", 0, 1);
     add_facts("annotato", "org");
-    s = run(&c, &a, 4, (char *[]){"fastmlx", "doctor", "--cache", (char *)at("hub")});
+    s = run(&c, &a, 4, (char *[]){"fastllm", "doctor", "--cache", (char *)at("hub")});
     CK(s == FMLX_CLI_OK, "una nota esce %s, atteso ok: %s", fmlx_cli_status_str(s), c.out);
     CK(HAS(c.out, "nota"), "la nota non è nominata: %s", c.out);
     CK(HAS(c.out, "mezzo-download"), "la nota non dice cosa: %s", c.out);
@@ -329,7 +329,7 @@ static void case_impossibile(void) {
         failures++;
         return;
     }
-    s = run(&c, &a, 4, (char *[]){"fastmlx", "doctor", "--cache", (char *)at("hub")});
+    s = run(&c, &a, 4, (char *[]){"fastllm", "doctor", "--cache", (char *)at("hub")});
     /* La directory resta murata FINO A DOPO il secondo giro: riaprirla qui avrebbe fatto passare il
      * `--quiet` su un cache sano — verde, e senza aver provato la cosa che serviva. */
 
@@ -349,7 +349,7 @@ static void case_impossibile(void) {
 
     /* `--quiet`: via l'elenco, resta il PROBLEMA (sull'`err`, dove stava). */
     (void)run(&c, &a, 5,
-              (char *[]){"fastmlx", "doctor", "--cache", (char *)at("hub"), "--quiet"});
+              (char *[]){"fastllm", "doctor", "--cache", (char *)at("hub"), "--quiet"});
     chmod(mdir, 0755); /* il secondo giro è finito: si riapre, un fixture murato non si wipea */
     CK(!HAS(c.out, "AUDIT IMPOSSIBILE"), "`--quiet` stampa l'elenco: %s", c.out);
     CK(!HAS(c.out, "org/buono"), "`--quiet` nomina i repo: %s", c.out);
@@ -367,7 +367,7 @@ static void case_filtro(void) {
     build_repo("due", "org", 0, 0);
     build_repo("tre", "altro", 1, 0);
 
-    s = run(&c, &a, 5, (char *[]){"fastmlx", "doctor", "--cache", (char *)at("hub"), "org/due"});
+    s = run(&c, &a, 5, (char *[]){"fastllm", "doctor", "--cache", (char *)at("hub"), "org/due"});
     CK(s == FMLX_CLI_OK, "filtro che matcha esce %s", fmlx_cli_status_str(s));
     CK(HAS(c.out, "org/due"), "il filtro non ha lasciato il suo repo: %s", c.out);
     CK(!HAS(c.out, "altro/tre"), "il filtro ha passato anche l'altro: %s", c.out);
@@ -379,7 +379,7 @@ static void case_filtro(void) {
 
     /* Il filtro che non prende niente è un FALLIMENTO, e lo dice su err. */
     s = run(&c, &a, 5,
-            (char *[]){"fastmlx", "doctor", "--cache", (char *)at("hub"), "nn/inesistente"});
+            (char *[]){"fastllm", "doctor", "--cache", (char *)at("hub"), "nn/inesistente"});
     CK(s == FMLX_CLI_FAILED, "zero match esce %s, atteso fallito", fmlx_cli_status_str(s));
     CK(HAS(c.err, "nn/inesistente"), "zero match non nomina il filtro: %s", c.err);
     cap_free(&c);
@@ -387,7 +387,7 @@ static void case_filtro(void) {
     /* ... anche in `--quiet`, dove dello schermo non arriva niente e il codice è l'unica cosa che
      * un script legge. */
     s = run(&c, &a, 6,
-            (char *[]){"fastmlx", "doctor", "--cache", (char *)at("hub"), "nn/inesistente",
+            (char *[]){"fastllm", "doctor", "--cache", (char *)at("hub"), "nn/inesistente",
                        "--quiet"});
     CK(s == FMLX_CLI_FAILED, "zero match in `--quiet` esce %s", fmlx_cli_status_str(s));
     CK(c.outn == 0, "zero match in `--quiet` scrive su out: %s", c.out);
@@ -396,7 +396,7 @@ static void case_filtro(void) {
     /* La forma illeggibile è USAGE, e lo è PRIMA di aprire il disco: la prova è che non nomina la
      * radice e non dice «nessun repo». */
     s = run(&c, &a, 5,
-            (char *[]){"fastmlx", "doctor", "--cache", (char *)at("hub"), "no/such/star*"});
+            (char *[]){"fastllm", "doctor", "--cache", (char *)at("hub"), "no/such/star*"});
     CK(s == FMLX_CLI_USAGE, "filtro malformato esce %s, atteso uso", fmlx_cli_status_str(s));
     CK(HAS(c.err, "non ammesso"), "non dice che la forma è vietata: %s", c.err);
     CK(!HAS(c.err, "hub"), "ha parlato del disco prima di dire «uso»: %s", c.err);
@@ -433,7 +433,7 @@ static void case_tetto(void) {
 
     wipe(at("hub"));
     build_many_problems("molti");
-    s = run(&c, &a, 4, (char *[]){"fastmlx", "doctor", "--cache", (char *)at("hub")});
+    s = run(&c, &a, 4, (char *[]){"fastllm", "doctor", "--cache", (char *)at("hub")});
     CK(s == FMLX_CLI_FAILED, "quaranta problemi escono %s", fmlx_cli_status_str(s));
     for (p = c.out; (p = strstr(p, "PROBLEMA")) != NULL; p++) rows++;
     CK(rows == 32, "%d righe PROBLEMA, attese 32 (il tetto della lane)", rows);
@@ -456,7 +456,7 @@ static void case_senza_cache(void) {
     char ghost[FMLX_HF_PATH_MAX * 2];
 
     snprintf(ghost, sizeof ghost, "%s/hub-che-non-c-e", ROOT);
-    s = run(&c, &a, 4, (char *[]){"fastmlx", "doctor", "--cache", ghost});
+    s = run(&c, &a, 4, (char *[]){"fastllm", "doctor", "--cache", ghost});
     CK(s == FMLX_CLI_FAILED, "radice assente esce %s", fmlx_cli_status_str(s));
     CK(HAS(c.err, "non esiste"), "non dice che non esiste: %s", c.err);
     CK(!HAS(c.err, "HF_HUB_CACHE"), "consiglia l'ambiente con --cache dato: %s", c.err);
@@ -468,7 +468,7 @@ static void case_senza_cache(void) {
         char keep[FMLX_HF_PATH_MAX * 2];
         snprintf(keep, sizeof keep, "%s", env ? env : "");
         setenv("HF_HUB_CACHE", ghost, 1);
-        s = run(&c, &a, 2, (char *[]){"fastmlx", "doctor"});
+        s = run(&c, &a, 2, (char *[]){"fastllm", "doctor"});
         CK(s == FMLX_CLI_FAILED, "ambiente rotto esce %s", fmlx_cli_status_str(s));
         CK(HAS(c.err, "HF_HUB_CACHE"), "senza --cache non nomina l'ambiente: %s", c.err);
         cap_free(&c);
@@ -485,11 +485,11 @@ static void case_bandiere_rifiutate(void) {
     FmlxCliArgs a;
     Cap c;
 
-    (void)run(&c, &a, 4, (char *[]){"fastmlx", "doctor", "o/r", "--repair"});
+    (void)run(&c, &a, 4, (char *[]){"fastllm", "doctor", "o/r", "--repair"});
     CK(HAS(c.pmsg, "--repair"), "non nomina la bandiera rifiutata: %s", c.pmsg);
     CK(HAS(c.pmsg, "doctor"), "non nomina il verbo che la rifiuta: %s", c.pmsg);
     cap_free(&c);
-    (void)run(&c, &a, 4, (char *[]){"fastmlx", "doctor", "o/r", "o/t"});
+    (void)run(&c, &a, 4, (char *[]){"fastllm", "doctor", "o/r", "o/t"});
     CK(HAS(c.pmsg, "posizionali") && HAS(c.pmsg, "o/t"),
        "il secondo argomento è passato in silenzio: %s", c.pmsg);
     cap_free(&c);

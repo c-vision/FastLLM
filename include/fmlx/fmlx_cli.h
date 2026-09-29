@@ -96,6 +96,9 @@ typedef struct {
     int quiet;
     int json;      /* `models --json`: la stessa tabella in forma macchina-leggibile */
     int want_help; /* -h/--help: NON è un errore, e l'uscita è 0 */
+    /* Parametri del motore (registro, NIENTE env): `--opt nome=valore`, ripetibile. */
+    char opts[16][192];
+    int  n_opts;
 } FmlxCliArgs;
 
 /* ---- run ---- */

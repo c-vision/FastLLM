@@ -13,10 +13,11 @@
 #define TEXT_CHUNK_CAP 8192u /* un frame di stream: un token, non una risposta intera */
 
 /* L'oggetto `logprobs` per UN token, forma legacy di `/v1/completions`:
- * `{tokens:[t], token_logprobs:[p], top_logprobs:[null], text_offset:[o]}`. `top_logprobs`
- * ha un `null` per token: l'ABI dà solo la logprob del token scelto, non le alternative. */
+ * `{tokens:[t], token_logprobs:[p], top_logprobs:[{tok:lp,...}], text_offset:[o]}`. Il `top_logprobs`
+ * legacy è una lista di UN oggetto mappa token→logprob (le alternative alla posizione del token);
+ * `null` quando il motore non ne ha (non richieste o non esposte). */
 static FmlxApiErr write_text_lp_token(FmlxJsonW *w, const char *tok, uint32_t n, double lp,
-                                      uint32_t off) {
+                                      uint32_t off, const FmlxApiTopLogprob *top, int n_top) {
     if (fmlx_jsonw_obj_begin(w)) return FMLX_API_INTERNAL;
     if (fmlx_jsonw_key(w, "tokens") || fmlx_jsonw_arr_begin(w) || fmlx_jsonw_str(w, tok, n) ||
         fmlx_jsonw_arr_end(w))
@@ -24,9 +25,20 @@ static FmlxApiErr write_text_lp_token(FmlxJsonW *w, const char *tok, uint32_t n,
     if (fmlx_jsonw_key(w, "token_logprobs") || fmlx_jsonw_arr_begin(w) || fmlx_jsonw_f64(w, lp) ||
         fmlx_jsonw_arr_end(w))
         return FMLX_API_INTERNAL;
-    if (fmlx_jsonw_key(w, "top_logprobs") || fmlx_jsonw_arr_begin(w) || fmlx_jsonw_null(w) ||
-        fmlx_jsonw_arr_end(w))
+    if (fmlx_jsonw_key(w, "top_logprobs") || fmlx_jsonw_arr_begin(w)) return FMLX_API_INTERNAL;
+    if (n_top > 0) {
+        if (fmlx_jsonw_obj_begin(w)) return FMLX_API_INTERNAL;
+        for (int i = 0; i < n_top; i++) {
+            if (top[i].n == 0) continue; /* voce non prodotta: si omette */
+            if (fmlx_jsonw_keyn(w, top[i].token, top[i].n) ||
+                fmlx_jsonw_f64(w, (double)top[i].logprob))
+                return FMLX_API_INTERNAL;
+        }
+        if (fmlx_jsonw_obj_end(w)) return FMLX_API_INTERNAL;
+    } else if (fmlx_jsonw_null(w)) {
         return FMLX_API_INTERNAL;
+    }
+    if (fmlx_jsonw_arr_end(w)) return FMLX_API_INTERNAL;
     if (fmlx_jsonw_key(w, "text_offset") || fmlx_jsonw_arr_begin(w) || fmlx_jsonw_i64(w, off) ||
         fmlx_jsonw_arr_end(w))
         return FMLX_API_INTERNAL;
@@ -47,9 +59,24 @@ static FmlxApiErr write_text_logprobs(FmlxJsonW *w, const FmlxApiChat *c, const 
     for (int i = 0; i < a->n_logprobs; i++)
         if (fmlx_jsonw_f64(w, (double)a->logprob[i])) return FMLX_API_INTERNAL;
     if (fmlx_jsonw_arr_end(w)) return FMLX_API_INTERNAL;
+    int k = c->want_top_logprobs;
+    if (k > a->top_k) k = a->top_k;
     if (fmlx_jsonw_key(w, "top_logprobs") || fmlx_jsonw_arr_begin(w)) return FMLX_API_INTERNAL;
-    for (int i = 0; i < a->n_logprobs; i++)
-        if (fmlx_jsonw_null(w)) return FMLX_API_INTERNAL;
+    for (int i = 0; i < a->n_logprobs; i++) {
+        const FmlxApiTopLogprob *top = (k > 0) ? a->top + (size_t)i * a->top_k : NULL;
+        if (k <= 0) {
+            if (fmlx_jsonw_null(w)) return FMLX_API_INTERNAL;
+        } else {
+            if (fmlx_jsonw_obj_begin(w)) return FMLX_API_INTERNAL;
+            for (int j = 0; j < k; j++) {
+                if (top[j].n == 0) continue; /* voce non prodotta: si omette */
+                if (fmlx_jsonw_keyn(w, top[j].token, top[j].n) ||
+                    fmlx_jsonw_f64(w, (double)top[j].logprob))
+                    return FMLX_API_INTERNAL;
+            }
+            if (fmlx_jsonw_obj_end(w)) return FMLX_API_INTERNAL;
+        }
+    }
     if (fmlx_jsonw_arr_end(w)) return FMLX_API_INTERNAL;
     if (fmlx_jsonw_key(w, "text_offset") || fmlx_jsonw_arr_begin(w)) return FMLX_API_INTERNAL;
     for (int i = 0; i < a->n_logprobs; i++)
@@ -117,7 +144,8 @@ static FmlxApiErr text_chunk(FmlxHttpRes *w, const FmlxApiMeta *m, const FmlxApi
     if (fmlx_jsonw_key(&j, "index") || fmlx_jsonw_i64(&j, 0)) return FMLX_API_INTERNAL;
     if (fmlx_jsonw_key(&j, "logprobs")) return FMLX_API_INTERNAL;
     if (tev && tev->has_logprob) {
-        if (write_text_lp_token(&j, text, (uint32_t)tn, (double)tev->logprob, lp_off))
+        if (write_text_lp_token(&j, text, (uint32_t)tn, (double)tev->logprob, lp_off, tev->top,
+                                tev->n_top))
             return FMLX_API_INTERNAL;
     } else if (fmlx_jsonw_null(&j)) {
         return FMLX_API_INTERNAL;

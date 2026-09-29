@@ -1002,15 +1002,10 @@ FmlxEngineGen *fmlx_engine_chat(FmlxEngineModel *m, const FmlxApiChat *c, char *
     ids = tokenize(m->tok, prompt.p ? prompt.p : "", &n, err, errcap);
     fmlx_sb_free(&prompt);
     if (!ids) return NULL;
-    /* Default = il cap dell'engine, MA configurabile all'avvio con FASTLLM_MAX_TOKENS (clampato al
-     * cap). `--max-tokens` (richiesta esplicita) vince sempre. */
+    /* Default = parametro `maxtokens` del registro; `--max-tokens` (esplicito) vince. Nessuna env. */
     {
-        const char *e = getenv("FASTLLM_MAX_TOKENS");
         int def = FMLX_ENGINE_MAX_NEW;
-        if (e && *e) {
-            long v = atol(e);
-            if (v >= 1 && v <= FMLX_ENGINE_MAX_NEW) def = (int)v;
-        }
+        if (fmlx_engine_opt_get_int("maxtokens", &def) != 0 || def < 1) def = FMLX_ENGINE_MAX_NEW;
         max_tokens = c->has_max_tokens ? (int)c->max_tokens : def;
     }
     sampling_of(c, &sp);

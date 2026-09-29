@@ -853,13 +853,27 @@ static void t_tool_policy_rf(void) {
     CK(fmlx_api_openai_parse(r, &c, &e) == FMLX_API_OK && c.want_logprobs == 1,
        "logprobs:true è onorato (logprob del token scelto dall'ABI v2)");
     fmlx_json_doc_free(&d);
-    /* top_logprobs>0 resta un 400: l'ABI espone la logprob del token scelto, non il top-k. */
+    /* top_logprobs (ABI v3): onorato con logprobs:true, esige logprobs e un K <= 20. */
     r = body("{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"c\"}],"
              "\"logprobs\":true,\"top_logprobs\":5}",
              &d);
+    CK(fmlx_api_openai_parse(r, &c, &e) == FMLX_API_OK && c.want_logprobs == 1 &&
+           c.want_top_logprobs == 5,
+       "top_logprobs:5 onorato (ABI v3 token_topk)");
+    fmlx_json_doc_free(&d);
+    r = body("{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"c\"}],"
+             "\"top_logprobs\":5}",
+             &d);
     CK(fmlx_api_openai_parse(r, &c, &e) == FMLX_API_INVALID_REQUEST && e.param &&
-           !strcmp(e.param, "top_logprobs") && strstr(e.message, "top-k"),
-       "top_logprobs>0 rifiutato con la causa (ABI: niente distribuzione top-k)");
+           !strcmp(e.param, "top_logprobs"),
+       "top_logprobs senza logprobs:true = errore (contratto OpenAI)");
+    fmlx_json_doc_free(&d);
+    r = body("{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"c\"}],"
+             "\"logprobs\":true,\"top_logprobs\":21}",
+             &d);
+    CK(fmlx_api_openai_parse(r, &c, &e) == FMLX_API_INVALID_REQUEST && e.param &&
+           !strcmp(e.param, "top_logprobs"),
+       "top_logprobs oltre 20 = errore esplicito");
     fmlx_json_doc_free(&d);
     r = body("{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"c\"}],"
              "\"logprobs\":false}",
@@ -918,6 +932,35 @@ static void t_logprobs_render(void) {
     CK(HAS(out, "\"top_logprobs\":[]"), "top_logprobs vuoto (l'ABI non dà le alternative)");
     fmlx_jsonw_free(&w);
 
+    /* top_logprobs reali (ABI v3): le alternative dall'evento finiscono in `top_logprobs[]`. */
+    {
+        FmlxApiChat c2 = chat_from("{\"model\":\"gpt-x\",\"messages\":[{\"role\":\"user\","
+                                   "\"content\":\"c\"}],\"logprobs\":true,\"top_logprobs\":2}");
+        FmlxApiTopLogprob tt[8 * 2];
+        FmlxApiEvent e = EVT_LP("lo", -1.25f);
+        e.n_top = 2;
+        memcpy(e.top[0].token, "lo", 3);
+        e.top[0].n = 2;
+        e.top[0].logprob = -1.25f;
+        memcpy(e.top[1].token, "la", 3);
+        e.top[1].n = 2;
+        e.top[1].logprob = -2.0f;
+        FmlxApiEvent d2 = EVT_DONE(FMLX_API_FINISH_STOP, 4, 1, 0);
+
+        fmlx_api_acc_init(&a, text, sizeof text, think, sizeof think, args, 64);
+        fmlx_api_acc_logbuf(&a, lp, lpo, lpl, 8);
+        fmlx_api_acc_topbuf(&a, tt, 2);
+        fmlx_api_acc_push(&a, &e);
+        fmlx_api_acc_push(&a, &d2);
+        fmlx_jsonw_init(&w, out, sizeof out, sizeof out);
+        CK(fmlx_api_openai_completion(&c2, &m, &a, &w) == FMLX_API_OK, "chat con top_logprobs");
+        CK(fmlx_jsonw_finish(&w, &n) == FMLX_JSON_OK, "finish top");
+        out[n] = '\0';
+        CK(HAS(out, "\"top_logprobs\":[{\"token\":\"lo\",\"logprob\":-1.25,"), "alternativa 0");
+        CK(HAS(out, "{\"token\":\"la\",\"logprob\":-2.0,"), "alternativa 1: %s", out);
+        fmlx_jsonw_free(&w);
+    }
+
     /* completions legacy: le quattro liste parallele. */
     fmlx_api_acc_init(&a, text, sizeof text, think, sizeof think, args, 64);
     fmlx_api_acc_logbuf(&a, lp, lpo, lpl, 8);
@@ -933,6 +976,69 @@ static void t_logprobs_render(void) {
     fmlx_jsonw_free(&w);
 }
 
+/* `/v1/embeddings`: parse (stringa/array, rifiuti espliciti) e forma della risposta. */
+static void t_embeddings(void) {
+    printf("== 11. embeddings (parse e render)\n");
+    FmlxJsonDoc d;
+    FmlxApiEmbeddings e;
+    FmlxApiErrCtx ec;
+    char out[1024];
+    FmlxJsonW w;
+    size_t n = 0;
+
+    const FmlxJsonValue *r = body("{\"model\":\"m\",\"input\":\"hello\"}", &d);
+    CK(fmlx_api_openai_embeddings_parse(r, &e, &ec) == FMLX_API_OK && e.n_input == 1,
+       "input stringa: 1 voce");
+    fmlx_json_doc_free(&d);
+
+    r = body("{\"model\":\"m\",\"input\":[\"a\",\"b\",\"c\"]}", &d);
+    CK(fmlx_api_openai_embeddings_parse(r, &e, &ec) == FMLX_API_OK && e.n_input == 3,
+       "input array: 3 voci");
+    fmlx_json_doc_free(&d);
+
+    r = body("{\"model\":\"m\"}", &d);
+    CK(fmlx_api_openai_embeddings_parse(r, &e, &ec) == FMLX_API_INVALID_REQUEST && ec.param &&
+           !strcmp(ec.param, "input"),
+       "input mancante = errore");
+    fmlx_json_doc_free(&d);
+
+    r = body("{\"model\":\"m\",\"input\":[1,2,3]}", &d);
+    CK(fmlx_api_openai_embeddings_parse(r, &e, &ec) == FMLX_API_INVALID_REQUEST && ec.param &&
+           !strcmp(ec.param, "input"),
+       "input di token-id non supportato = errore");
+    fmlx_json_doc_free(&d);
+
+    r = body("{\"model\":\"m\",\"input\":\"x\",\"dimensions\":256}", &d);
+    CK(fmlx_api_openai_embeddings_parse(r, &e, &ec) == FMLX_API_INVALID_REQUEST && ec.param &&
+           !strcmp(ec.param, "dimensions"),
+       "dimensions non supportato = errore");
+    fmlx_json_doc_free(&d);
+
+    r = body("{\"model\":\"m\",\"input\":\"x\",\"encoding_format\":\"base64\"}", &d);
+    CK(fmlx_api_openai_embeddings_parse(r, &e, &ec) == FMLX_API_INVALID_REQUEST && ec.param &&
+           !strcmp(ec.param, "encoding_format"),
+       "encoding_format base64 = errore");
+    fmlx_json_doc_free(&d);
+
+    r = body("{\"model\":\"m\",\"input\":\"x\",\"user\":\"u\"}", &d);
+    CK(fmlx_api_openai_embeddings_parse(r, &e, &ec) == FMLX_API_OK && e.n_ignored == 1,
+       "campo ignoto (user) dichiarato in ignored");
+    {
+        float data[2] = {0.5f, -1.0f};
+        fmlx_jsonw_init(&w, out, sizeof out, sizeof out);
+        CK(fmlx_api_openai_embeddings_render(&e, data, 1, 2, 3, &w) == FMLX_API_OK &&
+               fmlx_jsonw_finish(&w, &n) == FMLX_JSON_OK,
+           "render embeddings");
+        out[n] = '\0';
+        CK(HAS(out, "\"object\":\"list\""), "object:list");
+        CK(HAS(out, "\"embedding\":[0.5,-1.0]"), "vettore: %s", out);
+        CK(HAS(out, "\"prompt_tokens\":3,\"total_tokens\":3"), "usage");
+        CK(HAS(out, "\"ignored_params\":[\"user\"]"), "ignored_params");
+        fmlx_jsonw_free(&w);
+    }
+    fmlx_json_doc_free(&d);
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0); /* un SIGBUS deve dire QUALE sezione, non niente */
     t_router();
@@ -945,6 +1051,7 @@ int main(void) {
     t_stream();
     t_tool_policy_rf();
     t_logprobs_render();
+    t_embeddings();
     printf("\napi: %d verifiche, %d fallite\n", checks, failures);
     return failures ? 1 : 0;
 }

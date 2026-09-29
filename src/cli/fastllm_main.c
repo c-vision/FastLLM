@@ -1,4 +1,4 @@
-/* fastmlx_main.c — il `main` del binario: cinque righe, e NON è un caso.
+/* fastllm_main.c — il `main` del binario: cinque righe, e NON è un caso.
  *
  * Tutta la logica della CLI è in fmlx_cli.c e si prova lì, con argv finti e due FILE* in memoria.
  * Questo file esiste perché un eseguibile ha bisogno di `main`, e serve a una cosa sola: tradurre

@@ -1,4 +1,4 @@
-/* fmlx_run.c — `fastmlx run <modello> [prompt]`: UNA generazione, subito, sul terminale.
+/* fmlx_run.c — `fastllm run <modello> [prompt]`: UNA generazione, subito, sul terminale.
  *
  * Il verbo che rende il motore usabile senza montare un server. Con `[prompt]` è one-shot; senza,
  * legge una riga per volta da stdin e genera per ciascuna — NON è `chat`: qui non c'è cronologia,
@@ -7,7 +7,7 @@
  * ricordi la prima quando non lo fa.
  *
  * L'uscita è il TESTO, e basta: niente intestazioni, niente contatori, niente prompt decorativi su
- * stdout — `fastmlx run m "..." | altro` deve ricevere esattamente ciò che il modello ha scritto.
+ * stdout — `fastllm run m "..." | altro` deve ricevere esattamente ciò che il modello ha scritto.
  * I messaggi d'errore vanno su `err`, come per ogni altro verbo di questa CLI.
  *
  * La risoluzione del modello NON è una regola nuova: `fmlx_cli_generate_stream` chiama la stessa
@@ -15,32 +15,38 @@
  * stesso modo nei due verbi per costruzione, non per disciplina.
  */
 #include "fmlx_cli_internal.h"
+#include "engine/fmlx_engine.h" /* offload esperti */
 
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h> /* ssize_t: il tipo di ritorno di `getline` */
+#include <unistd.h>    /* isatty: banner/clear solo su terminale */
 
 FmlxCliStatus fmlx_run_exec(const FmlxCliArgs *a, FILE *out, FILE *err) {
     FmlxChatHist hist;
     FmlxCliStatus st = FMLX_CLI_OK; /* stdin senza righe non è un fallimento */
 
     if (!a || !a->repo[0]) {
-        fprintf(err ? err : stderr, "fastmlx run: manca il modello (es. org/modello)\n");
+        fprintf(err ? err : stderr, "fastllm run: manca il modello (es. org/modello)\n");
         return FMLX_CLI_USAGE;
     }
     if (!out) out = stdout;
     if (!err) err = stderr;
+    fmlx_engine_set_offload_experts(a->offload_experts);
     fmlx_chat_hist_init(&hist);
+
+    /* Presentazione: SOLO su terminale (una pipe riceve esclusivamente il testo del modello). */
+    if (isatty(fileno(out))) fmlx_banner(out, "modello", a->repo, 1);
 
     if (a->prompt[0]) {
         char *text = NULL;
         if (fmlx_chat_hist_push(&hist, "user", a->prompt) != 0) {
             fmlx_chat_hist_free(&hist);
-            fprintf(err, "fastmlx run: out of memory\n");
+            fprintf(err, "fastllm run: out of memory\n");
             return FMLX_CLI_FAILED;
         }
         st = fmlx_cli_generate_stream(a->pull.fetch.cache_root, a->repo, a->system, &hist,
-                                      a->max_tokens, out, err, &text);
+                                      a->max_tokens, a->show_think, out, err, &text);
         free(text);
         fmlx_chat_hist_free(&hist);
         return st;
@@ -58,7 +64,7 @@ FmlxCliStatus fmlx_run_exec(const FmlxCliArgs *a, FILE *out, FILE *err) {
             if (n == 0) continue;
             fmlx_chat_hist_clear(&hist);
             if (fmlx_chat_hist_push(&hist, "user", line) != 0) {
-                fprintf(err, "fastmlx run: out of memory\n");
+                fprintf(err, "fastllm run: out of memory\n");
                 free(line);
                 fmlx_chat_hist_free(&hist);
                 return FMLX_CLI_FAILED;
@@ -68,7 +74,7 @@ FmlxCliStatus fmlx_run_exec(const FmlxCliArgs *a, FILE *out, FILE *err) {
              * quello dell'ultimo esito, come per un `make` che continua e alla fine dice se è andata
              * male. */
             st = fmlx_cli_generate_stream(a->pull.fetch.cache_root, a->repo, a->system, &hist,
-                                          a->max_tokens, out, err, NULL);
+                                          a->max_tokens, a->show_think, out, err, NULL);
         }
         free(line);
         fmlx_chat_hist_free(&hist);

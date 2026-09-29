@@ -1,4 +1,4 @@
-/* test_cli.c — l'argv di `fastmlx` e il dispatch: due casi per regola, nessuno decorativo.
+/* test_cli.c — l'argv di `fastllm` e il dispatch: due casi per regola, nessuno decorativo.
  *
  * Il `pull` VERO è provato in test_pull.c (lì ci sono i blob, gli symlink, gl'inode). Qui si prova
  * ciò che esiste solo in questa lane:
@@ -49,7 +49,7 @@ static int checks, failures;
     } while (0)
 
 /* Il numero degli argomenti lo conta il compilatore. Un `argc` scritto a mano è il bug che questo
- * file ha INCONTRATO davvero: `{"fastmlx","pull"}` con argc=3 non fallisce in modo visibile,
+ * file ha INCONTRATO davvero: `{"fastllm","pull"}` con argc=3 non fallisce in modo visibile,
  * legge la memoria accanto e racconta una storia falsa sul parse. */
 #define CK_PARSE(want, ...)                                                                        \
     do {                                                                                           \
@@ -85,7 +85,7 @@ static void case_pull_minimo(void) {
     FmlxCliArgs a;
     char msg[256];
 
-    CK_PARSE(FMLX_CLI_OK, "fastmlx", "pull", "org/repo");
+    CK_PARSE(FMLX_CLI_OK, "fastllm", "pull", "org/repo");
     CK(strcmp(a.verb, "pull") == 0, "verb=%s", a.verb);
     CK(strcmp(a.repo, "org/repo") == 0, "repo=%s", a.repo);
     CK(a.revision && strcmp(a.revision, "main") == 0, "revision=%s", a.revision ? a.revision : "(null)");
@@ -97,7 +97,7 @@ static void case_pull_ogni_bandiera(void) {
     FmlxCliArgs a;
     char msg[256];
 
-    CK_PARSE(FMLX_CLI_OK, "fastmlx", "pull", "mlx-community/R repo", "--revision", "refs/pr/7",
+    CK_PARSE(FMLX_CLI_OK, "fastllm", "pull", "mlx-community/R repo", "--revision", "refs/pr/7",
              "--dest", "/tmp/Models", "--cache=/tmp/cache", "--endpoint", "https://x.example",
              "--max-bytes=1000", "--stall-timeout", "5", "--stall-retries", "1", "--offline",
              "--repair", "--quiet");
@@ -125,11 +125,11 @@ static void case_bandiera_lunga(void) {
     memset(evil, '-', sizeof evil);
     evil[sizeof evil - 1] = '\0';
     evil[158] = '='; /* un nome che NON sta nel buffer di copia: deve essere un errore, non un troncamento */
-    CK_PARSE(FMLX_CLI_USAGE, "fastmlx", "pull", evil);
+    CK_PARSE(FMLX_CLI_USAGE, "fastllm", "pull", evil);
     CK(strstr(msg, "lunga") != NULL, "msg=%s", msg);
 
     /* Stessa forma, nome corto: la bandiera sconosciuta è nominata per nome, non per posizione. */
-    CK_PARSE(FMLX_CLI_USAGE, "fastmlx", "pull", "o/r", "--niente=1");
+    CK_PARSE(FMLX_CLI_USAGE, "fastllm", "pull", "o/r", "--niente=1");
     CK(strstr(msg, "--niente") != NULL, "msg=%s", msg);
 }
 
@@ -137,41 +137,41 @@ static void case_bandiere_rifiutate(void) {
     FmlxCliArgs a;
     char msg[256];
 
-    CK_PARSE(FMLX_CLI_USAGE, "fastmlx", "pull", "o/r", "--force");
+    CK_PARSE(FMLX_CLI_USAGE, "fastllm", "pull", "o/r", "--force");
     CK(strstr(msg, "--force") != NULL, "la bandiera non è nominata: %s", msg);
 
-    CK_PARSE(FMLX_CLI_USAGE, "fastmlx", "pull", "o/r", "--max-bytes", "abc");
+    CK_PARSE(FMLX_CLI_USAGE, "fastllm", "pull", "o/r", "--max-bytes", "abc");
     CK(strstr(msg, "max-bytes") != NULL, "msg=%s", msg);
 
     /* 0 non è "nessun limite": è un valore, e `--max-bytes 0` vorrebbe dire "zero byte". */
-    CK_PARSE(FMLX_CLI_USAGE, "fastmlx", "pull", "o/r", "--max-bytes", "0");
+    CK_PARSE(FMLX_CLI_USAGE, "fastllm", "pull", "o/r", "--max-bytes", "0");
 
     /* 0 di --stall-retries INVECE è un valore legittimo: "una prova sola". */
-    CK_PARSE(FMLX_CLI_OK, "fastmlx", "pull", "o/r", "--stall-retries", "0");
+    CK_PARSE(FMLX_CLI_OK, "fastllm", "pull", "o/r", "--stall-retries", "0");
     CK(a.pull.fetch.stall_retries == 0, "stall_retries=%d", a.pull.fetch.stall_retries);
 
-    CK_PARSE(FMLX_CLI_USAGE, "fastmlx", "pull", "o/r", "--dest"); /* valore mancante in coda */
+    CK_PARSE(FMLX_CLI_USAGE, "fastllm", "pull", "o/r", "--dest"); /* valore mancante in coda */
     CK(strstr(msg, "valore") != NULL, "msg=%s", msg);
 
-    CK_PARSE(FMLX_CLI_USAGE, "fastmlx", "pull", "o/r", "--dest", ""); /* vuoto ≠ assente */
+    CK_PARSE(FMLX_CLI_USAGE, "fastllm", "pull", "o/r", "--dest", ""); /* vuoto ≠ assente */
 
-    CK_PARSE(FMLX_CLI_USAGE, "fastmlx", "pull", "o/r", "extra");
+    CK_PARSE(FMLX_CLI_USAGE, "fastllm", "pull", "o/r", "extra");
     CK(strstr(msg, "posizionali") != NULL, "msg=%s", msg);
 
-    CK_PARSE(FMLX_CLI_USAGE, "fastmlx", "pull");
+    CK_PARSE(FMLX_CLI_USAGE, "fastllm", "pull");
     CK(strstr(msg, "repo") != NULL, "msg=%s", msg);
 
-    CK_PARSE(FMLX_CLI_USAGE, "fastmlx", "fetch", "o/r");
+    CK_PARSE(FMLX_CLI_USAGE, "fastllm", "fetch", "o/r");
     CK(strstr(msg, "comando sconosciuto") != NULL, "msg=%s", msg);
 
-    CK_PARSE(FMLX_CLI_USAGE, "fastmlx");
+    CK_PARSE(FMLX_CLI_USAGE, "fastllm");
 
     /* l'aiuto non è un errore, e NON serve un comando */
-    CK_PARSE(FMLX_CLI_OK, "fastmlx", "--help");
+    CK_PARSE(FMLX_CLI_OK, "fastllm", "--help");
     CK(a.want_help == 1, "want_help=%d", a.want_help);
 
     /* un parse fallito azzera tutto: un verbo residuo verrebbe eseguito */
-    CK_PARSE(FMLX_CLI_USAGE, "fastmlx", "pull", "o/r", "--mass-bytes", "1");
+    CK_PARSE(FMLX_CLI_USAGE, "fastllm", "pull", "o/r", "--mass-bytes", "1");
     CK(a.verb[0] == '\0' && a.repo[0] == '\0', "args non azzerati: %s / %s", a.verb, a.repo);
 }
 
@@ -197,7 +197,7 @@ static void case_motori_non_collegati(void) {
         size_t en = 0, on = 0;
         FILE *out = open_memstream(&outb, &on), *err = open_memstream(&errb, &en);
 
-        CK_PARSE(FMLX_CLI_OK, "fastmlx", (char *)verbs[i], "qualcosa");
+        CK_PARSE(FMLX_CLI_OK, "fastllm", (char *)verbs[i], "qualcosa");
         CK_ST(fmlx_cli_exec_with(&a, &DEAD, out, err), FMLX_CLI_NOT_WIRED);
         fclose(out);
         fclose(err); /* il buffer di open_memstream è valido solo dopo la chiusura */
@@ -221,7 +221,7 @@ static void case_serve_bandiere(void) {
     FmlxCliArgs a;
     char msg[256];
 
-    CK_PARSE(FMLX_CLI_OK, "fastmlx", "serve", "--host", "0.0.0.0", "--port", "8137", "--max-body",
+    CK_PARSE(FMLX_CLI_OK, "fastllm", "serve", "--host", "0.0.0.0", "--port", "8137", "--max-body",
              "4096", "--once");
     CK(!strcmp(a.serve.host, "0.0.0.0"), "--host non arrivata al server: %s",
        a.serve.host ? a.serve.host : "(null)");
@@ -231,63 +231,63 @@ static void case_serve_bandiere(void) {
      * il sintomo è un `serve` che non finisce mai in una shell di prova. */
     CK(a.serve.max_conns == 1, "--once -> max_conns=%u", a.serve.max_conns);
 
-    CK_PARSE(FMLX_CLI_OK, "fastmlx", "serve");
+    CK_PARSE(FMLX_CLI_OK, "fastllm", "serve");
     CK(a.serve.port == 0 && a.serve.host == NULL && a.serve.max_conns == 0,
        "senza bandiere il server usa i suoi default, non zero a caso");
 
     /* La stessa severità della bandiera e dell'ambiente: `--port abc` non è "porta non impostata",
      * è un typo, e accettarlo vorrebbe dire ascoltare sulla porta sbagliata in silenzio. */
-    CK_PARSE(FMLX_CLI_USAGE, "fastmlx", "serve", "--port", "abc");
-    CK_PARSE(FMLX_CLI_USAGE, "fastmlx", "serve", "--port", "0");
-    CK_PARSE(FMLX_CLI_USAGE, "fastmlx", "serve", "--port", "65536");
-    CK_PARSE(FMLX_CLI_USAGE, "fastmlx", "serve", "--max-body", "0");
-    CK_PARSE(FMLX_CLI_USAGE, "fastmlx", "serve", "--dest", "/tmp/x");
-    CK_PARSE(FMLX_CLI_USAGE, "fastmlx", "serve", "org/modello");
+    CK_PARSE(FMLX_CLI_USAGE, "fastllm", "serve", "--port", "abc");
+    CK_PARSE(FMLX_CLI_USAGE, "fastllm", "serve", "--port", "0");
+    CK_PARSE(FMLX_CLI_USAGE, "fastllm", "serve", "--port", "65536");
+    CK_PARSE(FMLX_CLI_USAGE, "fastllm", "serve", "--max-body", "0");
+    CK_PARSE(FMLX_CLI_USAGE, "fastllm", "serve", "--dest", "/tmp/x");
+    CK_PARSE(FMLX_CLI_USAGE, "fastllm", "serve", "org/modello");
     /* E il contrario: una bandiera DEL SERVER data al verbo sbagliato. `run` sarebbe stato un
      * esempio peggiore di `models`, perché `missing_piece("run")` nomina `run` alla lettera e
      * l'asserzione sul messaggio passerebbe anche con argv accettato. */
-    CK_PARSE(FMLX_CLI_USAGE, "fastmlx", "models", "--once");
+    CK_PARSE(FMLX_CLI_USAGE, "fastllm", "models", "--once");
     CK(HAS(msg, "--once"), "il rifiuto deve nominare la bandiera: %s", msg);
     CK(HAS(msg, "models"), "e il verbo: %s", msg);
 
     /* Il CONFINE NUOVO della regola: `run` e `chat` HANNO ora una superficie di opzioni (il motore
      * è cablato), quindi una bandiera che non leggono è un errore anche per loro. `--port` di
      * `serve` non ha senso per `run` (non ascolta su nessuna porta) e `--once` nemmeno. Se questa
-     * regola non li coprisse, `fastmlx run m --port 8000` passerebbe col flag ignorato — la stessa
+     * regola non li coprisse, `fastllm run m --port 8000` passerebbe col flag ignorato — la stessa
      * menzogna che la regola esiste per impedire. */
-    CK_PARSE(FMLX_CLI_USAGE, "fastmlx", "run", "m", "--port", "8000");
+    CK_PARSE(FMLX_CLI_USAGE, "fastllm", "run", "m", "--port", "8000");
     CK(HAS(msg, "--port"), "il rifiuto deve nominare la bandiera: %s", msg);
     CK(HAS(msg, "run"), "e il verbo: %s", msg);
-    CK_PARSE(FMLX_CLI_USAGE, "fastmlx", "chat", "m", "--once");
+    CK_PARSE(FMLX_CLI_USAGE, "fastllm", "chat", "m", "--once");
     /* E il verso positivo: le bandiere che run/chat LEGGONO passano e arrivano all'exec. */
-    CK_PARSE(FMLX_CLI_OK, "fastmlx", "run", "m", "--max-tokens", "7", "--system", "sii breve");
+    CK_PARSE(FMLX_CLI_OK, "fastllm", "run", "m", "--max-tokens", "7", "--system", "sii breve");
     CK(a.max_tokens == 7, "--max-tokens non arrivato a run: %lld", a.max_tokens);
     CK(a.system && !strcmp(a.system, "sii breve"), "--system non arrivato a run: %s",
        a.system ? a.system : "(null)");
-    CK_PARSE(FMLX_CLI_OK, "fastmlx", "chat", "m", "--max-tokens", "9");
+    CK_PARSE(FMLX_CLI_OK, "fastllm", "chat", "m", "--max-tokens", "9");
     CK(a.max_tokens == 9, "--max-tokens non arrivato a chat: %lld", a.max_tokens);
     /* `ps` guarda dove ascolta `serve`, quindi prende --host/--port. */
-    CK_PARSE(FMLX_CLI_OK, "fastmlx", "ps", "--host", "127.0.0.1", "--port", "8123");
+    CK_PARSE(FMLX_CLI_OK, "fastllm", "ps", "--host", "127.0.0.1", "--port", "8123");
     CK(a.serve.port == 8123, "ps: --port non arrivata: %d", a.serve.port);
-    CK_PARSE(FMLX_CLI_USAGE, "fastmlx", "ps", "un-modello");
+    CK_PARSE(FMLX_CLI_USAGE, "fastllm", "ps", "un-modello");
     CK(HAS(msg, "non prende argomenti"), "ps con un posizionale: %s", msg);
 
     /* Una booleana NON prende valore, e la forma `--flag=x` ESISTE nel parser: `--once=0` sarebbe
      * letto come "dato", con lo STESSO effetto di `--once=1`. Due semantiche con la stessa grafia
      * è il tipo di banda che un utente mette in uno script e non scopre mai. */
-    CK_PARSE(FMLX_CLI_USAGE, "fastmlx", "serve", "--once=0");
-    CK_PARSE(FMLX_CLI_USAGE, "fastmlx", "pull", "o/r", "--quiet=1");
-    CK_PARSE(FMLX_CLI_USAGE, "fastmlx", "pull", "o/r", "--offline=");
-    CK_PARSE(FMLX_CLI_USAGE, "fastmlx", "pull", "o/r", "--repair=no");
+    CK_PARSE(FMLX_CLI_USAGE, "fastllm", "serve", "--once=0");
+    CK_PARSE(FMLX_CLI_USAGE, "fastllm", "pull", "o/r", "--quiet=1");
+    CK_PARSE(FMLX_CLI_USAGE, "fastllm", "pull", "o/r", "--offline=");
+    CK_PARSE(FMLX_CLI_USAGE, "fastllm", "pull", "o/r", "--repair=no");
     CK(HAS(msg, "valore"), "il rifiuto deve dire COSA non va: %s", msg);
     /* Il contrario, per non avere appena spostato il bug: la stessa bandiera SENZA `=` deve
      * passare, o la regola avrebbe trasformato un caso legittimo in un errore. */
-    CK_PARSE(FMLX_CLI_OK, "fastmlx", "pull", "o/r", "--offline", "--repair", "--quiet");
+    CK_PARSE(FMLX_CLI_OK, "fastllm", "pull", "o/r", "--offline", "--repair", "--quiet");
     CK(a.quiet && a.pull.fetch.offline && a.pull.fetch.repair, "booleani senza = persi per strada");
 
     /* Il `--cache` vale per TUTTI i verbi che guardano il disco: darlo a `serve` e vedere il
      * server leggere HF_HOME sarebbe il contrario della regola. */
-    CK_PARSE(FMLX_CLI_OK, "fastmlx", "serve", "--cache", "/tmp/due");
+    CK_PARSE(FMLX_CLI_OK, "fastllm", "serve", "--cache", "/tmp/due");
     CK(a.serve.cache_root && !strcmp(a.serve.cache_root, "/tmp/due"),
        "serve: --cache non arrivato al server");
 
@@ -302,16 +302,16 @@ static void case_serve_bandiere(void) {
         memset(&b, 0, sizeof b);
         snprintf(b.verb, sizeof b.verb, "serve");
         b.serve.port = 0;
-        setenv("FASTMLX_PORT", "80x", 1);
+        setenv("FASTLLM_PORT", "80x", 1);
         out = open_memstream(&ob, &on);
         err = open_memstream(&eb, &en);
         CK_ST(fmlx_serve_exec(&b, out, err), FMLX_CLI_USAGE);
         fclose(out);
         fclose(err);
         if (eb) eb[en] = '\0';
-        CK(HAS(eb, "FASTMLX_PORT"), "l'errore deve nominare la variabile: %s", eb ? eb : "(vuoto)");
+        CK(HAS(eb, "FASTLLM_PORT"), "l'errore deve nominare la variabile: %s", eb ? eb : "(vuoto)");
         CK(on == 0, "un `serve` che non parte non scrive su stdout (%zu byte)", on);
-        unsetenv("FASTMLX_PORT");
+        unsetenv("FASTLLM_PORT");
         free(ob);
         free(eb);
     }
@@ -327,34 +327,34 @@ static void case_run_chat_parse(void) {
     FmlxCliArgs a;
     char msg[256];
 
-    CK_PARSE(FMLX_CLI_OK, "fastmlx", "run", "org/m", "ciao mondo");
+    CK_PARSE(FMLX_CLI_OK, "fastllm", "run", "org/m", "ciao mondo");
     CK(!strcmp(a.verb, "run") && !strcmp(a.repo, "org/m") && !strcmp(a.prompt, "ciao mondo"),
        "run: verbo/repo/prompt = %s/%s/%s", a.verb, a.repo, a.prompt);
-    CK_PARSE(FMLX_CLI_OK, "fastmlx", "run", "org/m");
+    CK_PARSE(FMLX_CLI_OK, "fastllm", "run", "org/m");
     CK(a.prompt[0] == '\0', "run senza prompt: prompt='%s'", a.prompt);
 
     /* Il primo posizionale è OBBLIGATORIO: `run` senza modello non ha cosa caricare. */
-    CK_PARSE(FMLX_CLI_USAGE, "fastmlx", "run");
+    CK_PARSE(FMLX_CLI_USAGE, "fastllm", "run");
     CK(HAS(msg, "modello"), "run senza modello non lo dice: %s", msg);
-    CK_PARSE(FMLX_CLI_USAGE, "fastmlx", "chat");
+    CK_PARSE(FMLX_CLI_USAGE, "fastllm", "chat");
     CK(HAS(msg, "modello"), "chat senza modello non lo dice: %s", msg);
 
     /* Un TERZO posizionale su run, e un secondo su chat: sono errori, non una cosa ignorata. */
-    CK_PARSE(FMLX_CLI_USAGE, "fastmlx", "run", "m", "a", "b");
+    CK_PARSE(FMLX_CLI_USAGE, "fastllm", "run", "m", "a", "b");
     CK(HAS(msg, "posizionali"), "run con tre posizionali: %s", msg);
-    CK_PARSE(FMLX_CLI_USAGE, "fastmlx", "chat", "m", "extra");
+    CK_PARSE(FMLX_CLI_USAGE, "fastllm", "chat", "m", "extra");
     CK(HAS(msg, "posizionali"), "chat con due posizionali: %s", msg);
 
     /* `--max-tokens 0` è "genera zero token": un limite così è un typo. */
-    CK_PARSE(FMLX_CLI_USAGE, "fastmlx", "run", "m", "--max-tokens", "0");
+    CK_PARSE(FMLX_CLI_USAGE, "fastllm", "run", "m", "--max-tokens", "0");
 
     /* `--json` è di `models` e NON di pull: la regola «una bandiera che il verbo non legge è un
      * errore» vale anche per le bandiere nuove. */
-    CK_PARSE(FMLX_CLI_OK, "fastmlx", "models", "--json");
+    CK_PARSE(FMLX_CLI_OK, "fastllm", "models", "--json");
     CK(a.json == 1, "models --json non ha impostato il campo");
-    CK_PARSE(FMLX_CLI_USAGE, "fastmlx", "pull", "o/r", "--json");
+    CK_PARSE(FMLX_CLI_USAGE, "fastllm", "pull", "o/r", "--json");
     CK(HAS(msg, "--json"), "il rifiuto deve nominare la bandiera: %s", msg);
-    CK_PARSE(FMLX_CLI_USAGE, "fastmlx", "run", "m", "--json");
+    CK_PARSE(FMLX_CLI_USAGE, "fastllm", "run", "m", "--json");
 }
 
 /* ---- models ---- */
@@ -453,27 +453,27 @@ static void case_models_tabella(void) {
     FILE *out = open_memstream(&outb, &on), *err = open_memstream(&errb, &en);
 
     build_cache_fixture();
-    CK_PARSE(FMLX_CLI_OK, "fastmlx", "models", "--cache", "x");
+    CK_PARSE(FMLX_CLI_OK, "fastllm", "models", "--cache", "x");
     CK(a.pull.fetch.cache_root != NULL, "--cache non arrivata a models");
     /* L'argomento posizionale su un verbo che non lo usa è un errore, non una cosa ignorata. Si
      * asserisce ANCHE il nome del verbo: il primo giro sul cache reale ha stampato
-     * `fastmlx: : non prende argomenti` (il messaggio leggeva `out->verb` DOPO l'azzzeramento di
+     * `fastllm: : non prende argomenti` (il messaggio leggeva `out->verb` DOPO l'azzzeramento di
      * `fail`) e il solo frammento "non prende argomenti" lo stava a bere. `models` l'argomento lo
      * USA (è il filtro), e il verbo che oggi non lo prende è `serve`. */
-    CK_PARSE(FMLX_CLI_USAGE, "fastmlx", "serve", "mm/uno");
+    CK_PARSE(FMLX_CLI_USAGE, "fastllm", "serve", "mm/uno");
     CK(strstr(msg, "non prende argomenti") != NULL, "msg=%s", msg);
     CK(strncmp(msg, "serve:", 6) == 0, "il verbo non è nominato per esteso: '%s'", msg);
     /* Due filtri non vogliono dire niente: il secondo è un errore, non un AND implicito. */
-    CK_PARSE(FMLX_CLI_USAGE, "fastmlx", "models", "mm/uno", "mm/ue");
+    CK_PARSE(FMLX_CLI_USAGE, "fastllm", "models", "mm/uno", "mm/ue");
     CK(strstr(msg, "troppi argomenti posizionali") != NULL, "due filtri accettati: '%s'", msg);
     /* Il filtro arriva DAVVERO all'exec: `a->repo` è lo stesso campo che legge `pull`, e un parse
      * che lo riempie per un verbo e lo dimentica per l'altro si vede solo qui. */
-    CK_PARSE(FMLX_CLI_OK, "fastmlx", "models", "mm/uno");
+    CK_PARSE(FMLX_CLI_OK, "fastllm", "models", "mm/uno");
     CK(strcmp(a.repo, "mm/uno") == 0, "il filtro non arriva all'exec: '%s'", a.repo);
-    CK_PARSE(FMLX_CLI_OK, "fastmlx", "list", "uno");
+    CK_PARSE(FMLX_CLI_OK, "fastllm", "list", "uno");
     CK(strcmp(a.repo, "uno") == 0, "l'alias perde il filtro: '%s'", a.repo);
 
-    CK_PARSE(FMLX_CLI_OK, "fastmlx", "models", "--cache", at("cache"));
+    CK_PARSE(FMLX_CLI_OK, "fastllm", "models", "--cache", at("cache"));
     CK_ST(fmlx_cli_exec_with(&a, &DEAD, out, err), FMLX_CLI_OK);
     fclose(out);
     fclose(err);
@@ -520,7 +520,7 @@ static void case_models_tabella(void) {
 }
 
 /* `--quiet` è la forma per le shell: SOLO gli id, nell'ordine del catalogo, zero colonna. Se la
- * bandiera silenziasse solo il progresso senza togliere l'intestazione, `$(fastmlx models --quiet)`
+ * bandiera silenziasse solo il progresso senza togliere l'intestazione, `$(fastllm models --quiet)`
  * passerebbe "NOME" a chi aspetta un repo. */
 static void case_models_quiet(void) {
     FmlxCliArgs a;
@@ -528,7 +528,7 @@ static void case_models_quiet(void) {
     size_t on = 0, en = 0, lines = 0;
     FILE *out = open_memstream(&outb, &on), *err = open_memstream(&errb, &en);
 
-    CK_PARSE(FMLX_CLI_OK, "fastmlx", "list", "--cache", at("cache"), "--quiet");
+    CK_PARSE(FMLX_CLI_OK, "fastllm", "list", "--cache", at("cache"), "--quiet");
     CK_ST(fmlx_cli_exec_with(&a, &DEAD, out, err), FMLX_CLI_OK);
     fclose(out);
     fclose(err);
@@ -600,14 +600,14 @@ static void case_models_filtro(void) {
     Cap c;
     char msg[256];
     char *cv;
-    char *ex[] = {"fastmlx", "models", "--cache", NULL, "mm/uno"};
-    char *bare[] = {"fastmlx", "models", "--cache", NULL, "uno"};
-    char *glob[] = {"fastmlx", "models", "--cache", NULL, "zz/*"};
-    char *up[] = {"fastmlx", "models", "--cache", NULL, "MM/UNO"};
-    char *none[] = {"fastmlx", "models", "--cache", NULL, "nope/nope"};
-    char *star[] = {"fastmlx", "models", "--cache", NULL, "or*x"};
-    char *q[] = {"fastmlx", "list", "--quiet", "--cache", NULL, "uno"};
-    char *qnone[] = {"fastmlx", "list", "--quiet", "--cache", NULL, "nope/nope"};
+    char *ex[] = {"fastllm", "models", "--cache", NULL, "mm/uno"};
+    char *bare[] = {"fastllm", "models", "--cache", NULL, "uno"};
+    char *glob[] = {"fastllm", "models", "--cache", NULL, "zz/*"};
+    char *up[] = {"fastllm", "models", "--cache", NULL, "MM/UNO"};
+    char *none[] = {"fastllm", "models", "--cache", NULL, "nope/nope"};
+    char *star[] = {"fastllm", "models", "--cache", NULL, "or*x"};
+    char *q[] = {"fastllm", "list", "--quiet", "--cache", NULL, "uno"};
+    char *qnone[] = {"fastllm", "list", "--quiet", "--cache", NULL, "nope/nope"};
 
     build_cache_fixture();
     /* `at()` dà UN buffer statico: `cv` si cattura DOPO l'ultima chiamata della fixture, o punterebbe
@@ -708,7 +708,7 @@ static void case_models_json(void) {
     FmlxJsonDoc doc;
 
     build_cache_fixture();
-    CK_PARSE(FMLX_CLI_OK, "fastmlx", "models", "--cache", at("cache"), "--json");
+    CK_PARSE(FMLX_CLI_OK, "fastllm", "models", "--cache", at("cache"), "--json");
     out = open_memstream(&outb, &on);
     err = open_memstream(&errb, &en);
     CK_ST(fmlx_cli_exec_with(&a, &DEAD, out, err), FMLX_CLI_OK);
@@ -736,7 +736,7 @@ static void case_models_json(void) {
      * nulla. Il codice d'uscita è l'unica cosa che distingue «non c'è» da «va tutto bene». */
     out = open_memstream(&outb, &on);
     err = open_memstream(&errb, &en);
-    CK_PARSE(FMLX_CLI_OK, "fastmlx", "models", "--cache", at("cache"), "--json", "nope/nope");
+    CK_PARSE(FMLX_CLI_OK, "fastllm", "models", "--cache", at("cache"), "--json", "nope/nope");
     CK_ST(fmlx_cli_exec_with(&a, &DEAD, out, err), FMLX_CLI_FAILED);
     fclose(out);
     fclose(err);
@@ -748,7 +748,7 @@ static void case_models_json(void) {
 }
 
 /* La radice che non esiste NON è "cache vuoto": due messaggi diversi, perché sono due consigli
- * diversi. E l'elenco vuoto deve restare un SUCCESSO (exit 0): `fastmlx models` su un cache appena
+ * diversi. E l'elenco vuoto deve restare un SUCCESSO (exit 0): `fastllm models` su un cache appena
  * creato non è un fallimento. */
 static void case_models_senza_cache(void) {
     FmlxCliArgs a;
@@ -756,7 +756,7 @@ static void case_models_senza_cache(void) {
     size_t on = 0, en = 0;
     FILE *out = open_memstream(&outb, &on), *err = open_memstream(&errb, &en);
 
-    CK_PARSE(FMLX_CLI_OK, "fastmlx", "models", "--cache", at("radice-che-non-c-e"));
+    CK_PARSE(FMLX_CLI_OK, "fastllm", "models", "--cache", at("radice-che-non-c-e"));
     CK_ST(fmlx_cli_exec_with(&a, &DEAD, out, err), FMLX_CLI_FAILED);
     fclose(out);
     fclose(err);
@@ -771,7 +771,7 @@ static void case_models_senza_cache(void) {
     out = open_memstream(&outb, &on);
     err = open_memstream(&errb, &en);
     dir("cache-vuoto");
-    CK_PARSE(FMLX_CLI_OK, "fastmlx", "models", "--cache", at("cache-vuoto"));
+    CK_PARSE(FMLX_CLI_OK, "fastllm", "models", "--cache", at("cache-vuoto"));
     CK_ST(fmlx_cli_exec_with(&a, &DEAD, out, err), FMLX_CLI_OK);
     fclose(out);
     fclose(err);
@@ -814,7 +814,7 @@ static void case_models_murato(void) {
         return;
     }
 
-    CK_PARSE(FMLX_CLI_OK, "fastmlx", "models", "--cache", at("mur"));
+    CK_PARSE(FMLX_CLI_OK, "fastllm", "models", "--cache", at("mur"));
     out = open_memstream(&outb, &on);
     err = open_memstream(&errb, &en);
     CK_ST(fmlx_cli_exec_with(&a, &DEAD, out, err), FMLX_CLI_OK);
@@ -850,7 +850,7 @@ static void case_models_murato(void) {
      * confronta 100 con il `du` e non sa da dove viene la differenza. */
     out = open_memstream(&outb, &on);
     err = open_memstream(&errb, &en);
-    CK_PARSE(FMLX_CLI_OK, "fastmlx", "models", "--cache", at("mur"));
+    CK_PARSE(FMLX_CLI_OK, "fastllm", "models", "--cache", at("mur"));
     CK_ST(fmlx_cli_exec_with(&a, &DEAD, out, err), FMLX_CLI_OK);
     fclose(out);
     fclose(err);
@@ -866,7 +866,7 @@ static void case_models_murato(void) {
      * l'altro repo, e un totale senza quella frase è il cache presentato come i match. */
     out = open_memstream(&outb, &on);
     err = open_memstream(&errb, &en);
-    CK_PARSE(FMLX_CLI_OK, "fastmlx", "models", "--cache", at("mur"), "murato");
+    CK_PARSE(FMLX_CLI_OK, "fastllm", "models", "--cache", at("mur"), "murato");
     CK_ST(fmlx_cli_exec_with(&a, &DEAD, out, err), FMLX_CLI_OK);
     fclose(out);
     fclose(err);
@@ -884,7 +884,7 @@ static void case_models_murato(void) {
      * «non è nel cache»), che è ciò che il caso della lane va a provare. */
     out = open_memstream(&outb, &on);
     err = open_memstream(&errb, &en);
-    CK_PARSE(FMLX_CLI_OK, "fastmlx", "models", "--cache", at("mur"), "--quiet");
+    CK_PARSE(FMLX_CLI_OK, "fastllm", "models", "--cache", at("mur"), "--quiet");
     CK_ST(fmlx_cli_exec_with(&a, &DEAD, out, err), FMLX_CLI_OK);
     fclose(out);
     fclose(err);
@@ -897,7 +897,7 @@ static void case_models_murato(void) {
     chmod(at("mur/models--org--murato"), 0755); /* si riapre: un fixture murato non si wipea */
 }
 
-/* L'errore va sul canale d'errore, il progresso su stdout: in un pipe `fastmlx pull … | wc -l`
+/* L'errore va sul canale d'errore, il progresso su stdout: in un pipe `fastllm pull … | wc -l`
  * deve contare i file, non le lamentele. */
 static void case_canali(void) {
     FmlxCliArgs a;
@@ -905,15 +905,15 @@ static void case_canali(void) {
     size_t on = 0, en = 0;
     FILE *out = open_memstream(&outb, &on), *err = open_memstream(&errb, &en);
 
-    CK_PARSE(FMLX_CLI_OK, "fastmlx", "pull", "org/repo");
+    CK_PARSE(FMLX_CLI_OK, "fastllm", "pull", "org/repo");
     CK_ST(fmlx_cli_exec_with(&a, &DEAD, out, err), FMLX_CLI_FAILED);
     fclose(out);
     fclose(err);
     if (outb) outb[on] = '\0';
     if (errb) errb[en] = '\0';
-    CK(errb && strstr(errb, "fastmlx pull:") != NULL, "errore non sul canale d'errore: %s",
+    CK(errb && strstr(errb, "fastllm pull:") != NULL, "errore non sul canale d'errore: %s",
        errb ? errb : "(nessuno)");
-    CK(outb && strstr(outb, "fastmlx pull:") == NULL, "l'errore è anche su stdout: %s",
+    CK(outb && strstr(outb, "fastllm pull:") == NULL, "l'errore è anche su stdout: %s",
        outb ? outb : "(nessuno)");
     free(outb);
     free(errb);
@@ -927,7 +927,7 @@ static void case_aiuto(void) {
     size_t n = 0;
     FILE *out = open_memstream(&b, &n);
 
-    CK_PARSE(FMLX_CLI_OK, "fastmlx", "-h");
+    CK_PARSE(FMLX_CLI_OK, "fastllm", "-h");
     CK_ST(fmlx_cli_exec_with(&a, &DEAD, out, out), FMLX_CLI_OK);
     fclose(out);
     if (b) b[n] = '\0';
@@ -964,7 +964,7 @@ static void case_aiuto(void) {
        "l'aiuto non elenca le bandiere di serve");
     /* E l'auth DEVE dire da dove arriva: una chiave in argv finirebbe nella cronologia della
      * shell e nei processi altrui, la stessa ragione di HF_TOKEN. */
-    CK(b && strstr(b, "FASTMLX_API_KEY") != NULL, "l'aiuto non dice come si passa la chiave");
+    CK(b && strstr(b, "FASTLLM_API_KEY") != NULL, "l'aiuto non dice come si passa la chiave");
     CK(b && strstr(b, "HF_TOKEN") != NULL, "l'aiuto non dice come si passa il token");
     /* Il filtro e la sua regola d'uscita stanno qui dentro, non solo nel sorgente: chi digita
      * `models xyz` e riceve 1 deve poter leggere PERCHÉ senza aprire `fmlx_models.c`. */
@@ -990,9 +990,9 @@ int main(int argc, char **argv) {
     unsetenv("HF_HUB_CACHE");
     /* `serve` legge il suo ambiente come `pull` legge HF_HOME: lasciarlo quello di chi esegue
      * renderebbe i risultati dipendenti dalla shell di chi li guarda. */
-    unsetenv("FASTMLX_HOST");
-    unsetenv("FASTMLX_PORT");
-    unsetenv("FASTMLX_API_KEY");
+    unsetenv("FASTLLM_HOST");
+    unsetenv("FASTLLM_PORT");
+    unsetenv("FASTLLM_API_KEY");
 
     /* Il work directory è OBBLIGATORIO (lo passa CMake): un test che scrivesse il suo cache finto
      * nella directory corrente finirebbe per farlo nella root del repo, che è il punto dove il

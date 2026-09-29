@@ -35,6 +35,36 @@ void fmlx_engine_set_offload_experts(int on) { g_offload_experts = on ? 1 : 0; }
  * inietta SEMPRE nel render Jinja (i template che non lo usano lo ignorano). `--think` lo riattiva. */
 static int g_think = 0;
 void fmlx_engine_set_think(int on) { g_think = on ? 1 : 0; }
+
+/* Contesto/KV a runtime per QUALUNQUE modello (CAP_KV_MAX del motore). 0 = ok. */
+int fmlx_engine_set_ctx(FmlxEngineModel *m, int n) {
+    if (!m || !m->eng) return -1;
+    if (!m->eng->kv_set_max) return -2;   /* motore senza la capability */
+    m->ctx = n;
+    return m->eng->kv_set_max(m->model, n);
+}
+
+/* Nuova sessione: riapplica il contesto -> il motore rialloca/azzera la cache KV (per DS4 il KV si
+ * svuota davvero; per gli altri l'effetto e' funzionale col clear della cronologia lato CLI). */
+int fmlx_engine_new_session(FmlxEngineModel *m) {
+    if (!m) return -1;
+    return fmlx_engine_set_ctx(m, m->ctx);
+}
+
+/* Registro opzioni del motore (parametri senza env): inoltra all'API del motore. */
+int fmlx_engine_opt_set(const char *name, const char *value) {
+    return llm_ai_mlx_opt_set(name, value);
+}
+int fmlx_engine_opt_get_bool(const char *name, int *out) {
+    return llm_ai_mlx_opt_get_bool(name, out);
+}
+int fmlx_engine_opt_get_int(const char *name, int *out) {
+    return llm_ai_mlx_opt_get_int(name, out);
+}
+int fmlx_engine_opt_count(void) { return llm_ai_mlx_opt_count(); }
+int fmlx_engine_opt_at(int i, const char **name, const char **desc, char *value, int cap) {
+    return llm_ai_mlx_opt_at(i, name, desc, value, cap);
+}
 int fmlx_engine_think_enabled(void) { return g_think; }
 
 /* 1 = sessione interattiva (run/chat da terminale): abilita il PROMPT Y/N per l'offload. Il server
@@ -96,7 +126,8 @@ static void maybe_prompt_offload(const char *dir) {
     size_t need, avail;
 
     if (g_offload_experts || !g_interactive || !isatty(STDIN_FILENO)) return;
-    if (getenv("FASTLLM_NO_OFFLOAD_PROMPT") != NULL) return;
+    /* DS4 (GGUF "deepseek4"): --offload-experts non si applica a questo motore -> nessun prompt. */
+    if (llm_ai_mlx_gguf_supported(dir) == 1) return;
     need = model_footprint_bytes(dir);
     avail = available_memory_bytes();
     if (need == 0 || avail == 0 || need <= avail / 2) return;
@@ -555,6 +586,44 @@ int fmlx_engine_load(const char *cache_root, const char *name, FmlxEngineModel *
     if (!out->model) {
         snprintf(err, errcap, "the engine could not load the model at %s", out->dir);
         return -1;
+    }
+    /* Default di contesto: scelto dall'ARCH del modello (firma del file, non il nome) e MOSTRATO.
+     * DS4 (deepseek4) ha cache KV preallocate -> valori alti saturano la RAM. Il modello resta
+     * caricato; il KV riparte da zero. Regolabile a runtime con `/prompt <n>`. */
+    {
+        int ctx;
+        int is_dsv4 = 0;
+        {
+            size_t dn = strlen(out->dir);
+            if (dn > 5 && strcmp(out->dir + dn - 5, ".gguf") == 0)
+                is_dsv4 = (llm_ai_mlx_gguf_supported(out->dir) == 1);
+        }
+        /* Il PARAMETRO `context` (registro) vince; altrimenti default per arch (DS4 più basso). */
+        if (llm_ai_mlx_opt_is_set("context") == 1) {
+            llm_ai_mlx_opt_get_int("context", &ctx);
+        } else {
+            ctx = is_dsv4 ? FMLX_DSV4_DEFAULT_CTX : FMLX_ENGINE_DEFAULT_CTX;
+        }
+        out->ctx = ctx;
+        if (out->eng->kv_set_max) {
+            int crc = out->eng->kv_set_max(out->model, ctx);
+            fprintf(stderr, "contesto: %d token%s\n", ctx, crc == 0 ? "" : " (motore: non impostabile)");
+        }
+    }
+    /* `dtype` e `kvquant` (registro): applicati subito al modello, per qualunque modello MLX. */
+    {
+        char d[16];
+        if (llm_ai_mlx_opt_get_str("dtype", d, sizeof d) == 0 && strcmp(d, "auto") != 0)
+            llm_ai_mlx_model_set_bfloat16(out->model, strcmp(d, "bf16") == 0);
+    }
+    {
+        char kq[32];
+        if (llm_ai_mlx_opt_get_str("kvquant", kq, sizeof kq) == 0 && strcmp(kq, "off") != 0) {
+            int bits = atoi(kq), thr = 0;
+            char *c = strchr(kq, ':');
+            if (c) thr = atoi(c + 1);
+            llm_ai_mlx_model_set_kv_quantize(out->model, 1, thr, bits);
+        }
     }
     return 0;
 }

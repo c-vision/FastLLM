@@ -30,9 +30,9 @@
  * `ignored_params`. `response_format` è onorato per i due tipi che sappiamo servire
  * (`json_object`/`json_schema`) con l'iniezione di un'istruzione nel prompt e la
  * post-validazione: NON è grammatica nativa (l'ABI non la espone) e va detto.
- * `logprobs` è ONORATO dall'ABI v2 (logprob del token scelto); `top_logprobs > 0` è un 400 con
- * la causa (l'ABI non espone la distribuzione top-k). `logit_bias` e `user` restano ignorati e
- * DICHIARATI. */
+ * `logprobs` è ONORATO dall'ABI v2 (logprob del token scelto); `top_logprobs:K>0` è ONORATO
+ * dall'ABI v3 `token_topk` (le K alternative per token, con `logprobs:true` obbligatorio).
+ * `logit_bias` e `user` restano ignorati e DICHIARATI. */
 static const char *HONORED[] = {"messages",      "model",     "stream",
                                 "stream_options", "temperature", "top_p",
                                 "max_tokens",     "max_completion_tokens", "stop",
@@ -79,9 +79,10 @@ static int num(const FmlxJsonValue *v, double *out) { return fmlx_json_as_f64(v,
  * il caso `max_tokens: 1.5` che fmlx_json.h:8 promette di non troncare. */
 static int integer(const FmlxJsonValue *v, int64_t *out) { return fmlx_json_as_i64(v, out); }
 
-/* `logprobs`/`top_logprobs`, comuni a chat e completions. `top_logprobs > 0` non è onorabile:
- * l'ABI v2 dà solo la logprob del token scelto (`generate_ids_probs`), non la distribuzione
- * top-k, quindi chiederla è un 400 con la causa — mai un array vuoto che finge di averla. */
+/* `logprobs`/`top_logprobs`, comuni a chat e completions. `logprobs:true` chiede la logprob del
+ * token scelto (ABI v2). `top_logprobs:K>0` chiede le K alternative per token (ABI v3 `token_topk`)
+ * e, come in OpenAI, esige `logprobs:true`; K oltre il tetto servibile è un 400 esplicito. Il motore
+ * che non espone `token_topk` non è un problema di parsing: lo scopre il layer ① al decode. */
 FmlxApiErr fmlx_api_openai_logprobs(const FmlxJsonValue *root, FmlxApiChat *c, FmlxApiErrCtx *err) {
     const FmlxJsonValue *v;
 
@@ -103,14 +104,16 @@ FmlxApiErr fmlx_api_openai_logprobs(const FmlxJsonValue *root, FmlxApiChat *c, F
                     "top_logprobs");
             return FMLX_API_INVALID_REQUEST;
         }
-        c->want_top_logprobs = (int)k;
-        if (k > 0) {
+        if (k > 0 && !c->want_logprobs) {
             set_err(err, FMLX_API_INVALID_REQUEST,
-                    "top_logprobs is not supported: the engine ABI exposes only the chosen "
-                    "token's logprob, not the top-k distribution",
-                    "top_logprobs");
+                    "top_logprobs requires logprobs:true", "top_logprobs");
             return FMLX_API_INVALID_REQUEST;
         }
+        if (k > (int64_t)FMLX_API_MAX_TOP_K) {
+            set_err(err, FMLX_API_INVALID_REQUEST, "top_logprobs must be at most 20", "top_logprobs");
+            return FMLX_API_INVALID_REQUEST;
+        }
+        c->want_top_logprobs = (int)k;
     }
     return FMLX_API_OK;
 }
@@ -422,11 +425,30 @@ static FmlxApiFinish effective_finish(const FmlxApiAcc *a, int tools_ok) {
     return a->have_finish ? a->finish : FMLX_API_FINISH_STOP;
 }
 
+/* L'array `top_logprobs` di UNA voce: `{token, logprob, bytes}` per ogni alternativa, ordinate
+ * per logprob decrescente. Vuoto quando il motore non ne ha prodotte (campo comunque presente). */
+static FmlxApiErr write_top_entries(FmlxJsonW *w, const FmlxApiTopLogprob *top, int n_top) {
+    if (fmlx_jsonw_key(w, "top_logprobs") || fmlx_jsonw_arr_begin(w)) return FMLX_API_INTERNAL;
+    for (int i = 0; i < n_top; i++) {
+        const FmlxApiTopLogprob *t = &top[i];
+        if (t->n == 0) continue; /* voce non prodotta (o non rappresentabile): si omette */
+        if (fmlx_jsonw_obj_begin(w)) return FMLX_API_INTERNAL;
+        if (fmlx_jsonw_key(w, "token") || fmlx_jsonw_str(w, t->token, t->n)) return FMLX_API_INTERNAL;
+        if (fmlx_jsonw_key(w, "logprob") || fmlx_jsonw_f64(w, (double)t->logprob))
+            return FMLX_API_INTERNAL;
+        if (fmlx_jsonw_key(w, "bytes") || fmlx_jsonw_arr_begin(w)) return FMLX_API_INTERNAL;
+        for (uint32_t b = 0; b < t->n; b++)
+            if (fmlx_jsonw_i64(w, (unsigned char)t->token[b])) return FMLX_API_INTERNAL;
+        if (fmlx_jsonw_arr_end(w) || fmlx_jsonw_obj_end(w)) return FMLX_API_INTERNAL;
+    }
+    return fmlx_jsonw_arr_end(w) == FMLX_JSON_OK ? FMLX_API_OK : FMLX_API_INTERNAL;
+}
+
 /* Una voce di `choices[].logprobs.content[]` (OpenAI chat): token, logprob, bytes, top-k.
  * `bytes` è l'UTF-8 del token (il writer rifiuta byte non validi, e qui il testo è già UTF-8);
- * `top_logprobs` è VUOTO perché l'ABI non dà le alternative — meglio un array vuoto che una
- * lista inventata. */
-static FmlxApiErr write_chat_lp_entry(FmlxJsonW *w, const char *tok, uint32_t n, float lp) {
+ * `top`/`n_top` sono le alternative dall'ABI v3 (vuoto se il motore non le espone). */
+static FmlxApiErr write_chat_lp_entry(FmlxJsonW *w, const char *tok, uint32_t n, float lp,
+                                      const FmlxApiTopLogprob *top, int n_top) {
     if (fmlx_jsonw_obj_begin(w)) return FMLX_API_INTERNAL;
     if (fmlx_jsonw_key(w, "token") || fmlx_jsonw_str(w, tok, n)) return FMLX_API_INTERNAL;
     if (fmlx_jsonw_key(w, "logprob") || fmlx_jsonw_f64(w, (double)lp)) return FMLX_API_INTERNAL;
@@ -434,8 +456,7 @@ static FmlxApiErr write_chat_lp_entry(FmlxJsonW *w, const char *tok, uint32_t n,
     for (uint32_t i = 0; i < n; i++)
         if (fmlx_jsonw_i64(w, (unsigned char)tok[i])) return FMLX_API_INTERNAL;
     if (fmlx_jsonw_arr_end(w)) return FMLX_API_INTERNAL;
-    if (fmlx_jsonw_key(w, "top_logprobs") || fmlx_jsonw_arr_begin(w) || fmlx_jsonw_arr_end(w))
-        return FMLX_API_INTERNAL;
+    if (write_top_entries(w, top, n_top) != FMLX_API_OK) return FMLX_API_INTERNAL;
     return fmlx_jsonw_obj_end(w) == FMLX_JSON_OK ? FMLX_API_OK : FMLX_API_INTERNAL;
 }
 
@@ -447,9 +468,13 @@ static FmlxApiErr write_chat_logprobs(FmlxJsonW *w, const FmlxApiChat *c, const 
         return fmlx_jsonw_null(w) == FMLX_JSON_OK ? FMLX_API_OK : FMLX_API_INTERNAL;
     if (fmlx_jsonw_obj_begin(w) || fmlx_jsonw_key(w, "content") || fmlx_jsonw_arr_begin(w))
         return FMLX_API_INTERNAL;
-    for (int i = 0; i < a->n_logprobs; i++)
-        if (write_chat_lp_entry(w, a->text + a->log_off[i], a->log_len[i], a->logprob[i]))
+    int k = c->want_top_logprobs;
+    if (k > a->top_k) k = a->top_k;
+    for (int i = 0; i < a->n_logprobs; i++) {
+        const FmlxApiTopLogprob *top = (k > 0) ? a->top + (size_t)i * a->top_k : NULL;
+        if (write_chat_lp_entry(w, a->text + a->log_off[i], a->log_len[i], a->logprob[i], top, k))
             return FMLX_API_INTERNAL;
+    }
     if (fmlx_jsonw_arr_end(w) || fmlx_jsonw_obj_end(w)) return FMLX_API_INTERNAL;
     return FMLX_API_OK;
 }
@@ -541,7 +566,8 @@ static FmlxApiErr openai_chunk(FmlxHttpRes *w, const FmlxApiMeta *m, const FmlxA
     if (tev && tev->has_logprob) {
         if (fmlx_jsonw_obj_begin(&j) || fmlx_jsonw_key(&j, "content") || fmlx_jsonw_arr_begin(&j))
             return FMLX_API_INTERNAL;
-        if (write_chat_lp_entry(&j, tev->text, tev->n, tev->logprob)) return FMLX_API_INTERNAL;
+        if (write_chat_lp_entry(&j, tev->text, tev->n, tev->logprob, tev->top, tev->n_top))
+            return FMLX_API_INTERNAL;
         if (fmlx_jsonw_arr_end(&j) || fmlx_jsonw_obj_end(&j)) return FMLX_API_INTERNAL;
     } else if (fmlx_jsonw_null(&j)) {
         return FMLX_API_INTERNAL;

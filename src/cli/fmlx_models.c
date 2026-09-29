@@ -1,4 +1,4 @@
-/* fmlx_models.c — `fastmlx models` / `list`: cosa c'è GIÀ sul disco (piano §10.2, §13).
+/* fmlx_models.c — `fastllm models` / `list`: cosa c'è GIÀ sul disco (piano §10.2, §13).
  *
  * Perché un file suo e non un pezzo di `fmlx_cli.c`: `fmlx_cli.c` è il dispatcher e la grammatica
  * dell'argv (il core dispatcher, per la regola sulle dimensioni dei file); la TABELLA che questo
@@ -15,7 +15,7 @@
  *    (`models--mlx-community--Mixtral-8x22B-4bit`), e nasconderlo significherebbe dire "non ce l'hai"
  *    a chi ce l'ha puntato; nascondere il fatto che non ci sono byte significherebbe dire "occupa
  *    0" a chi deve fare spazio;
- *  - `--quiet` stampa SOLO gli id, una per riga: è la forma per `$(fastmlx models --quiet)`, e i
+ *  - `--quiet` stampa SOLO gli id, una per riga: è la forma per `$(fastllm models --quiet)`, e i
  *    numeri formattati non si parsano.
  *
  * Il filtro posizionale (`models <x>`) segue tre forme, e nessuna è «sottostringa»:
@@ -218,14 +218,14 @@ static FmlxCliStatus models_json(FILE *out, FILE *err, const FmlxHfRepo *v, size
     } while (0);
     if (!rc) {
         fmlx_jsonw_free(&w);
-        fprintf(err, "fastmlx models: la lista JSON non entra nel buffer\n");
+        fprintf(err, "fastllm models: la lista JSON non entra nel buffer\n");
         return FMLX_CLI_FAILED;
     }
     fwrite(w.buf ? w.buf : "{}", 1, blen, out);
     fputc('\n', out);
     fmlx_jsonw_free(&w);
     if (filt && *kept == 0) {
-        fprintf(err, "fastmlx models: nessun repo nel cache che matcha '%s'\n", filt);
+        fprintf(err, "fastllm models: nessun repo nel cache che matcha '%s'\n", filt);
         return FMLX_CLI_FAILED;
     }
     return FMLX_CLI_OK;
@@ -250,14 +250,14 @@ FmlxCliStatus fmlx_models_exec(const FmlxCliArgs *a, FILE *out, FILE *err) {
      * perdere anche il tempo. */
     if (filt && !fmlx_cli_filter_shape_ok(filt)) {
         fprintf(err,
-                "fastmlx models: filtro '%s' non ammesso (le forme sono org/nome, nome, org/*)\n",
+                "fastllm models: filtro '%s' non ammesso (le forme sono org/nome, nome, org/*)\n",
                 filt);
         return FMLX_CLI_USAGE;
     }
 
     v = (FmlxHfRepo *)malloc(FMLX_HF_CATALOG_REPOS_MAX * sizeof *v);
     if (!v) {
-        fprintf(err, "fastmlx models: memoria per %d repo rifiutata\n", FMLX_HF_CATALOG_REPOS_MAX);
+        fprintf(err, "fastllm models: memoria per %d repo rifiutata\n", FMLX_HF_CATALOG_REPOS_MAX);
         return FMLX_CLI_FAILED;
     }
     /* `given == NULL` lascia la scelta della radice alla lane: la regola degli ambiente
@@ -268,7 +268,7 @@ FmlxCliStatus fmlx_models_exec(const FmlxCliArgs *a, FILE *out, FILE *err) {
     s = fmlx_hf_catalog(given, v, FMLX_HF_CATALOG_REPOS_MAX, &n, &ignored);
     if (s != FMLX_HF_OK) {
         const char *m = fmlx_hf_last_error();
-        fprintf(err, "fastmlx models: %s [%s]\n", m ? m : fmlx_hf_status_str(s), fmlx_hf_status_str(s));
+        fprintf(err, "fastllm models: %s [%s]\n", m ? m : fmlx_hf_status_str(s), fmlx_hf_status_str(s));
         if (s == FMLX_HF_ERR_NO_CACHE && !given)
             /* Il caso reale di chi non ha mai scaricato niente con HF: "non esiste" senza il path
              * cercato fa perdere più tempo del path sbagliato. */
@@ -292,7 +292,7 @@ FmlxCliStatus fmlx_models_exec(const FmlxCliArgs *a, FILE *out, FILE *err) {
             kept++;
         }
         if (filt && kept == 0)
-            fprintf(err, "fastmlx models: nessun repo nel cache che matcha '%s'\n", filt);
+            fprintf(err, "fastllm models: nessun repo nel cache che matcha '%s'\n", filt);
         free(v);
         return (filt && kept == 0) ? FMLX_CLI_FAILED : FMLX_CLI_OK;
     }
@@ -322,7 +322,7 @@ FmlxCliStatus fmlx_models_exec(const FmlxCliArgs *a, FILE *out, FILE *err) {
      * l'intestazione con sotto "(nessun repo)" farebbe sembrare completo un risposta che è un
      * fallimento, ed è esattamente il caso che `grep` risolve con il suo exit 1. */
     if (filt && kept == 0) {
-        fprintf(err, "fastmlx models: nessun repo nel cache che matcha '%s'\n", filt);
+        fprintf(err, "fastllm models: nessun repo nel cache che matcha '%s'\n", filt);
         free(v);
         return FMLX_CLI_FAILED;
     }

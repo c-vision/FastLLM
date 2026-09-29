@@ -22,6 +22,8 @@
 #include "engine/fmlx_engine.h"
 
 #include "fmlx/fmlx_json.h"
+#include <time.h>   /* clock_gettime: tok/s misurati sulla generazione */
+#include <unistd.h> /* isatty: il dim del ragionamento solo su terminale */
 
 #include <stdlib.h>
 #include <string.h>
@@ -168,9 +170,20 @@ static int build_chat_doc(const char *system, const FmlxChatHist *hist, FmlxJson
 
 /* ---- genera e stampa ---- */
 
+FmlxCliStatus fmlx_cli_preload(const char *cache_root, const char *name, FILE *err) {
+    char e[512] = "";
+    if (!err) err = stderr;
+    if (!name || !*name) return FMLX_CLI_USAGE;
+    if (!fmlx_engine_model(cache_root, name, e, sizeof e)) {
+        fprintf(err, "fastllm: %s\n", e);
+        return FMLX_CLI_FAILED;
+    }
+    return FMLX_CLI_OK;
+}
+
 FmlxCliStatus fmlx_cli_generate_stream(const char *cache_root, const char *name, const char *system,
-                                       const FmlxChatHist *hist, long long max_tokens, FILE *out,
-                                       FILE *err, char **out_text) {
+                                       const FmlxChatHist *hist, long long max_tokens, int show_think,
+                                       FILE *out, FILE *err, char **out_text) {
     FmlxJsonDoc doc;
     const FmlxJsonValue *root;
     FmlxApiChat chat;
@@ -184,7 +197,7 @@ FmlxCliStatus fmlx_cli_generate_stream(const char *cache_root, const char *name,
     if (!err) err = stderr;
     if (out_text) *out_text = NULL;
     if (build_chat_doc(system, hist, &doc, e, sizeof e) != 0) {
-        fprintf(err, "fastmlx: %s\n", e);
+        fprintf(err, "fastllm: %s\n", e);
         return FMLX_CLI_FAILED;
     }
     root = fmlx_json_root(&doc);
@@ -200,16 +213,21 @@ FmlxCliStatus fmlx_cli_generate_stream(const char *cache_root, const char *name,
 
     model = fmlx_engine_model(cache_root, name, e, sizeof e);
     if (!model) {
-        fprintf(err, "fastmlx: %s\n", e);
+        fprintf(err, "fastllm: %s\n", e);
         fmlx_json_doc_free(&doc);
         return FMLX_CLI_FAILED;
     }
     g = fmlx_engine_chat(model, &chat, e, sizeof e);
     if (!g) {
-        fprintf(err, "fastmlx: %s\n", e);
+        fprintf(err, "fastllm: %s\n", e);
         fmlx_json_doc_free(&doc);
         return FMLX_CLI_FAILED;
     }
+
+    struct timespec tmv0, tmv1;
+    uint64_t ptok = 0, ctok = 0;
+    int have_done = 0;
+    clock_gettime(CLOCK_MONOTONIC, &tmv0);
 
     for (;;) {
         FmlxApiEvent ev;
@@ -219,12 +237,25 @@ FmlxCliStatus fmlx_cli_generate_stream(const char *cache_root, const char *name,
         memset(&ec, 0, sizeof ec);
         gs = fmlx_engine_next(g, &ev, &ec);
         if (gs == FMLX_API_GEN_ERR) {
-            fprintf(err, "fastmlx: %s\n", ec.message ? ec.message : "the engine failed");
+            fprintf(err, "fastllm: %s\n", ec.message ? ec.message : "the engine failed");
             break;
         }
         if (gs == FMLX_API_GEN_END) {
             st = FMLX_CLI_OK;
             break;
+        }
+        if (ev.ev == FMLX_API_EV_THINK) {
+            /* Ragionamento del modello: di default NON si stampa e NON entra nella risposta
+             * (la cronologia vede solo il testo finale). Con `--think` si mostra attenuato se
+             * il terminale lo supporta (ANSI dim), altrimenti in chiaro. */
+            if (show_think && ev.n) {
+                int tty = isatty(fileno(out));
+                if (tty) fputs("\033[2m", out);
+                fwrite(ev.text, 1, ev.n, out);
+                if (tty) fputs("\033[0m", out);
+                fflush(out);
+            }
+            continue;
         }
         if (ev.ev == FMLX_API_EV_TEXT) {
             /* Token-live: si scrive e si scarica subito. Un `fwrite` che aspetta la fine della
@@ -232,15 +263,29 @@ FmlxCliStatus fmlx_cli_generate_stream(const char *cache_root, const char *name,
             if (ev.n) fwrite(ev.text, 1, ev.n, out);
             fflush(out);
             if (ev.n && sb_add(&sb, ev.text, ev.n) != 0) {
-                fprintf(err, "fastmlx: out of memory collecting the response\n");
+                fprintf(err, "fastllm: out of memory collecting the response\n");
                 break;
             }
         }
-        /* DONE non ha bisogno di una stampa sua: il testo è già uscito, e i contatori li aggiunge
-         * il chiamante se li vuole. Il giro prosegue e la chiamata successiva dà GEN_END. */
+        if (ev.ev == FMLX_API_EV_DONE) {
+            /* Contatori di fine: alimentano la riga di statistica (tok/s, contesto). */
+            ptok = ev.prompt_tokens;
+            ctok = ev.completion_tokens;
+            have_done = 1;
+        }
     }
     fputc('\n', out);
     fflush(out);
+    clock_gettime(CLOCK_MONOTONIC, &tmv1);
+
+    /* Statistica per il terminale, su stderr: in una pipe l'output del modello resta pulito. */
+    if (have_done) {
+        double secs = (double)(tmv1.tv_sec - tmv0.tv_sec) +
+                      (double)(tmv1.tv_nsec - tmv0.tv_nsec) / 1e9;
+        fprintf(err, "[%llu tok · %.1f tok/s · contesto %llu tok]\n", (unsigned long long)ctok,
+                secs > 0.0 ? (double)ctok / secs : 0.0, (unsigned long long)(ptok + ctok));
+        fflush(err);
+    }
 
     fmlx_engine_gen_free(g);
     fmlx_json_doc_free(&doc);

@@ -35,6 +35,13 @@ extern "C" {
  * il cap deve stare ~262k (256k). Il tetto reale è la KV del modello; qui si lascia spazio. */
 #define FMLX_ENGINE_MAX_NEW 262144
 
+/* Default di CONTESTO (capienza KV, in token) applicato all'avvio di OGNI modello e mostrato
+ * a video. Sovrascrivibile a caldo con `/prompt <n>`. Un solo punto da cambiare. */
+#define FMLX_ENGINE_DEFAULT_CTX 262144
+/* DS4 (firma GGUF `deepseek4`): cache KV PREALLOCATE -> contesto più basso per non saturare la
+ * RAM col modello da ~91 GB. Rilevato dalla FIRMA del modello, non dal nome. */
+#define FMLX_DSV4_DEFAULT_CTX 32768
+
 /* Prefix cache (CAP_PREFIX del runner MLX). `MATCH` = quanti token di prefisso comuni servono
  * perché il riuso valga il prefill risparmiato; `SAVE` = lunghezza minima del prompt perché
  * valga la pena salvarne la KV. Entrambe sovrascrivibili via ambiente (FMLX_PREFIX_MIN_MATCH,
@@ -82,6 +89,23 @@ void fmlx_engine_set_interactive(int on);
 /* Thinking (ragionamento) dei modelli reasoning: DEFAULT = disattivato (il render Jinja inietta
  * `enable_thinking=false`, che per i Qwen pre-riempie <think></think>). `--think` lo riattiva. */
 void fmlx_engine_set_think(int on);
+
+/* Imposta la capienza del contesto/KV (token) del modello residente a runtime, per qualunque
+ * modello che supporti CAP_KV_MAX. Ritorna 0 se accettato, -2 se il motore non lo supporta. */
+int fmlx_engine_set_ctx(FmlxEngineModel *m, int n);
+
+/* Nuova sessione: azzera la cache KV del modello (riapplicando il contesto corrente). */
+int fmlx_engine_new_session(FmlxEngineModel *m);
+
+/* Registro opzioni del motore (parametri senza env): imposta `nome` a `valore`. 0 ok. */
+int fmlx_engine_opt_set(const char *name, const char *value);
+/* Legge un'opzione booleana dal registro. 0 = trovata (in *out), !=0 = nome ignoto. */
+int fmlx_engine_opt_get_bool(const char *name, int *out);
+int fmlx_engine_opt_get_int(const char *name, int *out);
+
+/* Enumerazione del registro (per `fastllm options`). */
+int fmlx_engine_opt_count(void);
+int fmlx_engine_opt_at(int i, const char **name, const char **desc, char *value, int cap);
 
 /* Avvia una generazione di chat. `c` è la richiesta normalizzata del layer ②; il sistema è
  * ricavato con `fmlx_api_join_system`. Ritorna NULL + `err` su fallimento (modello

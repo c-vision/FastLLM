@@ -410,6 +410,16 @@ void fmlx_api_acc_logbuf(FmlxApiAcc *a, float *lp, uint32_t *off, uint32_t *len,
     a->n_logprobs = 0;
 }
 
+/* Le alternative top-k si annotano solo se c'è anche lo slot delle logprob: stesso indice,
+ * capacità per il numero di token annotabili. */
+void fmlx_api_acc_topbuf(FmlxApiAcc *a, FmlxApiTopLogprob *top, int k) {
+    if (!a) return;
+    if (k < 0) k = 0;
+    if (k > (int)FMLX_API_MAX_TOP_K) k = (int)FMLX_API_MAX_TOP_K;
+    a->top = top;
+    a->top_k = (top && a->log_cap > 0) ? k : 0;
+}
+
 /* Aggiunge byte in coda. Se non entrano TUTTI, non ne entra NESSUNO: un token tagliato a
  * metà è un carattere spezzato in UTF-8, e la risposta "quasi completa" è quella che un
  * client manda a valle senza accorgersi. */
@@ -451,6 +461,15 @@ FmlxApiErr fmlx_api_acc_push(FmlxApiAcc *a, const FmlxApiEvent *ev) {
                 a->log_off[i] = (uint32_t)before;
                 a->log_len[i] = ev->n;
                 a->logprob[i] = ev->logprob;
+                /* TOP-LOGPROBS: le alternative viaggiano con lo stesso token; le copio nel
+                 * buffer del chiamante (voci inline, nessuna vita sospesa). */
+                if (a->top && a->top_k > 0) {
+                    int nt = ev->n_top;
+                    if (nt > a->top_k) nt = a->top_k;
+                    FmlxApiTopLogprob *dst = a->top + (size_t)i * a->top_k;
+                    for (int j = 0; j < nt; j++) dst[j] = ev->top[j];
+                    for (int j = nt; j < a->top_k; j++) { dst[j].n = 0; dst[j].token[0] = '\0'; }
+                }
                 a->n_logprobs++;
             }
         }
@@ -458,8 +477,11 @@ FmlxApiErr fmlx_api_acc_push(FmlxApiAcc *a, const FmlxApiEvent *ev) {
     }
     case FMLX_API_EV_THINK:
         /* piano:508: "se il modello non ha thinking: campo assente, mai stringa vuota".
-         * Un evento THINK da 0 byte NON apre il blocco: resta assente. */
-        if (ev->n) ok = append_buf(a->think, a->think_cap, &a->think_len, ev->text, ev->n);
+         * Un evento THINK da 0 byte NON apre il blocco: resta assente.
+         * Il ragionamento è AUSILIARIO: se supera il buffer non invalida la risposta (la si
+         * tronca nel campo think), a differenza del testo che sarebbe un UTF-8 mozzato. Un
+         * modello reasoning può pensare a lungo, e un 500 per questo sarebbe sbagliato. */
+        if (ev->n) (void)append_buf(a->think, a->think_cap, &a->think_len, ev->text, ev->n);
         break;
     case FMLX_API_EV_TOOL_NAME: {
         /* `ntool` è int (i loop degli adapter contano blocchi, non byte), i limiti sono

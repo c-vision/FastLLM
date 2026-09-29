@@ -1,4 +1,4 @@
-/* fmlx_doctor.c — `fastmlx doctor`: gli byte del cache SONO quelli che promettono (piano §10.2).
+/* fmlx_doctor.c — `fastllm doctor`: gli byte del cache SONO quelli che promettono (piano §10.2).
  *
  * È il verbo che manca a `models`. `models` dice «ho 9 file, 4.2 GB»; può dirlo anche se uno di
  * quei file è metà, se il blob è stato troncato da un `kill -9` o se un symlink punta il nome
@@ -14,7 +14,7 @@
  *    interrotto e un ref che punta un commit non scaricato sono fatti, non guasti, e far fallire
  *    `doctor && echo ok` per quelli insegnerebbe a ignorare il codice d'uscita.
  *  - `--quiet` stampa SOLO i PROBLEMA: niente intestazioni, niente riepilogo, niente note. È la
- *    forma `fastmlx doctor --quiet || die` — e il silenzio continua a voler dire una cosa sola.
+ *    forma `fastllm doctor --quiet || die` — e il silenzio continua a voler dire una cosa sola.
  *  - Zero match con un filtro è un FALLIMENTO, come in `models`: ha senso ancora di più qui, perché
  *    «ho controllato tutto e va bene» detto senza aver controllato niente è la bugia peggiore che
  *    un verificatore può dire.
@@ -99,7 +99,7 @@ FmlxCliStatus fmlx_doctor_exec(const FmlxCliArgs *a, FILE *out, FILE *err) {
      * che nessuno può leggere (stessa regola, stesso helper di `models`). */
     if (filt && !fmlx_cli_filter_shape_ok(filt)) {
         fprintf(err,
-                "fastmlx doctor: filtro '%s' non ammesso (le forme sono org/nome, nome, org/*)\n",
+                "fastllm doctor: filtro '%s' non ammesso (le forme sono org/nome, nome, org/*)\n",
                 filt);
         return FMLX_CLI_USAGE;
     }
@@ -107,7 +107,7 @@ FmlxCliStatus fmlx_doctor_exec(const FmlxCliArgs *a, FILE *out, FILE *err) {
     v = (FmlxHfRepo *)malloc(FMLX_HF_CATALOG_REPOS_MAX * sizeof *v);
     aud = (FmlxHfAudit *)malloc(sizeof *aud);
     if (!v || !aud) {
-        fprintf(err, "fastmlx doctor: memoria per il giro rifiutata\n");
+        fprintf(err, "fastllm doctor: memoria per il giro rifiutata\n");
         free(v);
         free(aud);
         return FMLX_CLI_FAILED;
@@ -115,7 +115,7 @@ FmlxCliStatus fmlx_doctor_exec(const FmlxCliArgs *a, FILE *out, FILE *err) {
     s = fmlx_hf_catalog(given, v, FMLX_HF_CATALOG_REPOS_MAX, &n, &ignored);
     if (s != FMLX_HF_OK) {
         const char *m = fmlx_hf_last_error();
-        fprintf(err, "fastmlx doctor: %s [%s]\n", m ? m : fmlx_hf_status_str(s),
+        fprintf(err, "fastllm doctor: %s [%s]\n", m ? m : fmlx_hf_status_str(s),
                 fmlx_hf_status_str(s));
         if (s == FMLX_HF_ERR_NO_CACHE && !given)
             fprintf(err, "  (HF_HUB_CACHE / HF_HOME non puntano a una directory esistente)\n");
@@ -159,7 +159,7 @@ FmlxCliStatus fmlx_doctor_exec(const FmlxCliArgs *a, FILE *out, FILE *err) {
      * bene» anche in `--quiet`, dove dello schermo non arriva niente. Il messaggio è uno solo per
      * le due modalità, e il codice d'uscita è la parte che un script legge. */
     if (filt && kept == 0)
-        fprintf(err, "fastmlx doctor: nessun repo nel cache che matcha '%s'\n", filt);
+        fprintf(err, "fastllm doctor: nessun repo nel cache che matcha '%s'\n", filt);
     free(v);
     free(aud);
     if (filt && kept == 0) return FMLX_CLI_FAILED;
