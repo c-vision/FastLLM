@@ -14,15 +14,24 @@ versionata** (artefatti JSON), non con un numero isolato.
    `tools/tq_moe_batch_repro.c`, `tools/dflash_parity.c`).
 
 ## Tool
-- `tools/spec_gate.py` — gate per lo **spec self-speculativo**:
+- `tools/spec_gate.py` — gate per lo **spec** (n-gram/MTP/DFlash2), **generale**: il toggle è una
+  coppia di opzioni di registro (`--off-opts`/`--on-opts`).
   ```
-  python3 tools/spec_gate.py --repeat 3 --order 3 \
-      --out docs/bench/<model>-<case>.json <modello> "<prompt>" [max_tokens]
+  # n-gram (default)
+  python3 tools/spec_gate.py --repeat 3 --out docs/bench/<model>-copy.json <modello> "<prompt>" 96
+  # MTP (MTPLX: AR vs MTP)
+  python3 tools/spec_gate.py --off-opts LLM_MTP_AUTO=0 --on-opts "" --out docs/bench/mtplx-mtp.json <MTPLX> "..." 48
   ```
-  Verifica parità (gate 1), throughput/speedup (gate 2) e maxrss (gate 3); emette l'artefatto JSON
-  e **exit 0 se PASS**. Parametri **solo da argomenti** (nessuna env).
+  Verifica parità (gate 1), throughput/speedup (gate 2) e maxrss (gate 3); exit 0 se PASS.
+- `tools/moe_gate.py` — gate per il **fix del forward batch MoE** (n=2..7): compila ed esegue
+  `tq_moe_batch_repro.c` e verifica che l'append n=1..8,14 dia rc=0; emette l'artefatto JSON.
+  ```
+  python3 tools/moe_gate.py --out docs/bench/<model>-moe-batch.json <modello_moe>
+  ```
 - `tools/dflash_parity.c` — parità+speed DFlash2 vs AR (unità-first, ABI via dlopen).
 - `tools/tq_moe_batch_repro.c` — riproducibile del forward batch MoE per n=1..14 (fix `n=2..7`).
+
+Tutti: parametri **solo da argomenti** (nessuna env).
 
 ## Artefatti
 - Un file per modello+caso in `docs/bench/`, **versionato** (evidenza del gate al momento della
