@@ -618,7 +618,11 @@ int fmlx_engine_load(const char *cache_root, const char *name, FmlxEngineModel *
     }
     {
         char kq[32];
-        if (llm_ai_mlx_opt_get_str("kvquant", kq, sizeof kq) == 0 && strcmp(kq, "off") != 0) {
+        /* `auto` e `off` li gestisce il MOTORE al load (policy per contesto / nessuna quant):
+         * qui si applica solo un valore esplicito (bits numerici). Evita che `auto` venga
+         * interpretato come "bits=0 -> ON da subito". */
+        if (llm_ai_mlx_opt_get_str("kvquant", kq, sizeof kq) == 0 &&
+            strncmp(kq, "off", 3) != 0 && strncmp(kq, "auto", 4) != 0) {
             int bits = atoi(kq), thr = 0;
             char *c = strchr(kq, ':');
             if (c) thr = atoi(c + 1);
