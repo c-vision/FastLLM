@@ -675,6 +675,9 @@ FmlxApiErr fmlx_api_openai_stream(const FmlxApiChat *c, const FmlxApiMeta *m, Fm
     int tool_index = -1;
     int done_seen = 0;
     for (;;) {
+        /* CANCELLAZIONE: se un write precedente è fallito (client disconnesso, `w->err`),
+         * si smette di generare SUBITO invece di completare fino a max_tokens. */
+        if (w && w->err != FMLX_HTTP_OK) { err = FMLX_API_INTERNAL; break; }
         FmlxApiEvent ev;
         memset(&ev, 0, sizeof ev);
         FmlxApiErrCtx ec;

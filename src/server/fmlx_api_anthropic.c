@@ -525,6 +525,8 @@ FmlxApiErr fmlx_api_anthropic_stream(const FmlxApiChat *c, const FmlxApiMeta *m,
     int done_seen = 0;
 
     for (;;) {
+        /* CANCELLAZIONE: client disconnesso (`w->err`) -> stop immediato della generazione. */
+        if (w && w->err != FMLX_HTTP_OK) { err = FMLX_API_INTERNAL; break; }
         FmlxApiEvent ev;
         memset(&ev, 0, sizeof ev);
         FmlxApiErrCtx ec;
