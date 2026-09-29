@@ -1,0 +1,17 @@
+{
+ "model": "Qwen3.8-27B-MTPLX-Optimized-Speed",
+ "prompt_sha256": "bbaff4d2ecd5892d4a442b0f53131641bf6e6f284761dd20fc0664bc97145762",
+ "max_tokens": 48,
+ "repeat": 1,
+ "off_opts": "LLM_MTP_AUTO=0",
+ "on_opts": "",
+ "off_tok_s": 1.3,
+ "on_tok_s": 26.3,
+ "speedup": 20.231,
+ "off_maxrss_mb": 19913.0,
+ "on_maxrss_mb": 19909.3,
+ "mem_delta_pct": -0.02,
+ "parity_bit_identical": true,
+ "output_sha256": "793ffeebebdaf8376a8e61c03dd9fcba06f29769eb81e3d854227e4ed31426e2",
+ "gate": "PASS"
+}
