@@ -1,0 +1,237 @@
+{
+ "op": "all",
+ "iters": 200,
+ "n_ops": 25,
+ "dylib": "libllm_ai_mlx.dylib",
+ "rows": [
+  {
+   "line": "OP rms_norm        shape=[1,2880]bf16               raw_ms=0.0228 llm_ms=0.0210 ratio=0.918 enc_us=0.2/0.2 maxdiff=0",
+   "shape": "[1,2880]bf16",
+   "raw_ms": "0.0228",
+   "llm_ms": "0.0210",
+   "ratio": "0.918",
+   "enc_us": "0.2/0.2",
+   "maxdiff": "0"
+  },
+  {
+   "line": "OP qlinear         shape=[1,2880]x[2880,2880]g64b8  raw_ms=0.0231 llm_ms=0.0229 ratio=0.992 enc_us=0.3/0.5 maxdiff=0",
+   "shape": "[1,2880]x[2880,2880]g64b8",
+   "raw_ms": "0.0231",
+   "llm_ms": "0.0229",
+   "ratio": "0.992",
+   "enc_us": "0.3/0.5",
+   "maxdiff": "0"
+  },
+  {
+   "line": "OP sdpa            shape=[1,32,1,128] GQA 8x S=2048 raw_ms=0.0255 llm_ms=0.0239 ratio=0.938 enc_us=0.2/0.2 maxdiff=0",
+   "shape": "[1,32,1,128]",
+   "S": "2048",
+   "raw_ms": "0.0255",
+   "llm_ms": "0.0239",
+   "ratio": "0.938",
+   "enc_us": "0.2/0.2",
+   "maxdiff": "0"
+  },
+  {
+   "line": "OP swiglu          shape=[1,2880]bf16 metal vs eager raw_ms=0.0214 llm_ms=0.0231 ratio=1.078 enc_us=0.5/3.3 maxdiff=0.00391",
+   "shape": "[1,2880]bf16",
+   "raw_ms": "0.0214",
+   "llm_ms": "0.0231",
+   "ratio": "1.078",
+   "enc_us": "0.5/3.3",
+   "maxdiff": "0.00391"
+  },
+  {
+   "line": "OP swiglu_prefill  shape=[2048,8192]bf16 metal vs eager raw_ms=0.5063 llm_ms=0.1938 ratio=0.383 enc_us=0.5/2.6 maxdiff=0.00586",
+   "shape": "[2048,8192]bf16",
+   "raw_ms": "0.5063",
+   "llm_ms": "0.1938",
+   "ratio": "0.383",
+   "enc_us": "0.5/2.6",
+   "maxdiff": "0.00586"
+  },
+  {
+   "line": "OP gptoss_swiglu   shape=[1,2880]bf16 metal vs eager raw_ms=0.0350 llm_ms=0.0197 ratio=0.563 enc_us=3.3/2.6 maxdiff=0.00781",
+   "shape": "[1,2880]bf16",
+   "raw_ms": "0.0350",
+   "llm_ms": "0.0197",
+   "ratio": "0.563",
+   "enc_us": "3.3/2.6",
+   "maxdiff": "0.00781"
+  },
+  {
+   "line": "OP geglu           shape=[1,2880]bf16 metal vs eager raw_ms=0.0382 llm_ms=0.0204 ratio=0.535 enc_us=3.3/2.5 maxdiff=0.00391",
+   "shape": "[1,2880]bf16",
+   "raw_ms": "0.0382",
+   "llm_ms": "0.0204",
+   "ratio": "0.535",
+   "enc_us": "3.3/2.5",
+   "maxdiff": "0.00391"
+  },
+  {
+   "line": "OP rms_norm_prefill shape=[2048,2880]bf16            raw_ms=0.0380 llm_ms=0.0374 ratio=0.984 enc_us=0.1/0.2 maxdiff=0",
+   "shape": "[2048,2880]bf16",
+   "raw_ms": "0.0380",
+   "llm_ms": "0.0374",
+   "ratio": "0.984",
+   "enc_us": "0.1/0.2",
+   "maxdiff": "0"
+  },
+  {
+   "line": "OP qlinear_prefill shape=[512,2880]x[2880,2880]     raw_ms=0.7026 llm_ms=0.6991 ratio=0.995 enc_us=0.4/0.5 maxdiff=0",
+   "shape": "[512,2880]x[2880,2880]",
+   "raw_ms": "0.7026",
+   "llm_ms": "0.6991",
+   "ratio": "0.995",
+   "enc_us": "0.4/0.5",
+   "maxdiff": "0"
+  },
+  {
+   "line": "OP logit_softcap   shape=[1,32768]f32 cap=30        raw_ms=0.0198 llm_ms=0.0200 ratio=1.010 enc_us=1.1/0.7 maxdiff=0",
+   "shape": "[1,32768]f32",
+   "cap": "30",
+   "raw_ms": "0.0198",
+   "llm_ms": "0.0200",
+   "ratio": "1.010",
+   "enc_us": "1.1/0.7",
+   "maxdiff": "0"
+  },
+  {
+   "line": "OP embed           shape=[V=8192,2880]g64b8 row-take raw_ms=0.0216 llm_ms=0.0216 ratio=1.001 enc_us=1.2/1.5 maxdiff=0",
+   "shape": "[V=8192,2880]g64b8",
+   "raw_ms": "0.0216",
+   "llm_ms": "0.0216",
+   "ratio": "1.001",
+   "enc_us": "1.2/1.5",
+   "maxdiff": "0"
+  },
+  {
+   "line": "OP kv_append       shape=inplace vs concat off=2048 raw_ms=0.0203 llm_ms=0.0242 ratio=1.195 enc_us=0.3/0.6 maxdiff=0",
+   "shape": "inplace",
+   "off": "2048",
+   "raw_ms": "0.0203",
+   "llm_ms": "0.0242",
+   "ratio": "1.195",
+   "enc_us": "0.3/0.6",
+   "maxdiff": "0"
+  },
+  {
+   "line": "OP kvq_sdpa        shape=nh32 nkv8 hd128 NC2048 NR128 b4g64 raw_ms=0.1161 llm_ms=0.0877 ratio=0.756 enc_us=1.8/11.7 maxdiff=2.24e-08",
+   "shape": "nh32",
+   "raw_ms": "0.1161",
+   "llm_ms": "0.0877",
+   "ratio": "0.756",
+   "enc_us": "1.8/11.7",
+   "maxdiff": "2.24e-08"
+  },
+  {
+   "line": "OP kvq_hetero      shape=K8V4 nh32 hd128 NC2048 NR128 raw_ms=0.1181 llm_ms=0.0890 ratio=0.753 enc_us=2.0/9.5 maxdiff=2.61e-08",
+   "shape": "K8V4",
+   "raw_ms": "0.1181",
+   "llm_ms": "0.0890",
+   "ratio": "0.753",
+   "enc_us": "2.0/9.5",
+   "maxdiff": "2.61e-08"
+  },
+  {
+   "line": "OP moe_mxfp4       shape=E32 K4 din/dff2880         raw_ms=0.1099 llm_ms=0.0997 ratio=0.907 enc_us=8.5/9.2 maxdiff=0",
+   "shape": "E32",
+   "raw_ms": "0.1099",
+   "llm_ms": "0.0997",
+   "ratio": "0.907",
+   "enc_us": "8.5/9.2",
+   "maxdiff": "0"
+  },
+  {
+   "line": "OP plain_linear    shape=[1,2880]x[2880,2880]bf16   raw_ms=0.0202 llm_ms=0.0209 ratio=1.035 enc_us=0.2/0.4 maxdiff=0",
+   "shape": "[1,2880]x[2880,2880]bf16",
+   "raw_ms": "0.0202",
+   "llm_ms": "0.0209",
+   "ratio": "1.035",
+   "enc_us": "0.2/0.4",
+   "maxdiff": "0"
+  },
+  {
+   "line": "OP qlinear_mxfp4   shape=[1,2880]x[2880,2880]g32b4  raw_ms=0.0199 llm_ms=0.0179 ratio=0.897 enc_us=0.2/0.3 maxdiff=0",
+   "shape": "[1,2880]x[2880,2880]g32b4",
+   "raw_ms": "0.0199",
+   "llm_ms": "0.0179",
+   "ratio": "0.897",
+   "enc_us": "0.2/0.3",
+   "maxdiff": "0"
+  },
+  {
+   "line": "OP silu            shape=[1,2880]bf16               raw_ms=0.0171 llm_ms=0.0194 ratio=1.134 enc_us=0.4/0.3 maxdiff=0",
+   "shape": "[1,2880]bf16",
+   "raw_ms": "0.0171",
+   "llm_ms": "0.0194",
+   "ratio": "1.134",
+   "enc_us": "0.4/0.3",
+   "maxdiff": "0"
+  },
+  {
+   "line": "OP zero_centered_rmsnorm shape=[1,2880]bf16 gs=0          raw_ms=0.0383 llm_ms=0.0379 ratio=0.988 enc_us=2.4/2.5 maxdiff=0",
+   "shape": "[1,2880]bf16",
+   "gs": "0",
+   "raw_ms": "0.0383",
+   "llm_ms": "0.0379",
+   "ratio": "0.988",
+   "enc_us": "2.4/2.5",
+   "maxdiff": "0"
+  },
+  {
+   "line": "OP sigmoid_rmsnorm_gated shape=[1,2880]bf16               raw_ms=0.0233 llm_ms=0.0273 ratio=1.176 enc_us=0.8/0.8 maxdiff=0",
+   "shape": "[1,2880]bf16",
+   "raw_ms": "0.0233",
+   "llm_ms": "0.0273",
+   "ratio": "1.176",
+   "enc_us": "0.8/0.8",
+   "maxdiff": "0"
+  },
+  {
+   "line": "OP qk_l2norm       shape=[1,32,1,128]bf16           raw_ms=0.0271 llm_ms=0.0301 ratio=1.110 enc_us=2.8/2.6 maxdiff=0",
+   "shape": "[1,32,1,128]bf16",
+   "raw_ms": "0.0271",
+   "llm_ms": "0.0301",
+   "ratio": "1.110",
+   "enc_us": "2.8/2.6",
+   "maxdiff": "0"
+  },
+  {
+   "line": "OP lora_apply      shape=[1,2880]xA[2880,16]xB[16,2880] raw_ms=0.0325 llm_ms=0.0304 ratio=0.937 enc_us=1.3/0.9 maxdiff=0",
+   "shape": "[1,2880]xA[2880,16]xB[16,2880]",
+   "raw_ms": "0.0325",
+   "llm_ms": "0.0304",
+   "ratio": "0.937",
+   "enc_us": "1.3/0.9",
+   "maxdiff": "0"
+  },
+  {
+   "line": "OP layer           shape=Llama-like H2048 dff8192 S256 raw_ms=0.1558 llm_ms=0.1578 ratio=1.013 enc_us=5.8/9.5 maxdiff=141",
+   "shape": "Llama-like",
+   "raw_ms": "0.1558",
+   "llm_ms": "0.1578",
+   "ratio": "1.013",
+   "enc_us": "5.8/9.5",
+   "maxdiff": "141"
+  },
+  {
+   "line": "OP layer_act       shape=raw qmm + metal act        raw_ms=0.1574 llm_ms=0.1518 ratio=0.965 enc_us=6.8/7.6 maxdiff=0.00488",
+   "shape": "raw",
+   "raw_ms": "0.1574",
+   "llm_ms": "0.1518",
+   "ratio": "0.965",
+   "enc_us": "6.8/7.6",
+   "maxdiff": "0.00488"
+  },
+  {
+   "line": "OP layer_qmm       shape=llm qmm + eager act        raw_ms=0.1566 llm_ms=0.1644 ratio=1.050 enc_us=5.7/7.5 maxdiff=141",
+   "shape": "llm",
+   "raw_ms": "0.1566",
+   "llm_ms": "0.1644",
+   "ratio": "1.050",
+   "enc_us": "5.7/7.5",
+   "maxdiff": "141"
+  }
+ ]
+}

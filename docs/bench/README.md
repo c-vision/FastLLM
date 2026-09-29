@@ -30,6 +30,12 @@ versionata** (artefatti JSON), non con un numero isolato.
   ```
 - `tools/dflash_parity.c` — parità+speed DFlash2 vs AR (unità-first, ABI via dlopen).
 - `tools/tq_moe_batch_repro.c` — riproducibile del forward batch MoE per n=1..14 (fix `n=2..7`).
+- `tools/kernel_tune.py` — **autotuning kernel model-free**: chiama `llm_ai_mlx_core_bench` e misura
+  le primitive core (`rms_norm`/`qlinear`/`sdpa`/`swiglu`) vs il path MLX diretto (`ratio`, `maxdiff`);
+  emette `docs/bench/kernel-core-bench.json`. Il dispatch di `quantized_linear_cfg` è **già
+  shape/quant-aware** (`llm_mlx_derive_bits` + condizioni di eleggibilità: **g32 non forzato in g64**,
+  fallback sicuro); un **dispatch-table data-driven** `(mode,bits,group,M-bin,context)` + wiring nel
+  motore è il passo successivo (kernel registry).
 
 Tutti: parametri **solo da argomenti** (nessuna env).
 
