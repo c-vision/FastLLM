@@ -106,6 +106,8 @@ int fmlx_engine_opt_get_int(const char *name, int *out);
 /* Enumerazione del registro (per `fastllm options`). */
 int fmlx_engine_opt_count(void);
 int fmlx_engine_opt_at(int i, const char **name, const char **desc, char *value, int cap);
+/* Valore d'esempio dell'i-esima opzione (per l'help). */
+int fmlx_engine_opt_example(int i, char *buf, int cap);
 
 /* Avvia una generazione di chat. `c` è la richiesta normalizzata del layer ②; il sistema è
  * ricavato con `fmlx_api_join_system`. Ritorna NULL + `err` su fallimento (modello

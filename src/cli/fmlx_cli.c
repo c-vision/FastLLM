@@ -58,9 +58,12 @@ void fmlx_cli_usage(FILE *out) {
             "  serve                  server OpenAI/Anthropic (/v1/models, /v1/chat/completions, /v1/messages)\n"
             "  ps                     dice se un `serve` e' in ascolto e i modelli residenti\n"
             "  doctor [<filtro>]      hasha i blob del cache HF e dice se SONO quelli promessi\n"
+            "  options                elenca TUTTE le opzioni del motore (registro) con un esempio\n"
             "  help [<comando>]       questo testo, o gli esempi di UN comando\n"
             "\n"
             "OPZIONI COMUNI\n"
+            "  --opt <nome>=<valore>  imposta un parametro del motore (registro, no env); elenco:\n"
+            "                         `fastllm options` (tutte le opzioni con esempi)\n"
             "  --offload-experts      streama gli esperti MoE da disco (per modelli piu' grandi della\n"
             "                         RAM: residente piccolo, piu' lento). Se il modello supera META'\n"
             "                         della memoria libera+reclamabile e l'opzione non e' data, run/chat\n"
@@ -230,6 +233,22 @@ static void usage_verb(FILE *out, const char *v) {
             "  fastllm doctor\n"
             "  fastllm doctor qwen\n"
             "  fastllm doctor mlx-community/* --cache ~/.cache/huggingface --quiet\n");
+    else if (!strcmp(v, "options"))
+        fprintf(out,
+            "fastllm options   [--json]\n"
+            "  Elenca TUTTE le opzioni del motore (registro, parametri SENZA env), ognuna con\n"
+            "  valore corrente e un ESEMPIO d'uso. Non carica alcun modello.\n"
+            "  --json                 la stessa lista in JSON (name/desc/value/example)\n"
+            "  -h, --help             questo testo\n"
+            "\n"
+            "Per impostare un parametro (prima del load, ripetibile):\n"
+            "  fastllm --opt <nome>=<valore> run <modello>\n"
+            "\n"
+            "esempi:\n"
+            "  fastllm options\n"
+            "  fastllm --opt context=131072 --opt thinking=on run ds4\n"
+            "  fastllm --opt kvquant=8:8192 run ds4\n"
+            "  fastllm --opt dflash_model=~/ai/Models/Qwen3.8-27B-DFlash2 run ds4\n");
     else
         fmlx_cli_usage(out);
 }
@@ -558,28 +577,61 @@ FmlxCliStatus fmlx_cli_parse(int argc, char **argv, FmlxCliArgs *out, char *msg,
     return FMLX_CLI_OK;
 }
 
+static void fput_json_escaped(FILE *out, const char *s) {
+    if (!s) return;
+    for (; *s; s++) {
+        unsigned char c = (unsigned char)*s;
+        if (c == '"' || c == '\\') { fputc('\\', out); fputc(c, out); }
+        else if (c == '\n') fputs("\\n", out);
+        else if (c < 0x20) fprintf(out, "\\u%04x", c);
+        else fputc(c, out);
+    }
+}
+
 static FmlxCliStatus fmlx_options_exec(const FmlxCliArgs *a, FILE *out, FILE *err) {
     int n, i;
-    (void)a; (void)err;
+    (void)err;
     if (!out) out = stdout;
-    fprintf(out, "\nOpzioni del motore (registro: parametri SENZA variabili d'ambiente).\n"
-                 "Si impostano con `--opt <nome>=<valore>` (ripetibile) prima del load, o da BASIC.\n\n");
     n = fmlx_engine_opt_count();
+    if (a && a->json) {
+        fprintf(out, "[\n");
+        for (i = 0; i < n; i++) {
+            const char *nm = NULL, *desc = NULL;
+            char val[64] = "", ex[96] = "";
+            fmlx_engine_opt_at(i, &nm, &desc, val, sizeof val);
+            fmlx_engine_opt_example(i, ex, sizeof ex);
+            fprintf(out, "  {\"name\":\"");      fput_json_escaped(out, nm ? nm : "");
+            fprintf(out, "\",\"value\":\"");     fput_json_escaped(out, val);
+            fprintf(out, "\",\"example\":\"");   fput_json_escaped(out, ex);
+            fprintf(out, "\",\"desc\":\"");      fput_json_escaped(out, desc ? desc : "");
+            fprintf(out, "\"}%s\n", (i + 1 < n) ? "," : "");
+        }
+        fprintf(out, "]\n");
+        return FMLX_CLI_OK;
+    }
+    fprintf(out, "\nOpzioni del motore (registro: parametri SENZA variabili d'ambiente).\n"
+                 "Si impostano con `--opt <nome>=<valore>` (ripetibile), prima del load, o da BASIC.\n"
+                 "Ogni voce ha il valore corrente e un ESEMPIO d'uso.\n\n");
     for (i = 0; i < n; i++) {
         const char *nm = NULL, *desc = NULL;
-        char val[64] = "";
+        char val[64] = "", ex[96] = "";
         fmlx_engine_opt_at(i, &nm, &desc, val, sizeof val);
-        fprintf(out, "  %-18s = %-12s %s\n", nm ? nm : "?", val, desc ? desc : "");
+        fmlx_engine_opt_example(i, ex, sizeof ex);
+        fprintf(out, "  %-22s = %-12s %s\n", nm ? nm : "?", val, desc ? desc : "");
+        if (nm && ex[0])
+            fprintf(out, "  %-22s   es.  fastllm --opt %s=%s run <modello>\n", "", nm, ex);
     }
-    fprintf(out, "\nEsempi:\n"
-                 "  fastllm options\n"
-                 "  fastllm ds4                                    # default (contesto auto, thinking off)\n"
-                 "  fastllm --opt context=131072 ds4               # contesto 128k\n"
-                 "  fastllm --opt thinking=on ds4                  # abilita il reasoning\n"
-                 "  fastllm --opt offload=on --opt offload_cache_mb=16384 ds4\n"
-                 "  fastllm --opt kvquant=8:8192 ds4               # KV quantizzata oltre 8192 token\n"
-                 "  fastllm --opt tqmemory=0 ds4                   # esperti accelerati (piu' RAM)\n"
-                 "  fastllm --opt dtype=bf16 ds4\n");
+    fprintf(out, "\nQuesti parametri valgono per TUTTI i comandi che caricano il modello (run, chat,\n"
+                 "serve). Vedi la guida completa: LLMEnv/docs/fastllm-guide.md.\n"
+                 "\nEsempi combinati:\n"
+                 "  fastllm options                              # questo elenco\n"
+                 "  fastllm run ds4                              # default (contesto auto, thinking off)\n"
+                 "  fastllm --opt context=131072 run ds4         # contesto 128k\n"
+                 "  fastllm --opt thinking=on --opt temp=0 run ds4\n"
+                 "  fastllm --opt offload=on --opt offload_cache_mb=16384 run ds4\n"
+                 "  fastllm --opt kvquant=8:8192 run ds4         # KV int8 oltre 8192 token\n"
+                 "  fastllm --opt dtype=bf16 --opt kvdisk=on run ds4\n"
+                 "  fastllm --opt dflash_model=~/ai/Models/Qwen3.8-27B-DFlash2 run ds4\n");
     return FMLX_CLI_OK;
 }
 

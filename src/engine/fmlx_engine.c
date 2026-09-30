@@ -65,6 +65,9 @@ int fmlx_engine_opt_count(void) { return llm_ai_mlx_opt_count(); }
 int fmlx_engine_opt_at(int i, const char **name, const char **desc, char *value, int cap) {
     return llm_ai_mlx_opt_at(i, name, desc, value, cap);
 }
+int fmlx_engine_opt_example(int i, char *buf, int cap) {
+    return llm_ai_mlx_opt_example(i, buf, cap);
+}
 int fmlx_engine_think_enabled(void) { return g_think; }
 
 /* 1 = sessione interattiva (run/chat da terminale): abilita il PROMPT Y/N per l'offload. Il server
