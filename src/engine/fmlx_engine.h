@@ -90,6 +90,15 @@ void fmlx_engine_set_interactive(int on);
  * `enable_thinking=false`, che per i Qwen pre-riempie <think></think>). `--think` lo riattiva. */
 void fmlx_engine_set_think(int on);
 
+/* IMMAGINI (input multimodale). Il motore MLX non ha vision: il SERVER registra un descrittore
+ * che, dato un blocco immagine (url `data:` base64, o http), ritorna una descrizione testuale
+ * (via un VLM sulla lane llama.cpp/mtmd). `content_text` lo invoca quando incontra un blocco
+ * immagine (OpenAI `image_url` / Anthropic `image`) e inietta la descrizione nel prompt.
+ * Ritorna 0 ok, -1 errore (l'immagine viene saltata). */
+typedef int (*FmlxImageDescriber)(void *ctx, const char *url, size_t url_len,
+                                  char *out, size_t outcap);
+void fmlx_engine_set_image_describer(FmlxImageDescriber fn, void *ctx);
+
 /* Imposta la capienza del contesto/KV (token) del modello residente a runtime, per qualunque
  * modello che supporti CAP_KV_MAX. Ritorna 0 se accettato, -2 se il motore non lo supporta. */
 int fmlx_engine_set_ctx(FmlxEngineModel *m, int n);

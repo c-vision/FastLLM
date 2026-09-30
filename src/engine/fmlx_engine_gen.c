@@ -38,6 +38,54 @@ static void trim_span(const char **p, size_t *n) {
     *n = len;
 }
 
+/* ---- IMMAGINI (input multimodale): descrittore registrato dal server (vedi fmlx_engine.h).
+ * Il motore MLX non ha vision: il server collega un VLM (lane llama.cpp/mtmd) e inietta la
+ * descrizione testuale dell'immagine nel prompt. Assente -> i blocchi immagine sono ignorati. */
+static FmlxImageDescriber g_img_desc = NULL;
+static void *g_img_ctx = NULL;
+void fmlx_engine_set_image_describer(FmlxImageDescriber fn, void *ctx) {
+    g_img_desc = fn;
+    g_img_ctx = ctx;
+}
+
+/* URL di un blocco immagine: OpenAI `{type:image_url,image_url:{url}}` (data URL o http);
+ * Anthropic `{type:image,source:{type:base64,media_type,data}}` -> ricostruito in
+ * `data:<mime>;base64,<data>`. Ritorna una stringa mallocata (chiamante free) o NULL. */
+static char *image_url_dup(const FmlxJsonValue *b) {
+    const FmlxJsonValue *ty = fmlx_json_obj_get(b, "type");
+    const char *tp = NULL;
+    size_t tn = 0;
+    if (!ty || !fmlx_json_as_str(ty, &tp, &tn)) return NULL;
+    if (tn == 9 && !memcmp(tp, "image_url", 9)) {                 /* OpenAI */
+        const FmlxJsonValue *iu = fmlx_json_obj_get(b, "image_url");
+        const FmlxJsonValue *u = iu ? fmlx_json_obj_get(iu, "url") : NULL;
+        const char *p = NULL;
+        size_t n = 0;
+        if (!u || !fmlx_json_as_str(u, &p, &n)) return NULL;
+        char *s = (char *)malloc(n + 1);
+        if (!s) return NULL;
+        memcpy(s, p, n); s[n] = '\0';
+        return s;
+    }
+    if (tn == 5 && !memcmp(tp, "image", 5)) {                     /* Anthropic */
+        const FmlxJsonValue *src = fmlx_json_obj_get(b, "source");
+        const FmlxJsonValue *st = src ? fmlx_json_obj_get(src, "type") : NULL;
+        const FmlxJsonValue *data = src ? fmlx_json_obj_get(src, "data") : NULL;
+        const FmlxJsonValue *media = src ? fmlx_json_obj_get(src, "media_type") : NULL;
+        const char *sp = NULL, *dp = NULL, *mp = "image/png";
+        size_t sn = 0, dn = 0, mn = 9;
+        if (!st || !fmlx_json_as_str(st, &sp, &sn) || sn != 6 || memcmp(sp, "base64", 6)) return NULL;
+        if (!data || !fmlx_json_as_str(data, &dp, &dn)) return NULL;
+        if (media) (void)fmlx_json_as_str(media, &mp, &mn);
+        char *s = (char *)malloc(mn + dn + 32);
+        if (!s) return NULL;
+        int h = snprintf(s, mn + dn + 32, "data:%.*s;base64,", (int)mn, mp);
+        memcpy(s + h, dp, dn); s[h + dn] = '\0';
+        return s;
+    }
+    return NULL;
+}
+
 /* Aggiunge il testo di un `content` (stringa, oppure array di stringhe/blocchi `{text}`).
  * Ritorna 0/-1. `trim` applica il trim del template (Llama-3 fa `| trim`). */
 static int content_text(const FmlxJsonValue *content, FmlxSb *out, int trim) {
@@ -58,13 +106,22 @@ static int content_text(const FmlxJsonValue *content, FmlxSb *out, int trim) {
             size_t n = fmlx_json_str_len(b);
             if (p && fmlx_sb_add(out, p, n) != 0) return -1;
         } else if (b->type == FMLX_JSON_OBJ) {
-            /* blocco testo (Anthropic e OpenAI a blocchi): si prende `text`, il resto
-             * (immagini/tool) non è testo e in questa prima lane non è reso. */
+            /* blocco testo (Anthropic e OpenAI a blocchi): si prende `text`. Un blocco IMMAGINE
+             * viene descritto da un VLM (descrittore registrato dal server) e iniettato come testo. */
             const FmlxJsonValue *t = fmlx_json_obj_get(b, "text");
             if (t && t->type == FMLX_JSON_STR) {
                 const char *p = fmlx_json_str(t);
                 size_t n = fmlx_json_str_len(t);
                 if (p && fmlx_sb_add(out, p, n) != 0) return -1;
+            } else if (g_img_desc) {
+                char *u = image_url_dup(b);
+                if (u) {
+                    char desc[16384];
+                    if (g_img_desc(g_img_ctx, u, strlen(u), desc, sizeof desc) == 0 && desc[0])
+                        if (fmlx_sb_add(out, "\n", 1) != 0 ||
+                            fmlx_sb_add(out, desc, strlen(desc)) != 0) { free(u); return -1; }
+                    free(u);
+                }
             }
         }
     }

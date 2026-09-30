@@ -70,7 +70,15 @@ typedef struct {
     const char *api_key;    /* NULL o "" = nessuna autenticazione */
     size_t max_body;        /* 0 = FMLX_SERVE_BODY_MAX */
     unsigned max_conns;     /* 0 = nessun limite: si ferma col segnale */
+    /* INPUT MULTIMODALE: VLM (GGUF modello + GGUF mmproj). Se impostati, le richieste con
+     * blocchi immagine vengono descritte dal VLM e iniettate nel prompt come testo. */
+    const char *vision_model;
+    const char *vision_mmproj;
 } FmlxServeOpts;
+
+/* Carica il VLM e registra il descrittore immagine nell'engine. Ritorna 1 attivo, 0 non
+ * configurato (nessuna immagine), -1 errore (causa in `err`). */
+int fmlx_serve_vision_init(const char *model, const char *mmproj, char *err, size_t errcap);
 
 /* La memoria del server. Il `resp` è DOVE SIAMO DECISI di fallire: un `/v1/models` con più
  * byte di `resp_cap` NON viene tagliato, diventa un 500 (vedi il comment nel .c).

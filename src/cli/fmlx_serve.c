@@ -55,6 +55,14 @@ FmlxCliStatus fmlx_serve_exec(const FmlxCliArgs *a, FILE *out, FILE *err) {
         fprintf(err ? err : stderr, "fastllm serve: memoria negata per i buffer del server\n");
         return FMLX_CLI_FAILED;
     }
+    {   /* INPUT MULTIMODALE: carica il VLM e registra il descrittore immagine (se configurato). */
+        char verr[256] = "";
+        if (fmlx_serve_vision_init(o.vision_model, o.vision_mmproj, verr, sizeof verr) < 0) {
+            fprintf(err ? err : stderr, "fastllm serve: vision: %s\n", verr);
+            fmlx_serve_buf_free(&buf);
+            return FMLX_CLI_FAILED;
+        }
+    }
     if (!a->quiet && out && isatty(fileno(out))) {
         char where[128];
         snprintf(where, sizeof where, "%s:%d", host,

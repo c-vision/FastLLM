@@ -226,7 +226,7 @@ add_library(fmlx_serve STATIC src/server/fmlx_serve_respond.c src/server/fmlx_se
                              src/server/fmlx_serve_metrics.c
                              src/server/fmlx_serve.c src/engine/fmlx_engine.c
                              src/engine/fmlx_engine_gen.c src/engine/fmlx_tools.c
-                             src/engine/fmlx_vision.c)
+                             src/engine/fmlx_vision.c src/server/fmlx_serve_vision.c)
 target_include_directories(fmlx_serve PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
                               PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
                                       ${CMAKE_CURRENT_SOURCE_DIR}/../LLMEnv/LLMEngine/include)

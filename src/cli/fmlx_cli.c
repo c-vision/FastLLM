@@ -203,6 +203,8 @@ static void usage_verb(FILE *out, const char *v) {
             "  --max-body <n>         tetto di byte di un corpo di richiesta\n"
             "  --once                 serve UNA richiesta e esce (smoke test)\n"
             "  --offload-experts      streama gli esperti MoE da disco (modelli > RAM)\n"
+            "  --vision-model <gguf>  VLM per l'input immagini (richiede --vision-mmproj)\n"
+            "  --vision-mmproj <gguf> proiettore multimodale del VLM\n"
             "  --quiet                niente riepilogo finale su stdout (i log restano su stderr)\n"
             "  -h, --help             questo testo\n"
             "\n"
@@ -308,6 +310,7 @@ enum {
     F_QUIET = 0, F_CACHE,                                  /* shared */
     F_REVISION, F_ENDPOINT, F_MAXBYTES, F_STALLTO, F_STALLRE, F_DEST, F_OFFLINE, F_REPAIR,
     F_HOST, F_PORT, F_MAXBODY, F_ONCE,
+    F_VISION_MODEL, F_VISION_MMPROJ,
     F_JSON, F_MAXTOKENS, F_SYSTEM, F_THINK, F_OFFLOAD,
     F_MMPROJ, F_MODALITY, F_PURGE,
     F_OPT,
@@ -316,7 +319,8 @@ enum {
 #define F_PULL_ONLY                                                                                            \
     ((1u << F_REVISION) | (1u << F_ENDPOINT) | (1u << F_MAXBYTES) | (1u << F_STALLTO) |                        \
      (1u << F_STALLRE) | (1u << F_DEST) | (1u << F_OFFLINE) | (1u << F_REPAIR))
-#define F_SERVE_ONLY ((1u << F_HOST) | (1u << F_PORT) | (1u << F_MAXBODY) | (1u << F_ONCE) | (1u << F_OFFLOAD))
+#define F_SERVE_ONLY ((1u << F_HOST) | (1u << F_PORT) | (1u << F_MAXBODY) | (1u << F_ONCE) | \
+                      (1u << F_OFFLOAD) | (1u << F_VISION_MODEL) | (1u << F_VISION_MMPROJ))
 #define F_MODELS_ONLY ((1u << F_JSON))
 #define F_RUNCHAT_ONLY ((1u << F_MAXTOKENS) | (1u << F_SYSTEM) | (1u << F_THINK) | (1u << F_OFFLOAD))
 /* `add` porta il proiettore e la modalità di un modello locale; `rm` la cancellazione dei file. */
@@ -337,7 +341,7 @@ enum {
 static const char *const FLN[F_N] = {
     "--quiet",    "--cache",        "--revision", "--endpoint", "--max-bytes", "--stall-timeout",
     "--stall-retries", "--dest",     "--offline",  "--repair",   "--host",      "--port",
-    "--max-body", "--once",         "--json",     "--max-tokens", "--system",   "--think",
+    "--max-body", "--once",         "--vision-model", "--vision-mmproj", "--json", "--max-tokens", "--system", "--think",
     "--offload-experts", "--mmproj", "--modality", "--purge", "--opt"};
 
 /* Il bit della bandiera `n`, 0 se la bandiera non esiste. */
@@ -469,6 +473,10 @@ FmlxCliStatus fmlx_cli_parse(int argc, char **argv, FmlxCliArgs *out, char *msg,
             out->pull.fetch.stall_timeout_s = (int)n;
         } else if (!strcmp(name, "--host")) {
             out->serve.host = val;
+        } else if (!strcmp(name, "--vision-model")) {
+            out->serve.vision_model = val;  /* `val` vive nell'argv del processo (come --host) */
+        } else if (!strcmp(name, "--vision-mmproj")) {
+            out->serve.vision_mmproj = val;
         } else if (!strcmp(name, "--port")) {
             /* 1..65535 e solo cifre: la stessa regola di `FASTLLM_PORT` (piano §14), perché due
              * modi di leggere la stessa cifra con severità diversa è il bug che rende un flag
