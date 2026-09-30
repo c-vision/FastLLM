@@ -69,6 +69,29 @@ static void reg_trim(char *s) {
     while (n && (s[n - 1] == '\n' || s[n - 1] == '\r' || s[n - 1] == ' ' || s[n - 1] == '\t')) s[--n] = '\0';
 }
 
+/* Legge un campo stringa da un descriptor .gmmod (JSON minimale). 0/-1 (out="" se assente). */
+static int gmmod_field(const char *path, const char *key, char *out, size_t cap) {
+    if (out && cap) out[0] = '\0';
+    FILE *f = fopen(path, "rb");
+    if (!f) return -1;
+    fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
+    if (n <= 0 || n > (1 << 20)) { fclose(f); return -1; }
+    char *b = (char *)malloc((size_t)n + 1);
+    if (!b) { fclose(f); return -1; }
+    if (fread(b, 1, (size_t)n, f) != (size_t)n) { free(b); fclose(f); return -1; }
+    b[n] = '\0'; fclose(f);
+    char pat[64]; snprintf(pat, sizeof pat, "\"%s\"", key);
+    const char *q = strstr(b, pat);
+    int ok = 0;
+    if (q) {
+        q += strlen(pat); while (*q == ' ' || *q == '\t') q++;
+        if (*q == ':') { q++; while (*q == ' ' || *q == '\t') q++;
+            if (*q == '"') { q++; size_t i = 0; while (*q && *q != '"' && i < cap - 1) out[i++] = *q++; out[i] = '\0'; ok = i > 0; } }
+    }
+    free(b);
+    return ok ? 0 : -1;
+}
+
 /* Copia il campo `idx` (0-based) di una riga TAB-separata in out. Ritorna 1 se esiste. */
 static int field(const char *line, int idx, char *out, size_t cap) {
     const char *p = line;
@@ -178,6 +201,24 @@ FmlxCliStatus fmlx_registry_add_exec(const FmlxCliArgs *a, FILE *out, FILE *err)
     char e[256];
     size_t n, cap = 0, i;
     const char *path = a->path[0] ? a->path : a->repo;
+    /* Consumo del descriptor .gmmod: se --mmproj/--modality non dati, li si legge da <stem>.gmmod
+     * (dichiarazione ABI: mmproj + modality). Mapping modality .gmmod -> registro FastLLM. */
+    char eff_mmproj[FMLX_HF_PATH_MAX]; snprintf(eff_mmproj, sizeof eff_mmproj, "%s", a->mmproj);
+    char eff_modality[16]; snprintf(eff_modality, sizeof eff_modality, "%s", a->modality);
+    if (!eff_mmproj[0] || !eff_modality[0]) {
+        char gm[FMLX_HF_PATH_MAX]; snprintf(gm, sizeof gm, "%s", path);
+        char *dot = strrchr(gm, '.'); if (dot && dot > gm) *dot = '\0';
+        strncat(gm, ".gmmod", sizeof gm - strlen(gm) - 1);
+        if (!eff_mmproj[0]) gmmod_field(gm, "mmproj", eff_mmproj, sizeof eff_mmproj);
+        if (!eff_modality[0]) {
+            char mm[16];
+            if (gmmod_field(gm, "modality", mm, sizeof mm) == 0) {
+                if (strcmp(mm, "audio") == 0) snprintf(eff_modality, sizeof eff_modality, "audio");
+                else if (strcmp(mm, "ocr") == 0) snprintf(eff_modality, sizeof eff_modality, "ocr");
+                else if (strcmp(mm, "vision") == 0 || strcmp(mm, "omni") == 0) snprintf(eff_modality, sizeof eff_modality, "vlm");
+            }
+        }
+    }
 
     if (!a->repo[0] || !path[0]) {
         fprintf(err ? err : stderr, "fastllm add: uso: add <nome> <path> [--mmproj <p>] [--modality chat|vlm|ocr|audio]\n");
@@ -189,8 +230,8 @@ FmlxCliStatus fmlx_registry_add_exec(const FmlxCliArgs *a, FILE *out, FILE *err)
         if (strcmp(v[i].name, a->repo) == 0) {
             /* aggiorna in place (ri-aggiungere = aggiornare il percorso) */
             snprintf(v[i].path, sizeof v[i].path, "%s", path);
-            snprintf(v[i].mmproj, sizeof v[i].mmproj, "%s", a->mmproj);
-            snprintf(v[i].modality, sizeof v[i].modality, "%s", a->modality[0] ? a->modality : "chat");
+            snprintf(v[i].mmproj, sizeof v[i].mmproj, "%s", eff_mmproj);
+            snprintf(v[i].modality, sizeof v[i].modality, "%s", eff_modality[0] ? eff_modality : "chat");
             snprintf(v[i].source, sizeof v[i].source, "%s", "local");
             if (reg_save(v, n, e, sizeof e) != 0) { free(v); fprintf(err, "fastllm add: %s\n", e); return FMLX_CLI_FAILED; }
             free(v);
@@ -202,13 +243,13 @@ FmlxCliStatus fmlx_registry_add_exec(const FmlxCliArgs *a, FILE *out, FILE *err)
     memset(&v[n], 0, sizeof v[n]);
     snprintf(v[n].name, sizeof v[n].name, "%s", a->repo);
     snprintf(v[n].path, sizeof v[n].path, "%s", path);
-    snprintf(v[n].mmproj, sizeof v[n].mmproj, "%s", a->mmproj);
-    snprintf(v[n].modality, sizeof v[n].modality, "%s", a->modality[0] ? a->modality : "chat");
+    snprintf(v[n].mmproj, sizeof v[n].mmproj, "%s", eff_mmproj);
+    snprintf(v[n].modality, sizeof v[n].modality, "%s", eff_modality[0] ? eff_modality : "chat");
     snprintf(v[n].source, sizeof v[n].source, "%s", "local");
     { time_t t = time(NULL); struct tm tm; localtime_r(&t, &tm); strftime(v[n].added, sizeof v[n].added, "%Y-%m-%d", &tm); }
     if (reg_save(v, n + 1, e, sizeof e) != 0) { free(v); fprintf(err, "fastllm add: %s\n", e); return FMLX_CLI_FAILED; }
     free(v);
-    fprintf(out ? out : stdout, "aggiunto: %s -> %s (%s)\n", a->repo, path, a->modality[0] ? a->modality : "chat");
+    fprintf(out ? out : stdout, "aggiunto: %s -> %s (%s)\n", a->repo, path, eff_modality[0] ? eff_modality : "chat");
     return FMLX_CLI_OK;
 }
 
