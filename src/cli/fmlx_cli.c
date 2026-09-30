@@ -639,6 +639,7 @@ static FmlxCliStatus fmlx_options_exec(const FmlxCliArgs *a, FILE *out, FILE *er
                  "  fastllm --opt offload=on --opt offload_cache_mb=16384 run ds4\n"
                  "  fastllm --opt kvquant=8:8192 run ds4         # KV int8 oltre 8192 token\n"
                  "  fastllm --opt dtype=bf16 --opt kvdisk=on run ds4\n"
+                 "  fastllm --opt prefix_cache=off run ds4       # prefix-cache solo in-RAM (niente disco)\n"
                  "  fastllm --opt dflash_model=~/ai/Models/Qwen3.8-27B-DFlash2 run ds4\n");
     return FMLX_CLI_OK;
 }

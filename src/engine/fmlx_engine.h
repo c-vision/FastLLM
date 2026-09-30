@@ -44,8 +44,8 @@ extern "C" {
 
 /* Prefix cache (CAP_PREFIX del runner MLX). `MATCH` = quanti token di prefisso comuni servono
  * perché il riuso valga il prefill risparmiato; `SAVE` = lunghezza minima del prompt perché
- * valga la pena salvarne la KV. Entrambe sovrascrivibili via ambiente (FMLX_PREFIX_MIN_MATCH,
- * FMLX_PREFIX_MIN_SAVE_LEN): sono politiche di memoria, non costanti del linguaggio. */
+ * valga la pena salvarne la KV. Default compilati qui; REGOLABILI dal registro opzioni motore
+ * (`prefix_min_match`, `prefix_min_save_len`) — politiche di memoria, non costanti del linguaggio. */
 #define FMLX_PREFIX_MIN_MATCH 8
 #define FMLX_PREFIX_MIN_SAVE_LEN 64
 

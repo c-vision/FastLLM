@@ -860,15 +860,13 @@ static int advance(FmlxEngineGen *g, char *err, size_t errcap) {
 
 /* Intero d'ambiente con minimo: un valore assente/illeggibile/fuori range ricade sul default
  * (una politica di memoria non deve poter essere azzerata da un typo). */
-static int env_int_at_least(const char *name, int def, int min) {
-    const char *v = getenv(name);
-    char *end;
-    long n;
-
-    if (!v || !*v) return def;
-    n = strtol(v, &end, 10);
-    if (end == v || *end || n < min || n > 1000000) return def;
-    return (int)n;
+/* Legacy: alcune soglie arrivavano da variabili d'ambiente. Ora sono parametri del REGISTRO
+ * motore (niente env): `prefix_min_match` / `prefix_min_save_len`. */
+static int opt_int_at_least(const char *name, int def, int min) {
+    int v = 0;
+    if (fmlx_engine_opt_get_int(name, &v) != 0) return def;
+    if (v < min || v > 1000000) return def;
+    return v;
 }
 
 /* FNV-1a sui byte degli id: il NOME del prefisso salvato. Contenuto (non puntatore) di modo che
@@ -938,7 +936,7 @@ static FmlxEngineGen *start(const FmlxEngineModel *m, const int32_t *ids, int n_
     can_prefix = (m->eng->caps & LLMMODELIO_CAP_PREFIX) && m->eng->append_ids_prefix;
     if (can_prefix) {
         int rc = m->eng->append_ids_prefix(m->model, s, ids, n_prompt,
-                                           env_int_at_least("FMLX_PREFIX_MIN_MATCH",
+                                           opt_int_at_least("prefix_min_match",
                                                             FMLX_PREFIX_MIN_MATCH, 1));
         if (rc < 0) {
             m->eng->destroy_session(s);
@@ -958,7 +956,7 @@ static FmlxEngineGen *start(const FmlxEngineModel *m, const int32_t *ids, int n_
      * anche quando la domanda cambia. L'auto-prefix richiede `n_ids >= token_len`, quindi un
      * prefisso salvato più lungo del prompt successivo non verrebbe comunque riusato. */
     if (can_prefix && m->eng->save_prefix &&
-        n_prompt >= env_int_at_least("FMLX_PREFIX_MIN_SAVE_LEN", FMLX_PREFIX_MIN_SAVE_LEN, 1)) {
+        n_prompt >= opt_int_at_least("prefix_min_save_len", FMLX_PREFIX_MIN_SAVE_LEN, 1)) {
         char key[48];
         snprintf(key, sizeof key, "fmlx-%016llx", (unsigned long long)fnv1a_ids(ids, n_prompt));
         (void)m->eng->save_prefix(m->model, key, s);
