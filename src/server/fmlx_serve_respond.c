@@ -705,6 +705,9 @@ static FmlxServeSt body_chat(FmlxServeBuf *buf, const char *body, size_t body_le
         fmlx_json_doc_free(&doc);
         return fmlx_serve_engine_fail(buf, FMLX_API_MODEL_NOT_FOUND, NULL, msg, anthropic, out_len);
     }
+    /* Reasoning per-richiesta (reasoning_effort OpenAI / thinking Anthropic): il server è
+     * single-thread, quindi il flag globale del motore è sicuro qui. Default = off (come prima). */
+    fmlx_engine_set_think(chat.has_think ? chat.think : 0);
     g = fmlx_engine_chat(model, &chat, err, sizeof err);
     if (!g) {
         char msg[600];

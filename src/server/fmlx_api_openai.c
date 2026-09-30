@@ -38,7 +38,8 @@ static const char *HONORED[] = {"messages",      "model",     "stream",
                                 "max_tokens",     "max_completion_tokens", "stop",
                                 "n",              "presence_penalty", "frequency_penalty",
                                 "tools",          "tool_choice", "seed",
-                                "response_format", "logprobs", "top_logprobs"};
+                                "response_format", "logprobs", "top_logprobs",
+                                "reasoning_effort"};
 #define HONORED_N ((int)(sizeof HONORED / sizeof HONORED[0]))
 
 static int is_honored(const char *k, size_t n) {
@@ -298,6 +299,21 @@ FmlxApiErr fmlx_api_openai_parse(const FmlxJsonValue *root, FmlxApiChat *c, Fmlx
         }
     }
 
+    /* `reasoning_effort`: OpenAI (none|low|medium|high|minimal). Mappa sul thinking del motore:
+     * `none` (o null) = spento; qualunque altro valore = acceso. `has_think` = presente e non null. */
+    v = fmlx_json_obj_get(root, "reasoning_effort");
+    if (v && !fmlx_json_is_null(v)) {
+        const char *ep = NULL;
+        size_t en = 0;
+        if (!fmlx_json_as_str(v, &ep, &en)) {
+            set_err(err, FMLX_API_INVALID_REQUEST, "reasoning_effort must be a string",
+                    "reasoning_effort");
+            return FMLX_API_INVALID_REQUEST;
+        }
+        c->has_think = 1;
+        c->think = !(en == 4 && !memcmp(ep, "none", 4));
+    }
+
     v = fmlx_json_obj_get(root, "tools");
     if (v && v->type == FMLX_JSON_ARR && fmlx_json_arr_n(v)) c->tools = v;
     v = fmlx_json_obj_get(root, "tool_choice");
@@ -503,6 +519,11 @@ FmlxApiErr fmlx_api_openai_completion(const FmlxApiChat *c, const FmlxApiMeta *m
     if (fmlx_jsonw_key(w, "index") || fmlx_jsonw_i64(w, 0)) return FMLX_API_INTERNAL;
     if (fmlx_jsonw_key(w, "message") || fmlx_jsonw_obj_begin(w)) return FMLX_API_INTERNAL;
     if (fmlx_jsonw_key(w, "role") || fmlx_jsonw_cstr(w, "assistant")) return FMLX_API_INTERNAL;
+    /* `reasoning_content` (estensione de-fatto) PRIMA di `content`, come nello stream. Presente
+     * solo se il modello ha davvero emesso ragionamento (think_len>0). */
+    if (a->think_len > 0)
+        if (fmlx_jsonw_key(w, "reasoning_content") || fmlx_jsonw_str(w, a->think, a->think_len))
+            return FMLX_API_INTERNAL;
     if (fmlx_jsonw_key(w, "content")) return FMLX_API_INTERNAL;
     if (a->text_len == 0 && tools_emitted(a) > 0) {
         /* `content: null` con i tool call è il formato reale di OpenAI; una stringa vuota

@@ -195,6 +195,10 @@ typedef struct {
 
     int stream, stream_usage; /* stream_options.include_usage */
     int want_tool;            /* tool_choice obbligato a una funzione specifica */
+    /* REASONING: `reasoning_effort` (OpenAI: none|low|medium|high) o `thinking` (Anthropic:
+     * {type:enabled|disabled,...}). has_think=1 se il client l'ha specificato; think=1 abilita il
+     * ragionamento per QUESTA richiesta. Default (nessuno dei due): off, come dal registro. */
+    int think, has_think;
     /* LOGPROBS (ABI v2): `logprobs:true` chiede che il motore emetta, per ogni token, la sua
      * logprob. `top_logprobs` resta registrato per il rifiuto: l'ABI v2 espone la logprob del
      * token scelto, NON la distribuzione top-k, quindi k>0 non è onorabile (400). */

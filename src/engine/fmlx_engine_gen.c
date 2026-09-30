@@ -961,10 +961,13 @@ static FmlxEngineGen *start(const FmlxEngineModel *m, const int32_t *ids, int n_
     g->prefix_hit = reused;
     g->finish = FMLX_API_FINISH_LENGTH;
     g->want_logprobs = can_lp;
-    /* Think split: attivo solo se il prompt ha aperto il blocco, e non in modalità logprobs
-     * (che emette un token per evento e ha bisogno del testo intero del token). */
-    g->want_think = (think_open && !can_lp) ? 1 : 0;
-    g->in_think = g->want_think;
+    /* Think split: attivo se il prompt apre il blocco OPPURE se il client ha chiesto reasoning
+     * (`reasoning_effort` OpenAI / `thinking` Anthropic). Nel secondo caso è il MODELLO a emettere
+     * `<think>` (i template Qwen con enable_thinking=true non lo pre-aprono): si parte FUORI dal
+     * blocco (`in_think=0`) e lo scanner rileva l'apertura. Mai in modalità logprobs. */
+    int reasoning_req = (c && c->has_think && c->think) ? 1 : 0;
+    g->want_think = ((think_open || reasoning_req) && !can_lp) ? 1 : 0;
+    g->in_think = (think_open && !can_lp) ? 1 : 0;
     g->skip_ws = 0;
     g->think_out = 0;
     return g;

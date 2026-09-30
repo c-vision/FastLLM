@@ -34,7 +34,8 @@
 static const char *ANT_HONORED[] = {"model",     "messages",  "system",
                                     "max_tokens", "temperature", "top_p",
                                     "top_k",      "stop_sequences", "stream",
-                                    "tools",      "tool_choice", "metadata"};
+                                    "tools",      "tool_choice", "metadata",
+                                    "thinking"};
 #define ANT_HONORED_N ((int)(sizeof ANT_HONORED / sizeof ANT_HONORED[0]))
 
 /* Le beta che conosciamo (piano:487): un token sconosciuto è ignorato E loggato, non è un
@@ -226,6 +227,22 @@ FmlxApiErr fmlx_api_anthropic_parse(const FmlxJsonValue *root, FmlxApiChat *c,
             return FMLX_API_INVALID_REQUEST;
         }
         c->stream = b;
+    }
+    /* `thinking`: {type:"enabled",budget_tokens:N} accende il ragionamento; "disabled" lo spegne
+     * (default Anthropic = spento). budget_tokens/altri campi restano nel DOM. */
+    v = fmlx_json_obj_get(root, "thinking");
+    if (v && !fmlx_json_is_null(v)) {
+        if (v->type != FMLX_JSON_OBJ) {
+            set_err(err, FMLX_API_INVALID_REQUEST, "thinking must be an object", "thinking");
+            return FMLX_API_INVALID_REQUEST;
+        }
+        const FmlxJsonValue *ty = fmlx_json_obj_get(v, "type");
+        const char *tp = NULL;
+        size_t tn = 0;
+        if (ty && fmlx_json_as_str(ty, &tp, &tn)) {
+            c->has_think = 1;
+            c->think = (tn == 7 && !memcmp(tp, "enabled", 7));
+        }
     }
     v = fmlx_json_obj_get(root, "stop_sequences");
     if (v && !fmlx_json_is_null(v)) {
