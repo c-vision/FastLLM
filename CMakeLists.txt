@@ -1,12 +1,14 @@
 cmake_minimum_required(VERSION 3.20)
 
-# SDK 27 + Metal 27 non compilano i kernel NAX di MLX (`steel/gemm/nax.h`: "too many errors").
-# MLX costruisce quei kernel SOLO quando deployment target >= 26.2, e li salta (definendo
-# MLX_METAL_NO_NAX) sotto. Pinnare un deployment target normale è il fix robusto: la metallib
-# si costruisce dallo STESSO sorgente MLX del motore, senza dipendere da artefatti esterni.
+# NAX (tensor unit M5) è la leva del prefill: MLX costruisce quei kernel SOLO con deployment
+# target >= 26.2, e li salta (definendo MLX_METAL_NO_NAX) sotto. Pinnare >=26.2 è la scelta giusta
+# PER PRESTAZIONI: la metallib include i kernel NAX e il prefill usa le tensor unit. Il fix
+# Metal-4.1 dell'era migrazione (MLX patch #3963, `libs/mlx-deps`) rende i kernel NAX compilabili
+# con il toolchain corrente, quindi 26.2 ORA compila (verificato: `build-gmbasic` NAX OK).
+# Storicamente era "15.0" per SALTARE NAX quando non compilava: NON farlo più (prefill ~5x).
 # Un valore passato sulla riga di comando vince (il blocco è condizionale).
 if(NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET OR CMAKE_OSX_DEPLOYMENT_TARGET STREQUAL "")
-  set(CMAKE_OSX_DEPLOYMENT_TARGET "15.0" CACHE STRING "macOS deployment target (senza NAX)")
+  set(CMAKE_OSX_DEPLOYMENT_TARGET "26.2" CACHE STRING "macOS deployment target (NAX abilitato)")
 endif()
 
 project(FastLLM LANGUAGES C)
