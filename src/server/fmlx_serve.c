@@ -26,6 +26,7 @@
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -174,6 +175,16 @@ typedef struct {
  * socket che si rompe non è un fallimento del server, e l'unica cosa che il loop deve sapere è
  * QUANTE richieste sono state servite — contate in `*req_no`, che è anche il criterio di
  * `--once`/`max_conns`. */
+/* D14: timeout di idle del keep-alive. Il server serve UNA connessione alla volta; senza un
+ * timeout, un client che tiene aperta una connessione inattiva (es. una GET seguita da un POST su
+ * altra connessione) bloccherebbe il server per sempre. Default 2000 ms, override FMLX_SERVE_KEEPALIVE_MS. */
+static int fmlx_serve_keepalive_ms(const FmlxServeOpts *o) {
+    (void)o;
+    const char *v = getenv("FMLX_SERVE_KEEPALIVE_MS");
+    if (v && *v) { char *end = NULL; long n = strtol(v, &end, 10); if (end && *end == '\0' && n >= 0 && n <= 3600000) return (int)n; }
+    return 2000;
+}
+
 static void serve_conn(int fd, const FmlxServeOpts *o, FmlxServeBuf *sbuf, Conn *cn, FILE *log,
                        unsigned *req_no, const volatile sig_atomic_t *stop) {
     for (;;) {
@@ -187,6 +198,15 @@ static void serve_conn(int fd, const FmlxServeOpts *o, FmlxServeBuf *sbuf, Conn 
 
         if (*stop) return;
         fmlx_http_req_init(&req);
+
+        /* D14: attesa con TIMEOUT dell'inizio di una NUOVA richiesta (keep-alive). Se non c'e' gia'
+         * dato bufferizzato, poll con timeout: una connessione inattiva si chiude invece di bloccare
+         * il server (mono-connessione). Il corpo/la testata gia' in corso non hanno timeout qui. */
+        if (cn->len == 0) {
+            struct pollfd pfd; pfd.fd = fd; pfd.events = POLLIN; pfd.revents = 0;
+            int pr = poll(&pfd, 1, fmlx_serve_keepalive_ms(o));
+            if (pr <= 0) return;   /* timeout di idle o errore: chiudi la connessione */
+        }
 
         /* 1. La testata: si legge finché il codec dice NEED_MORE. */
         for (;;) {
