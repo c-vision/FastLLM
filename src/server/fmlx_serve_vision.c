@@ -48,7 +48,9 @@ static int fmlx_img_desc(void *ctx, const char *url, size_t n, char *out, size_t
     const char *b64 = comma + 1;
     size_t b64n = n - headn - 1;
     const char *ext = "png";
-    if (headn >= 10 && memmem(head, headn, "image/jpeg", 10)) ext = "jpg";
+    int is_pdf = 0;
+    if (headn >= 15 && memmem(head, headn, "application/pdf", 15)) { is_pdf = 1; ext = "pdf"; }
+    else if (headn >= 10 && memmem(head, headn, "image/jpeg", 10)) ext = "jpg";
     else if (headn >= 10 && memmem(head, headn, "image/webp", 10)) ext = "webp";
     unsigned char *img = (unsigned char *)malloc(b64n / 4 * 3 + 8);
     if (!img) return -1;
@@ -62,11 +64,24 @@ static int fmlx_img_desc(void *ctx, const char *url, size_t n, char *out, size_t
     fclose(f);
     free(img);
     if (wr != imgn) { remove(path); return -1; }
+    /* PDF inline: rasterizza la/e pagina/e con `sips` (macOS) e passa il PNG al VLM. `sips` fa la
+     * prima pagina; un PDF multi-pagina e' quindi coperto solo parzialmente. */
+    char feed[600];
+    snprintf(feed, sizeof feed, "%s", path);
+    char png[600] = "";
+    if (is_pdf) {
+        snprintf(png, sizeof png, "/tmp/fmlx_img_%ld_%ld_p.png", (long)getpid(), g_seq);
+        char cmd[1400];
+        snprintf(cmd, sizeof cmd, "sips -s format png '%s' --out '%s' >/dev/null 2>&1", path, png);
+        if (system(cmd) != 0) { remove(path); return -1; }
+        snprintf(feed, sizeof feed, "%s", png);
+    }
     char err[256];
-    char *desc = fmlx_vision_read_image(g_vision, path,
+    char *desc = fmlx_vision_read_image(g_vision, feed,
                                         "Descrivi questa immagine e trascrivi ogni testo visibile.",
                                         512, err, sizeof err);
     remove(path);
+    if (is_pdf) remove(png);
     if (!desc) return -1;
     snprintf(out, outcap, "%s", desc);
     fmlx_vision_free_str(desc);

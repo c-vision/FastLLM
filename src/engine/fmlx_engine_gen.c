@@ -67,7 +67,7 @@ static char *image_url_dup(const FmlxJsonValue *b) {
         memcpy(s, p, n); s[n] = '\0';
         return s;
     }
-    if (tn == 5 && !memcmp(tp, "image", 5)) {                     /* Anthropic */
+    if ((tn == 5 && !memcmp(tp, "image", 5)) || (tn == 8 && !memcmp(tp, "document", 8))) { /* Anthropic */
         const FmlxJsonValue *src = fmlx_json_obj_get(b, "source");
         const FmlxJsonValue *st = src ? fmlx_json_obj_get(src, "type") : NULL;
         const FmlxJsonValue *data = src ? fmlx_json_obj_get(src, "data") : NULL;
