@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <glob.h>
 
 static FmlxVision *g_vision = NULL;
 static long g_seq = 0;
@@ -64,24 +65,49 @@ static int fmlx_img_desc(void *ctx, const char *url, size_t n, char *out, size_t
     fclose(f);
     free(img);
     if (wr != imgn) { remove(path); return -1; }
-    /* PDF inline: rasterizza la/e pagina/e con `sips` (macOS) e passa il PNG al VLM. `sips` fa la
-     * prima pagina; un PDF multi-pagina e' quindi coperto solo parzialmente. */
-    char feed[600];
-    snprintf(feed, sizeof feed, "%s", path);
-    char png[600] = "";
-    if (is_pdf) {
-        snprintf(png, sizeof png, "/tmp/fmlx_img_%ld_%ld_p.png", (long)getpid(), g_seq);
-        char cmd[1400];
-        snprintf(cmd, sizeof cmd, "sips -s format png '%s' --out '%s' >/dev/null 2>&1", path, png);
-        if (system(cmd) != 0) { remove(path); return -1; }
-        snprintf(feed, sizeof feed, "%s", png);
-    }
+    /* PDF inline MULTI-PAGINA: rasterizza tutte le pagine con `pdftoppm` (poppler) e descrivile
+     * tutte concatenate; fallback `sips` (prima pagina) se pdftoppm manca. */
     char err[256];
-    char *desc = fmlx_vision_read_image(g_vision, feed,
+    if (is_pdf) {
+        char prefix[600], pattern[620], cmd[1700];
+        snprintf(prefix, sizeof prefix, "/tmp/fmlx_pdf_%ld_%ld", (long)getpid(), g_seq);
+        snprintf(pattern, sizeof pattern, "%s-*.png", prefix);
+        glob_t gl;
+        snprintf(cmd, sizeof cmd, "pdftoppm -png -r 150 '%s' '%s' >/dev/null 2>&1", path, prefix);
+        int np = (system(cmd) == 0 && glob(pattern, 0, NULL, &gl) == 0) ? (int)gl.gl_pathc : 0;
+        size_t used = 0;
+        if (outcap > 0) out[0] = '\0';
+        for (int i = 0; i < np; i++) {
+            char *d = fmlx_vision_read_image(g_vision, gl.gl_pathv[i],
+                        "Descrivi questa immagine e trascrivi ogni testo visibile.", 512, err, sizeof err);
+            if (d) {
+                int wn = snprintf(out + used, (used < outcap) ? outcap - used : 0,
+                                  "%s[pagina %d] %s\n", used ? "" : "", i + 1, d);
+                if (wn > 0) used += (size_t)wn;
+                fmlx_vision_free_str(d);
+            }
+            remove(gl.gl_pathv[i]);
+        }
+        if (np) globfree(&gl);
+        remove(path);
+        if (np > 0) return 0;
+        /* fallback: prima pagina via sips */
+        char png[620];
+        snprintf(png, sizeof png, "%s-f.png", prefix);
+        snprintf(cmd, sizeof cmd, "sips -s format png '%s' --out '%s' >/dev/null 2>&1", path, png);
+        if (system(cmd) != 0) return -1;
+        char *d = fmlx_vision_read_image(g_vision, png,
+                    "Descrivi questa immagine e trascrivi ogni testo visibile.", 512, err, sizeof err);
+        remove(png);
+        if (!d) return -1;
+        snprintf(out, outcap, "%s", d);
+        fmlx_vision_free_str(d);
+        return 0;
+    }
+    char *desc = fmlx_vision_read_image(g_vision, path,
                                         "Descrivi questa immagine e trascrivi ogni testo visibile.",
                                         512, err, sizeof err);
     remove(path);
-    if (is_pdf) remove(png);
     if (!desc) return -1;
     snprintf(out, outcap, "%s", desc);
     fmlx_vision_free_str(desc);

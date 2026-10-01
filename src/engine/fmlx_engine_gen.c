@@ -838,6 +838,7 @@ static int advance(FmlxEngineGen *g, char *err, size_t errcap) {
     } else {
         got = g->m->eng->generate_ids(g->session, 1, g->m->eos, &id);
     }
+    if (getenv("GEN_IDS") && got > 0) fprintf(stderr, "[genid] %d\n", id);
     if (got < 0) {
         snprintf(err, errcap, "the engine failed while generating");
         return -1;
