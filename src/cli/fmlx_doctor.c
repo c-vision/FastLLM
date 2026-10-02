@@ -32,6 +32,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <sys/sysctl.h>
+#include "llmengine_mlx.h"   /* B5: llm_ai_mlx_selfcheck (MLX/device/memoria, model-free) */
 
 /* B5 — self-check d'ambiente (piano §B5): verifica che la componente nativa sia quella giusta e
  * che l'ambiente (OS/arch/device/RAM) sia compatibile, PRIMA di toccare i modelli. Non usa il
@@ -43,6 +44,8 @@ static void env_preamble(FILE *out) {
     int ncpu = 0;       l = sizeof ncpu;       sysctlbyname("hw.ncpu", &ncpu, &l, NULL, 0);
     fprintf(out, "[env] macOS %s / %s | %d CPU | RAM %.1f GB\n", os, arch, ncpu,
             mem / 1073741824.0);
+    { char sc[256] = ""; if (llm_ai_mlx_selfcheck(sc, (int)sizeof sc) == 0 && sc[0])
+        fprintf(out, "[env] %s\n", sc); }
 }
 
 /* Il verbo, stampato a sinistra del messaggio: è ciò che distingue una riga di `doctor` da una di

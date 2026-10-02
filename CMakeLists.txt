@@ -275,6 +275,9 @@ add_library(fmlx_cli STATIC src/cli/fmlx_pull.c src/cli/fmlx_models.c src/cli/fm
                             src/cli/fmlx_gen.c src/cli/fmlx_run.c src/cli/fmlx_chat.c
                             src/cli/fmlx_ps.c src/cli/fmlx_banner.c src/cli/fmlx_registry.c)
 target_include_directories(fmlx_cli PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
+                                      ${CMAKE_CURRENT_SOURCE_DIR}/../LLMEnv/LLMEngine/mlx
+                                      ${CMAKE_CURRENT_SOURCE_DIR}/../LLMEnv/LLMEngine/Options
+                                      ${CMAKE_CURRENT_SOURCE_DIR}/../LLMEnv/libs/mlx-deps/mlx-c-src
                             PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 # `fmlx_serve` tra le dipendenze PUBBLICHE: il verbo c'è solo se il loop c'è, e un `serve` che
 # compilasse senza il socket sarebbe il "comando che risponde di sì" che il piano vieta. Da lì
