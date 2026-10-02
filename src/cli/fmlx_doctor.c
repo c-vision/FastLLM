@@ -30,6 +30,20 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
+#include <sys/sysctl.h>
+
+/* B5 — self-check d'ambiente (piano §B5): verifica che la componente nativa sia quella giusta e
+ * che l'ambiente (OS/arch/device/RAM) sia compatibile, PRIMA di toccare i modelli. Non usa il
+ * motore (il `doctor` non carica un modello): e' il check che puo' girare anche a macchina scarica. */
+static void env_preamble(FILE *out) {
+    char os[64] = "?"; size_t l = sizeof os; sysctlbyname("kern.osproductversion", os, &l, NULL, 0);
+    char arch[32] = "?"; l = sizeof arch;      sysctlbyname("hw.machine", arch, &l, NULL, 0);
+    uint64_t mem = 0;   l = sizeof mem;        sysctlbyname("hw.memsize", &mem, &l, NULL, 0);
+    int ncpu = 0;       l = sizeof ncpu;       sysctlbyname("hw.ncpu", &ncpu, &l, NULL, 0);
+    fprintf(out, "[env] macOS %s / %s | %d CPU | RAM %.1f GB\n", os, arch, ncpu,
+            mem / 1073741824.0);
+}
 
 /* Il verbo, stampato a sinistra del messaggio: è ciò che distingue una riga di `doctor` da una di
  * `models` quando finiscono nello stesso log. */
@@ -92,6 +106,7 @@ FmlxCliStatus fmlx_doctor_exec(const FmlxCliArgs *a, FILE *out, FILE *err) {
     if (!out) out = stdout;
     if (!err) err = stderr;
     quiet = a->quiet;
+    if (!quiet) env_preamble(out);
     given = (a->pull.fetch.cache_root && *a->pull.fetch.cache_root) ? a->pull.fetch.cache_root : NULL;
     filt = a->repo[0] ? a->repo : NULL;
 
