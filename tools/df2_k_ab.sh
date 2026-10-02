@@ -15,11 +15,17 @@ LOAD=$(sysctl -n vm.loadavg 2>/dev/null | awk '{print $2}')
 echo "load average (1m) = ${LOAD:-?}  (se > ~2: i TEMPI non sono affidabili, solo DF2_STATS vale)"
 echo
 
+WD=/tmp/wd.sh   # watchdog memoria (uccide a cap RSS); se assente, nessun watchdog
 run() {
   local label="$1"; shift
   echo "== $label =="
-  FASTLLM_NO_OFFLOAD_PROMPT=1 DF2_STATS=1 DF2_TIME=1 "$BIN" run 4 "$P" --max-tokens 48 --opt temp=0 "$@" 2>&1 \
-    | grep -aE "df2stats total|df2time\] rounds" | tail -2
+  if [ -x "$WD" ]; then
+    $WD 45 - env FASTLLM_NO_OFFLOAD_PROMPT=1 DF2_STATS=1 DF2_TIME=1 "$BIN" run 4 "$P" --max-tokens 48 --opt temp=0 "$@" 2>&1 \
+      | grep -aE "df2stats total|df2time\] rounds" | tail -2
+  else
+    FASTLLM_NO_OFFLOAD_PROMPT=1 DF2_STATS=1 DF2_TIME=1 "$BIN" run 4 "$P" --max-tokens 48 --opt temp=0 "$@" 2>&1 \
+      | grep -aE "df2stats total|df2time\] rounds" | tail -2
+  fi
   echo
 }
 run "ADATTIVO (default golden: K=7 poi K=3)"
