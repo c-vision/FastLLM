@@ -26,13 +26,15 @@ run() {
       | grep -aoE "\[[0-9]+ tok · [0-9.]+ tok/s · contesto [0-9]+ tok\]" | tail -1 )
   echo
 }
+# Gate REALE (llm_mlx_session_generate.c:640): LLM_COMPILE (master) && LLM_FIXKV (cache statiche)
+# && arch_supported (LLM_COMPILE_QWEN35). Senza questi il path compiled NON si attiva (resta eager).
 run "eager (baseline)"
-run "compiled qwen3_5 (NO_FUSE = parita')" LLM_COMPILE_QWEN35=1
-run "compiled+FUSE (fonde i pointwise = il payoff)" LLM_COMPILE_QWEN35=1 LLM_COMPILE_FUSE=1
+run "compiled qwen3_5 (NO_FUSE = parita')" LLM_COMPILE=1 LLM_FIXKV=1 LLM_COMPILE_QWEN35=1
+run "compiled+FUSE (fonde i pointwise = il payoff)" LLM_COMPILE=1 LLM_FIXKV=1 LLM_COMPILE_QWEN35=1 LLM_COMPILE_FUSE=1
 
 echo "== PARITA' (compiled+FUSE vs eager) =="
 eag=$(FASTLLM_NO_OFFLOAD_PROMPT=1 GEN_IDS=1 "$BIN" run "$M" "$P" --max-tokens 40 --opt temp=0 2>&1 | grep -a genid | sed 's/\[genid\] //' | tr '\n' ' ')
-fuse=$(LLM_COMPILE_QWEN35=1 LLM_COMPILE_FUSE=1 FASTLLM_NO_OFFLOAD_PROMPT=1 GEN_IDS=1 "$BIN" run "$M" "$P" --max-tokens 40 --opt temp=0 2>&1 | grep -a genid | sed 's/\[genid\] //' | tr '\n' ' ')
+fuse=$(LLM_COMPILE=1 LLM_FIXKV=1 LLM_COMPILE_QWEN35=1 LLM_COMPILE_FUSE=1 FASTLLM_NO_OFFLOAD_PROMPT=1 GEN_IDS=1 "$BIN" run "$M" "$P" --max-tokens 40 --opt temp=0 2>&1 | grep -a genid | sed 's/\[genid\] //' | tr '\n' ' ')
 [ "$(echo $eag)" = "$(echo $fuse)" ] && echo "  PARITA' OK" || echo "  DIVERGE (~1e-3 atteso: muro FUSE) -> isolare l'astype nella catena"
 echo
 echo "Se i tok/s non migliorano: payoff nullo (atenersi al tracker §V: build 2-3%/eval 97%)."
