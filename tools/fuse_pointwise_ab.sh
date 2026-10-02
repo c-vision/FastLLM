@@ -2,20 +2,28 @@
 # fuse_pointwise_ab.sh — A/B della fusione POINTWISE via compiled_decode WHOLE-STEP.
 #
 # Tesi (tracker speed-gap §5-ter): la fusione elementwise del reference mlx_lm si ottiene con la
-# REGIONE WHOLE-STEP compilata (UN apply/token), NON con GMB_FUSE_GEGLU (apply eager per-layer =
-# 60 barriere/token, 14x iokit, falsificato). `is_fusable` fonde solo unary/binary/ternary/broadcast
-# -> matmul/softmax restano bit-identiche -> IN PRINCIPIO parity-safe.
+# REGIONE WHOLE-STEP compilata (UN apply/token). GMB_FUSE_GEGLU (apply eager per-layer) e' FALSO
+# (14x iokit). `is_fusable` fonde solo unary/binary/ternary/broadcast -> matmul/softmax bit-identiche.
 #
-# NON deterministico: il payoff e' traffico GPU / tok/s -> SOLO finestra idle.
-# Deterministico: la PARITA' (ids GEN_IDS) compiled+FUSE vs eager.
+# Gate REALE (llm_mlx_session_generate.c:640): LLM_COMPILE (master) && LLM_FIXKV (cache statiche)
+# && arch_supported (QLAMA: LLM_COMPILE_DENSE; qwen3_5: LLM_COMPILE_QWEN35 + cache statiche GDN = M1).
+# NB: sul qwen3_5 il compiled NON aggancia (static caches mixtral/llama-only) -> serve M1.
 #
-# Uso: tools/fuse_pointwise_ab.sh [model#]   (default 4 = qwen38/qwen3_5)
+# Payoff/tok/s = SOLO finestra idle. Parita' (ids) = SEMPRE valida.
+# Uso: tools/fuse_pointwise_ab.sh [model#] [arch]   arch: llama|qwen35 (default: dedotto dal modello)
 set -u
 BIN="$(dirname "$0")/../build-release/fastllm"
-M="${1:-4}"
+M="${1:-1}"
+ARCH="${2:-}"
+[ -z "$ARCH" ] && case "$M" in 1) ARCH=llama;; 4) ARCH=qwen35;; *) ARCH=llama;; esac
+case "$ARCH" in
+  llama)  ARCHENV="LLM_COMPILE_DENSE=1"  ;;
+  qwen35) ARCHENV="LLM_COMPILE_QWEN35=1" ;;
+  *) echo "arch sconosciuto: $ARCH (llama|qwen35)"; exit 2 ;;
+esac
 P="Write three sentences about the sea."
 LOAD=$(sysctl -n vm.loadavg 2>/dev/null | awk '{print $2}')
-echo "load average (1m) = ${LOAD:-?}  (tok/s valido solo se < ~2; la parita' vale sempre)"
+echo "model=$M arch=$ARCH load(1m)=${LOAD:-?}  (tok/s valido solo se < ~2; parita' sempre)"
 echo
 
 run() {
@@ -26,15 +34,14 @@ run() {
       | grep -aoE "\[[0-9]+ tok · [0-9.]+ tok/s · contesto [0-9]+ tok\]" | tail -1 )
   echo
 }
-# Gate REALE (llm_mlx_session_generate.c:640): LLM_COMPILE (master) && LLM_FIXKV (cache statiche)
-# && arch_supported (LLM_COMPILE_QWEN35). Senza questi il path compiled NON si attiva (resta eager).
 run "eager (baseline)"
-run "compiled qwen3_5 (NO_FUSE = parita')" LLM_COMPILE=1 LLM_FIXKV=1 LLM_COMPILE_QWEN35=1
-run "compiled+FUSE (fonde i pointwise = il payoff)" LLM_COMPILE=1 LLM_FIXKV=1 LLM_COMPILE_QWEN35=1 LLM_COMPILE_FUSE=1
+run "compiled (NO_FUSE = parita')" LLM_COMPILE=1 LLM_FIXKV=1 $ARCHENV
+run "compiled+FUSE (fonde i pointwise = il payoff)" LLM_COMPILE=1 LLM_FIXKV=1 $ARCHENV LLM_COMPILE_FUSE=1
 
 echo "== PARITA' (compiled+FUSE vs eager) =="
-eag=$(FASTLLM_NO_OFFLOAD_PROMPT=1 GEN_IDS=1 "$BIN" run "$M" "$P" --max-tokens 40 --opt temp=0 2>&1 | grep -a genid | sed 's/\[genid\] //' | tr '\n' ' ')
-fuse=$(LLM_COMPILE=1 LLM_FIXKV=1 LLM_COMPILE_QWEN35=1 LLM_COMPILE_FUSE=1 FASTLLM_NO_OFFLOAD_PROMPT=1 GEN_IDS=1 "$BIN" run "$M" "$P" --max-tokens 40 --opt temp=0 2>&1 | grep -a genid | sed 's/\[genid\] //' | tr '\n' ' ')
-[ "$(echo $eag)" = "$(echo $fuse)" ] && echo "  PARITA' OK" || echo "  DIVERGE (~1e-3 atteso: muro FUSE) -> isolare l'astype nella catena"
+norm(){ tr '\n' ' ' | tr -s ' '; }
+eag=$(FASTLLM_NO_OFFLOAD_PROMPT=1 GEN_IDS=1 "$BIN" run "$M" "$P" --max-tokens 40 --opt temp=0 2>&1 | grep -a genid | sed 's/\[genid\] //' | norm)
+fuse=$(env LLM_COMPILE=1 LLM_FIXKV=1 $ARCHENV LLM_COMPILE_FUSE=1 FASTLLM_NO_OFFLOAD_PROMPT=1 GEN_IDS=1 "$BIN" run "$M" "$P" --max-tokens 40 --opt temp=0 2>&1 | grep -a genid | sed 's/\[genid\] //' | norm)
+[ "$(echo $eag)" = "$(echo $fuse)" ] && echo "  PARITA' OK" || echo "  DIVERGE -> muro FUSE, isolare l'astype nella catena"
 echo
-echo "Se i tok/s non migliorano: payoff nullo (atenersi al tracker §V: build 2-3%/eval 97%)."
+echo "Se i tok/s non migliorano (in idle): payoff nullo."
