@@ -20,6 +20,8 @@ rm -rf "$D"; mkdir -p "$D"
 cp "$B/fastllm" "$D/"
 find "$B" -name '*.dylib' -not -path '*_deps*' -exec cp {} "$D/" \;
 find "$B" -maxdepth 2 -name '*.metallib' -not -path '*_deps*' -exec cp {} "$D/" \; 2>/dev/null || true
+# MLX cerca il metallib 'colocato' col nome <lib>.metallib / default.metallib accanto al binario
+for m in "$D"/mlx.metallib "$D"/mpp_q4.metallib; do [ -e "$m" ] && cp "$m" "$D/default.metallib"; done
 
 # 2) Riscrittura rpath -> @loader_path (idempotente)
 fix() {
