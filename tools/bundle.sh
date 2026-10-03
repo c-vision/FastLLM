@@ -20,7 +20,13 @@ rm -rf "$D"; mkdir -p "$D"
 cp "$B/fastllm" "$D/"
 find "$B" -name '*.dylib' -not -path '*_deps*' -exec cp {} "$D/" \;
 find "$B" -maxdepth 2 -name '*.metallib' -not -path '*_deps*' -exec cp {} "$D/" \; 2>/dev/null || true
-# MLX cerca il metallib 'colocato' col nome <lib>.metallib / default.metallib accanto al binario
+# MLX cerca il metallib "colocato" (mlx.metallib) accanto al binario. NB: il metallib del build
+# FastLLM puo' essere INCOMPLETO (senza i kernel steel bq64) -> se esiste quello completo del
+# dist LLMEnv, usalo (override con MLX_METALLIB_SRC).
+FULL_MLX="${MLX_METALLIB_SRC:-$(dirname "$0")/../../LLMEnv/build/dist/osx-arm64/mlx.metallib}"
+if [ -f "$FULL_MLX" ] && [ "$(strings "$FULL_MLX" 2>/dev/null | grep -c 'steel_attention_.*bq64')" -gt 0 ]; then
+  cp "$FULL_MLX" "$D/mlx.metallib"
+fi
 for m in "$D"/mlx.metallib "$D"/mpp_q4.metallib; do [ -e "$m" ] && cp "$m" "$D/default.metallib"; done
 
 # 2) Riscrittura rpath -> @loader_path (idempotente)
