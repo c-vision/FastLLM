@@ -31,6 +31,18 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../LLMEnv/LLMToken ${CMAKE_BINARY_D
 # Motore Jinja per i chat-template (`LLMJinja`: port di GMBasic/native/gmb_jinja). Layer
 # autonomo di LLMEnv; FastLLM lo consuma per rendere il `chat_template` reale del modello.
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../LLMEnv/LLMJinja ${CMAKE_BINARY_DIR}/llmjinja)
+
+# MLX sceglie DOVE generare `mlx.metallib` con la variabile `MLX_METAL_PATH` (default:
+# `<mlx-build>/mlx/backend/metal/kernels/`). A runtime MLX prova PRIMA il metallib COLOCATED
+# accanto al binario e solo dopo il path assoluto `METAL_PATH` (= `${MLX_METAL_PATH}/mlx.metallib`).
+# Col default, se in `build-release/` resta un `mlx.metallib` vecchio (es. pre-NAX, senza i kernel
+# `steel_attention_*_bq64_*`) quel file SHADOWA il metallib giusto e OGNI forward fallisce con
+# "function not found". Fissando `MLX_METAL_PATH` alla radice del build, MLX genera il metallib
+# COMPLETO direttamente accanto al binario: colocated e `METAL_PATH` sono lo STESSO file, quindi
+# non può esistere un doppio disallineato. Va impostato PRIMA di add_subdirectory(LLMEngine/mlx),
+# così `FetchContent` di mlx lo vede (variabile CACHE = globale).
+set(MLX_METAL_PATH "${CMAKE_BINARY_DIR}" CACHE PATH
+    "Dir dove MLX genera e carica mlx.metallib (colocated col binario)")
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../LLMEnv/LLMEngine/mlx ${CMAKE_BINARY_DIR}/llmengine_mlx)
 # Lane VISION/OCR: il motore llama.cpp/mtmd di LLMEnv (`llm_ai_llamacpp`). L'engine MLX ha
 # `vision_* = NULL`, quindi i modelli multimodali (VLM/OCR/ASR) passano da QUI. Nessuna collisione
@@ -45,7 +57,8 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../LLMEnv/LLMEngine/llama ${CMAKE_B
 # MLX carica `mlx.metallib` a runtime dal path ASSOLUTO compilato in libmlx (target `mlx-metallib`
 # di MLX). Senza il file, OGNI forward Metal fallisce. Il target esiste, ma MLX lo lascia
 # SCOLLEGATO di proposito (vedi il commento in kernels/CMakeLists.txt): qui lo riagganciamo,
-# perché per FastLLM "il motore compila" deve significare "il motore parte".
+# perché per FastLLM "il motore compila" deve significare "il motore parte". Grazie a
+# `MLX_METAL_PATH=${CMAKE_BINARY_DIR}` (sopra) il file generato è COLOCATED col binario.
 add_dependencies(llm_ai_mlx mlx-metallib)
 
 

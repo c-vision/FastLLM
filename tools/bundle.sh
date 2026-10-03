@@ -41,10 +41,14 @@ cp "$B/fastllm" "$D/"
 find "$B" -name '*.dylib' -not -path '*_deps*' -exec cp {} "$D/" \;
 find "$B" -maxdepth 2 -name '*.metallib' -not -path '*_deps*' -exec cp {} "$D/" \; 2>/dev/null || true
 
-# metallib MLX COMPLETO (con kernel steel bq64); override con MLX_METALLIB_SRC
-FULL_MLX="${MLX_METALLIB_SRC:-$(dirname "$0")/../../LLMEnv/build/dist/osx-arm64/mlx.metallib}"
-if [ -f "$FULL_MLX" ] && [ "$(strings "$FULL_MLX" 2>/dev/null | grep -c 'steel_attention_.*bq64')" -gt 0 ]; then
-  cp "$FULL_MLX" "$D/mlx.metallib"
+# metallib MLX COMPLETO (kernel steel bq64). Il build lo genera ORA colocated in $B
+# (fix MLX_METAL_PATH in CMakeLists.txt): se quello copiato ha bq64, è già quello giusto.
+# Altrimenti override: prima MLX_METALLIB_SRC, poi il dist LLMEnv (fallback storico).
+has_bq64() { [ -f "$1" ] && [ "$(strings "$1" 2>/dev/null | grep -c 'steel_attention_.*bq64')" -gt 0 ]; }
+if ! has_bq64 "$D/mlx.metallib"; then
+  for cand in "${MLX_METALLIB_SRC:-}" "$(dirname "$0")/../../LLMEnv/build/dist/osx-arm64/mlx.metallib"; do
+    if [ -n "$cand" ] && has_bq64 "$cand"; then cp "$cand" "$D/mlx.metallib"; break; fi
+  done
 fi
 for m in "$D"/mlx.metallib "$D"/mpp_q4.metallib; do [ -e "$m" ] && cp "$m" "$D/default.metallib"; done
 
