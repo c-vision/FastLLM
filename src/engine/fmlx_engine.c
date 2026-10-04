@@ -1,10 +1,11 @@
 /* fmlx_engine.c — risoluzione del modello, cache residente, tokenizer, eos, chat template.
  *
  * La risoluzione è deliberatamente TOLLERANTE su COME il client nomina il modello, ma
- * STRETTA su cosa accetta come directory: un path che esiste ed è una directory va bene,
- * altrimenti si prova il cache HF (layout `models--org--name`), altrimenti `$FMLX_MODELS_DIR`
- * (default `~/ai/Models`, il layout di `rapidmlx-nextgen pull`). Ogni fallimento ha la sua
- * frase: "non ho trovato il modello" e "l'ho trovato ma non carica" sono due da-fare diversi.
+ * STRETTA su cosa accetta come directory: un path esplicito va bene; altrimenti si prova il
+ * cache HF (layout `models--org--name`); altrimenti le directory di `fastllm paths`
+ * ($FASTLLM_HOME/paths). NON esiste un default implicito legato a una macchina. Ogni fallimento
+ * ha la sua frase: "non ho trovato il modello" e "l'ho trovato ma non carica" sono due da-fare
+ * diversi.
  */
 #include "fmlx_engine_internal.h"
 
@@ -12,6 +13,7 @@
 
 #include "fmlx/fmlx_hf.h"
 #include "fmlx/fmlx_json.h"
+#include "fmlx/fmlx_paths.h" /* percorsi di ricerca da file di config ($FASTLLM_HOME/paths) */
 
 #include <dirent.h>
 #include <errno.h>
@@ -472,33 +474,30 @@ static int resolve_dir(const char *cache_root, const char *name, char *out, size
         }
     }
 
-    /* directory dei modelli locale: $FMLX_MODELS_DIR, default ~/ai/Models. Il nome può
-     * arrivare con o senza namespace: si prova la forma intera e la sola basename. */
+    /* Percorsi di ricerca da FILE DI CONFIGURAZIONE ($FASTLLM_HOME/paths), cercati IN ORDINE.
+     * NON esiste un default implicito legato a una macchina (~/ai/Models e' stato rimosso): i
+     * percorsi li decide l'utente con `fastllm paths add` e vivono in un file leggibile. Il nome
+     * puo' arrivare con o senza namespace: si prova la forma intera e la sola basename. */
     {
-        const char *md = getenv("FMLX_MODELS_DIR");
-        char mdir[FMLX_ENGINE_PATH_MAX];
-        if (!md || !*md) {
-            if (expand_tilde("~/ai/Models", mdir, sizeof mdir) != 0) mdir[0] = '\0';
-        } else {
-            snprintf(mdir, sizeof mdir, "%s", md);
-        }
-        if (mdir[0]) {
+        int np = fmlx_paths_count(), pi;
+        for (pi = 0; pi < np; pi++) {
+            char pdir[FMLX_PATHS_DIR_MAX];
             char try1[FMLX_ENGINE_PATH_MAX];
-            if (snprintf(try1, sizeof try1, "%s/%s", mdir, name) < (int)sizeof try1 &&
+            if (fmlx_paths_get(pi, pdir, sizeof pdir) != 0 || !pdir[0]) continue;
+            if (snprintf(try1, sizeof try1, "%s/%s", pdir, name) < (int)sizeof try1 &&
                 (path_is_dir(try1) || (path_is_file(try1) && is_gguf_path(try1)))) {
                 snprintf(out, cap, "%s", try1);
                 return 0;
             }
-            if (snprintf(try1, sizeof try1, "%s/%s", mdir, base_name(name)) <
-                    (int)sizeof try1 &&
+            if (snprintf(try1, sizeof try1, "%s/%s", pdir, base_name(name)) < (int)sizeof try1 &&
                 (path_is_dir(try1) || (path_is_file(try1) && is_gguf_path(try1)))) {
                 snprintf(out, cap, "%s", try1);
                 return 0;
             }
         }
     }
-    set_err(err, errcap, "model '%s' is not a local path, not in the HF cache, and not under "
-                         "$FMLX_MODELS_DIR",
+    set_err(err, errcap, "model '%s' is not a local path, not in the HF cache, and not in any "
+                         "`fastllm paths` search directory",
             name);
     return -1;
 }

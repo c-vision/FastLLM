@@ -240,6 +240,7 @@ add_test(NAME api COMMAND test_api)
 add_library(fmlx_serve STATIC src/server/fmlx_serve_respond.c src/server/fmlx_serve_admin.c
                              src/server/fmlx_serve_metrics.c
                              src/server/fmlx_serve.c src/engine/fmlx_engine.c
+                             src/engine/fmlx_paths.c
                              src/engine/fmlx_engine_gen.c src/engine/fmlx_tools.c
                              src/engine/fmlx_vision.c src/server/fmlx_serve_vision.c)
 target_include_directories(fmlx_serve PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -286,7 +287,9 @@ add_test(NAME tools COMMAND test_tools)
 add_library(fmlx_cli STATIC src/cli/fmlx_pull.c src/cli/fmlx_models.c src/cli/fmlx_cli.c
                             src/cli/fmlx_pull_progress.c src/cli/fmlx_serve.c src/cli/fmlx_doctor.c
                             src/cli/fmlx_gen.c src/cli/fmlx_run.c src/cli/fmlx_chat.c
-                            src/cli/fmlx_ps.c src/cli/fmlx_banner.c src/cli/fmlx_registry.c)
+                            src/cli/fmlx_ps.c src/cli/fmlx_banner.c src/cli/fmlx_registry.c
+                            src/cli/fmlx_paths_cmd.c src/cli/fmlx_search_cmd.c
+                            src/cli/fmlx_test_cmd.c)
 target_include_directories(fmlx_cli PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
                                       ${CMAKE_CURRENT_SOURCE_DIR}/../LLMEnv/LLMEngine/mlx
                                       ${CMAKE_CURRENT_SOURCE_DIR}/../LLMEnv/LLMEngine/Options
@@ -295,7 +298,7 @@ target_include_directories(fmlx_cli PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
 # `fmlx_serve` tra le dipendenze PUBBLICHE: il verbo c'è solo se il loop c'è, e un `serve` che
 # compilasse senza il socket sarebbe il "comando che risponde di sì" che il piano vieta. Da lì
 # arrivano anche `llm_ai_mlx`/`llmtoken`/`llmjinja`, cioè il motore di cui `run`/`chat` si servono.
-target_link_libraries(fmlx_cli PUBLIC fmlx_hf_fetch fmlx_serve)
+target_link_libraries(fmlx_cli PUBLIC fmlx_hf_fetch fmlx_serve llmcodec llmcodec_ggml)
 
 add_executable(fastllm src/cli/fastllm_main.c)
 target_link_libraries(fastllm PRIVATE fmlx_cli)

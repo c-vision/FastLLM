@@ -55,7 +55,7 @@ typedef struct FmlxEngineModel FmlxEngineModel;
 /* Una generazione in corso, usabile come `FmlxApiNext` via `fmlx_engine_next`. */
 typedef struct FmlxEngineGen FmlxEngineGen;
 
-/* Risolve `name` (repo id HF, path assoluto/relativo, o nome sotto $FMLX_MODELS_DIR) e carica
+/* Risolve `name` (repo id HF, path assoluto/relativo, o nome sotto una dir di `fastllm paths`) e carica
  * il modello nella cache residente. `cache_root` è la radice del cache HF da usare (NULL = la
  * regola d'ambiente): la STESSA che `/v1/models` elenca, così `--cache` non mente. Ritorna NULL
  * e scrive la causa in `err`. Il secondo chiamante con lo stesso nome riusa il modello in RAM. */

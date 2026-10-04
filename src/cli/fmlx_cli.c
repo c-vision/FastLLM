@@ -49,6 +49,12 @@ void fmlx_cli_usage(FILE *out) {
             "  add <nome> <path>      registra un modello locale per percorso (dir MLX, .gguf, VLM)\n"
             "  rm <nome|#n>           toglie un modello dal registro (--purge: cancella i file)\n"
             "  show <nome|#n>         i dettagli di una voce del registro\n"
+            "  paths [add <dir>|rm <n>|scan]   percorsi di ricerca dei modelli (file di config):\n"
+            "                         `paths` li elenca (numerati), `add <dir>` ne aggiunge uno,\n"
+            "                         `rm <n>` toglie quello con quel progressivo, `scan [--json]`\n"
+            "                         inventaria dove ESISTONO modelli\n"
+            "  search [<dir>]         trova i MODELLI (--roots: le cartelle radice); default: tutti i dischi\n"
+            "  test <nome|#n|path>    verifica che il modello sia COMPLETO e non corrotto su disco\n"
             "\n"
             "GENERAZIONE\n"
             "  run <nome|#n> [prompt] una generazione col motore; il testo esce token-live\n"
@@ -118,6 +124,68 @@ static void usage_verb(FILE *out, const char *v) {
             "  fastllm models qwen\n"
             "  fastllm models mlx-community/* --cache ~/.cache/huggingface --json\n"
             "  fastllm models --quiet\n");
+    else if (!strcmp(v, "paths"))
+        fprintf(out,
+            "fastllm paths [add <dir> | rm <n> | scan [--json]]\n"
+            "  (nessun argomento)     elenca i percorsi configurati, NUMERATI (progressivo per rm)\n"
+            "  add <dir>              aggiunge una directory ai percorsi di ricerca\n"
+            "  rm <n>                 rimuove il percorso con il progressivo <n>\n"
+            "  scan [--json]          scansiona i percorsi e dice dove sono i modelli\n"
+            "  --json                 per `scan`: inventario JSON\n"
+            "  -h, --help             questo testo\n"
+            "\n"
+            "I percorsi stanno in $FASTLLM_HOME/paths (default ~/.fastllm/paths), una directory per\n"
+            "riga. Sono cercati, IN ORDINE, dopo il path esplicito e il cache Hugging Face.\n"
+            "Nessun default implicito legato alla macchina: le directory di ricerca le decidi qui.\n"
+            "\n"
+            "esempi:\n"
+            "  fastllm paths\n"
+            "  fastllm paths add ~/ai/Models\n"
+            "  fastllm paths add /Volumes/Armor5TB/ai/Models\n"
+            "  fastllm paths rm 2\n"
+            "  fastllm paths scan --json\n");
+    else if (!strcmp(v, "search"))
+        fprintf(out,
+            "fastllm search [<dir>] [--roots] [--type <t>] [--walk] [--max-depth <n>] [--json]\n"
+            "  <dir>                  radice da cui partire (default: TUTTI i dischi accessibili)\n"
+            "  --roots                mostra le CARTELLE RADICE (tree coi modelli dentro)\n"
+            "  --type <mlx|gguf|hf>   filtra per tipo (default: tutti)\n"
+            "  --walk                 forza il walk del filesystem (niente Spotlight)\n"
+            "  --max-depth <n>        tetto di profondita' del walk (default: NESSUN tetto)\n"
+            "  --json                 la stessa lista in JSON\n"
+            "  -h, --help             questo testo\n"
+            "\n"
+            "DEFAULT: lista NUMERATA e ALFABETICA dei MODELLI. Il NOME su una riga, il PERCORSO\n"
+            "sotto (stile tree), senza accorciature; i DUPLICATI si mostrano tutti.\n"
+            "CON --roots: un TREE delle cartelle RADICE, coi modelli annidati sotto ciascuna.\n"
+            "\n"
+            "Un MODELLO e': una dir con `config.json` + un file di pesi (*.safetensors/.bin/.npz/...),\n"
+            "un FILE `*.gguf` (>= 1 MB, non `ggml-vocab-*`) — una cartella con N gguf da' N modelli —\n"
+            "oppure un repo-cache HF (`models--org--nome`).\n"
+            "Senza <dir>: Spotlight (mdfind) + walk di ogni volume montato + $HOME + i percorsi di `paths`.\n"
+            "\n"
+            "esempi:\n"
+            "  fastllm search\n"
+            "  fastllm search ~/ai --max-depth 4\n"
+            "  fastllm search ~/ai --roots --max-depth 4\n"
+            "  fastllm search /Volumes/Armor5TB --type gguf --json\n");
+    else if (!strcmp(v, "test"))
+        fprintf(out,
+            "fastllm test <nome|#n|percorso>\n"
+            "  <nome|#n|percorso>     alias del registro, indice (#n), o path/id/`paths`\n"
+            "  -h, --help             questo testo\n"
+            "\n"
+            "Verifica che il modello sia COMPLETO su disco e non corrotto, SENZA caricarlo:\n"
+            "  - GGUF (file): header col lettore canonico + i tensori che ci stanno nel file;\n"
+            "  - MLX/HF (dir): config.json, pesi presenti, header safetensors validi;\n"
+            "  - repo-cache HF: blob e snapshot presenti (nessun symlink rotto);\n"
+            "  - in tutti: marker di download incompleto (*.part/*.incomplete/*.download/*.tmp).\n"
+            "Uscita 0 = COMPLETO, 1 = problema (col motivo).\n"
+            "\n"
+            "esempi:\n"
+            "  fastllm test ds4\n"
+            "  fastllm test ~/ai/Models/Qwen3-8B-4bit\n"
+            "  fastllm test /Volumes/Armor5TB/LocalLLM/ai/models/Qwen3.8-27B-DFlash2\n");
     else if (!strcmp(v, "list") || !strcmp(v, "ls"))
         fprintf(out,
             "fastllm list   (alias: ls)   [opzioni]\n"
@@ -166,7 +234,7 @@ static void usage_verb(FILE *out, const char *v) {
     else if (!strcmp(v, "run"))
         fprintf(out,
             "fastllm run <nome|#n> [prompt] [opzioni]\n"
-            "  <nome|#n>              alias del registro, indice (#n), o path/id HF/$FMLX_MODELS_DIR\n"
+            "  <nome|#n>              alias del registro, indice (#n), path/id HF, o dir di `paths`\n"
             "  [prompt]               one-shot; senza, legge una riga per volta da stdin\n"
             "  --cache <dir>          radice da cui risolvere il modello\n"
             "  --system <testo>       messaggio di sistema anteposto\n"
@@ -182,7 +250,7 @@ static void usage_verb(FILE *out, const char *v) {
     else if (!strcmp(v, "chat"))
         fprintf(out,
             "fastllm chat <nome|#n> [opzioni]   (REPL: /exit /quit /clear /new /system /thinking /prompt /compact /help)\n"
-            "  <nome|#n>              alias del registro, indice (#n), o path/id HF/$FMLX_MODELS_DIR\n"
+            "  <nome|#n>              alias del registro, indice (#n), path/id HF, o dir di `paths`\n"
             "  --cache <dir>          radice da cui risolvere il modello\n"
             "  --system <testo>       system iniziale (modificabile con /system)\n"
             "  --max-tokens <n>       tetto sui token generati\n"
@@ -267,7 +335,7 @@ static const char *missing_piece(const char *verb) {
 static int is_verb(const char *v) {
     static const char *const known[] = {"pull", "run", "chat",  "serve", "models",
                                         "list", "ls",  "ps",    "cp",    "rm",    "doctor",
-                                        "add",  "show", "help",  "options"};
+                                        "add",  "show", "help",  "options", "paths", "search", "test"};
     size_t i;
     for (i = 0; i < sizeof known / sizeof known[0]; i++)
         if (!strcmp(v, known[i])) return 1;
@@ -314,6 +382,7 @@ enum {
     F_JSON, F_MAXTOKENS, F_SYSTEM, F_THINK, F_OFFLOAD,
     F_MMPROJ, F_MODALITY, F_PURGE,
     F_OPT,
+    F_WALK, F_MAXDEPTH, F_ROOTS, F_TYPE,
     F_N
 };
 #define F_PULL_ONLY                                                                                            \
@@ -336,13 +405,13 @@ enum {
  * semantiche con la stessa grafia sono peggio di un rifiuto. */
 #define F_BOOLEANI                                                                                             \
     ((1u << F_QUIET) | (1u << F_OFFLINE) | (1u << F_REPAIR) | (1u << F_ONCE) | (1u << F_JSON) |                \
-     (1u << F_THINK) | (1u << F_OFFLOAD) | (1u << F_PURGE))
+     (1u << F_THINK) | (1u << F_OFFLOAD) | (1u << F_PURGE) | (1u << F_WALK) | (1u << F_ROOTS))
 
 static const char *const FLN[F_N] = {
     "--quiet",    "--cache",        "--revision", "--endpoint", "--max-bytes", "--stall-timeout",
     "--stall-retries", "--dest",     "--offline",  "--repair",   "--host",      "--port",
     "--max-body", "--once",         "--vision-model", "--vision-mmproj", "--json", "--max-tokens", "--system", "--think",
-    "--offload-experts", "--mmproj", "--modality", "--purge", "--opt"};
+    "--offload-experts", "--mmproj", "--modality", "--purge", "--opt", "--walk", "--max-depth", "--roots", "--type"};
 
 /* Il bit della bandiera `n`, 0 se la bandiera non esiste. */
 static unsigned flag_bit(const char *n) {
@@ -410,6 +479,13 @@ FmlxCliStatus fmlx_cli_parse(int argc, char **argv, FmlxCliArgs *out, char *msg,
                                     (int)sizeof out->path);
                     continue;
                 }
+                /* `paths add <dir>` / `paths rm <n>`: il sottocomando è `repo`, l'argomento è `path`. */
+                if (!strcmp(out->verb, "paths") && !out->path[0]) {
+                    if (snprintf(out->path, sizeof out->path, "%s", a) >= (int)sizeof out->path)
+                        return fail(out, msg, msg_len, "paths: l'argomento supera %d byte",
+                                    (int)sizeof out->path);
+                    continue;
+                }
                 return fail(out, msg, msg_len, "troppi argomenti posizionali: %s", a);
             }
             snprintf(out->repo, sizeof out->repo, "%s", a);
@@ -440,6 +516,8 @@ FmlxCliStatus fmlx_cli_parse(int argc, char **argv, FmlxCliArgs *out, char *msg,
         if (!strcmp(name, "--think")) { out->show_think = 1; continue; }
         if (!strcmp(name, "--offload-experts")) { out->offload_experts = 1; continue; }
         if (!strcmp(name, "--purge")) { out->purge = 1; continue; }
+        if (!strcmp(name, "--walk")) { out->search_walk = 1; continue; }
+        if (!strcmp(name, "--roots")) { out->search_roots = 1; continue; }
 
         /* Una bandiera che vuole un valore e non ce l'ha è un errore ANCHE se il valore sarebbe
          * vuoto: `--dest ""` non significa "dest: nessuna", significa che qualcuno ha costruito il
@@ -498,6 +576,14 @@ FmlxCliStatus fmlx_cli_parse(int argc, char **argv, FmlxCliArgs *out, char *msg,
             if (!parse_num(val, 1, LLONG_MAX, &n))
                 return fail(out, msg, msg_len, "--max-tokens: '%s' non è un numero >= 1", val);
             out->max_tokens = n;
+        } else if (!strcmp(name, "--type")) {
+            if (strcmp(val, "mlx") && strcmp(val, "gguf") && strcmp(val, "hf"))
+                return fail(out, msg, msg_len, "--type: '%s' non è mlx|gguf|hf", val);
+            snprintf(out->search_type, sizeof out->search_type, "%s", val);
+        } else if (!strcmp(name, "--max-depth")) {
+            if (!parse_num(val, 1, 4096, &n))
+                return fail(out, msg, msg_len, "--max-depth: '%s' non è un numero >= 1", val);
+            out->search_max_depth = (int)n;
         } else if (!strcmp(name, "--system")) {
             out->system = val;
         } else if (!strcmp(name, "--opt")) {
@@ -572,6 +658,10 @@ FmlxCliStatus fmlx_cli_parse(int argc, char **argv, FmlxCliArgs *out, char *msg,
         else if (!strcmp(out->verb, "run") || !strcmp(out->verb, "chat")) allowed |= F_RUNCHAT_ONLY;
         else if (!strcmp(out->verb, "ps")) allowed |= F_PS_ONLY;
         else if (!strcmp(out->verb, "add")) allowed |= F_ADD_ONLY;
+        else if (!strcmp(out->verb, "paths")) allowed |= (1u << F_JSON);
+        else if (!strcmp(out->verb, "search"))
+            allowed |= (1u << F_JSON) | (1u << F_WALK) | (1u << F_MAXDEPTH) | (1u << F_ROOTS) | (1u << F_TYPE);
+        else if (!strcmp(out->verb, "test")) allowed |= 0; /* solo le condivise (--quiet) */
         else if (!strcmp(out->verb, "rm")) allowed |= F_RM_ONLY;
         else if (!strcmp(out->verb, "show") || !strcmp(out->verb, "help")) allowed |= 0;
         else has_surface = 0; /* cp: nessuna superficie da difendere */
@@ -719,6 +809,9 @@ FmlxCliStatus fmlx_cli_exec_with(const FmlxCliArgs *a_in, const FmlxHfTransport 
         return fmlx_registry_list_exec(a, out, err);
     if (!strcmp(a->verb, "models"))
         return fmlx_models_exec(a, out, err);
+    if (!strcmp(a->verb, "paths")) return fmlx_paths_exec(a, out, err);
+    if (!strcmp(a->verb, "search")) return fmlx_search_exec(a, out, err);
+    if (!strcmp(a->verb, "test")) return fmlx_test_exec(a, out, err);
     if (!strcmp(a->verb, "doctor"))
         /* Nemmeno qui il transport viene guardato: l'audit hashà ciò che è già su disco, e una
          * rete finta non aggiungerebbe nessuna prova — semmai ne toglierebbe, perché il verdetto

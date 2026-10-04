@@ -96,6 +96,10 @@ typedef struct {
     int quiet;
     int json;      /* `models --json`: la stessa tabella in forma macchina-leggibile */
     int want_help; /* -h/--help: NON è un errore, e l'uscita è 0 */
+    int search_walk;      /* `search --walk`: forza il walk del filesystem (niente Spotlight) */
+    int search_max_depth; /* `search --max-depth N`: tetto di profondita' (0 = nessun tetto) */
+    int search_roots;     /* `search --roots`: mostra le cartelle RADICE (tree), non i singoli modelli */
+    char search_type[8];  /* `search --type`: filtra mlx|gguf|hf (vuoto = tutti) */
     /* Parametri del motore (registro, NIENTE env): `--opt nome=valore`, ripetibile. */
     char opts[16][192];
     int  n_opts;
@@ -132,6 +136,15 @@ FmlxCliStatus fmlx_ps_exec(const FmlxCliArgs *a, FILE *out, FILE *err);
  * Con `a->quiet` una riga per repo (id e basta): la forma per i parse di una shell.
  * `out`/`err` separate come per il `pull`: l'elenco è dato, i problemi no. */
 FmlxCliStatus fmlx_models_exec(const FmlxCliArgs *a, FILE *out, FILE *err);
+
+/* `fastllm paths` — percorsi di ricerca modelli (file di config): list/add/rm/scan. */
+FmlxCliStatus fmlx_paths_exec(const FmlxCliArgs *a, FILE *out, FILE *err);
+
+/* `fastllm search [<path>]` — trova le cartelle-modello; senza <path>, su tutti i dischi accessibili. */
+FmlxCliStatus fmlx_search_exec(const FmlxCliArgs *a, FILE *out, FILE *err);
+
+/* `fastllm test <nome|#n|path>` — il modello e' completo su disco e non corrotto? */
+FmlxCliStatus fmlx_test_exec(const FmlxCliArgs *a, FILE *out, FILE *err);
 
 /* ---- registro locale (stile Ollama) — src/cli/fmlx_registry.c ---- */
 
