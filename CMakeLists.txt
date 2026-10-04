@@ -54,6 +54,12 @@ if(APPLE)
 endif()
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../LLMEnv/LLMEngine/llama ${CMAKE_BINARY_DIR}/llmengine_llama)
 
+# Motore ds4 VENDORIZZATO (LLMEnv/LLMEngine/ds4engine): espone l'ABI `llmengine_llm_engine_ds4()`,
+# usata da fmlx per i GGUF DeepSeek-V4 (piu' veloce del motore DS4 nativo). Richiede OBJC (ds4_metal.m).
+if(APPLE)
+  add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../LLMEnv/LLMEngine/ds4engine ${CMAKE_BINARY_DIR}/ds4engine)
+endif()
+
 # MLX carica `mlx.metallib` a runtime dal path ASSOLUTO compilato in libmlx (target `mlx-metallib`
 # di MLX). Senza il file, OGNI forward Metal fallisce. Il target esiste, ma MLX lo lascia
 # SCOLLEGATO di proposito (vedi il commento in kernels/CMakeLists.txt): qui lo riagganciamo,
@@ -250,6 +256,9 @@ target_include_directories(fmlx_serve PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
 # `llmtoken` (dylib nel build tree). La generazione non è opzionale in questa lane: un
 # `fastllm serve` che non potesse generare sarebbe il comando-che-risponde-di-sì.
 target_link_libraries(fmlx_serve PUBLIC fmlx_api fmlx_hf llm_ai_mlx llmtoken llmjinja llm_ai_llamacpp)
+if(APPLE)
+  target_link_libraries(fmlx_serve PUBLIC ds4engine)
+endif()
 
 # Il work directory qui serve DAVVERO: `/v1/models` e `/health` leggono il cache da disco, quindi
 # o il test costruisce un cache finto su disco, o sta provando un cammino che non ha mai corso.
@@ -302,6 +311,13 @@ target_link_libraries(fmlx_cli PUBLIC fmlx_hf_fetch fmlx_serve llmcodec llmcodec
 
 add_executable(fastllm src/cli/fastllm_main.c)
 target_link_libraries(fastllm PRIVATE fmlx_cli)
+# Il motore ds4 resolve i sorgenti Metal accanto all'ESEGUIBILE: copiali nel dir del binario.
+if(APPLE)
+  add_custom_command(TARGET fastllm POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+      ${CMAKE_CURRENT_SOURCE_DIR}/../LLMEnv/LLMEngine/ds4engine/metal
+      $<TARGET_FILE_DIR:fastllm>/metal)
+endif()
 
 # Il `pull` contro un server finto: cache reale su disco, byte finti, zero rete.
 add_executable(test_pull tests/cli/test_pull.c)

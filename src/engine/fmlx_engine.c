@@ -573,6 +573,13 @@ int fmlx_engine_load(const char *cache_root, const char *name, FmlxEngineModel *
     }
 
     out->eng = llmengine_llm_engine_mlx();
+    /* DS4 (firma GGUF "deepseek4"): usa il MOTORE ds4 VENDORIZZATO (piu' veloce del nativo:
+     * prefill ~2x, decode ~1.35x). Rilevato dalla firma, non dal nome. */
+    {
+        size_t dn = strlen(out->dir);
+        if (dn > 5 && strcmp(out->dir + dn - 5, ".gguf") == 0 && llm_ai_mlx_gguf_supported(out->dir) == 1)
+            out->eng = llmengine_llm_engine_ds4();
+    }
     if (!out->eng || !out->eng->load_model) {
         snprintf(err, errcap, "the MLX engine vtable is not available in this build");
         return -1;
