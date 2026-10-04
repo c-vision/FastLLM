@@ -27,6 +27,16 @@
 #include <mach/mach.h>
 #include <mach/mach_host.h>
 #endif
+#include <dlfcn.h>
+
+/* Risolve un accessor d'engine (`llmengine_llm_engine_*`) per NOME: il consumatore NON linka
+ * hard i simboli degli engine opzionali (ds4 vendored, ds4-slow, ds41), cosi' le loro cartelle
+ * restano cancellabili senza errori di compilazione/link. Fallback: l'engine MLX. */
+static const LlmEngineLlmEngine* fmlx_engine_symbol(const char* name) {
+    const LlmEngineLlmEngine* (*fn)(void);
+    *(void**)(&fn) = dlsym(RTLD_DEFAULT, name);
+    return fn ? fn() : NULL;
+}
 
 /* Offload esperti: `--offload-experts` (CLI) o attivato dal prompt Y/N (vedi sotto). */
 static int g_offload_experts = 0;
@@ -609,10 +619,13 @@ int fmlx_engine_load(const char *cache_root, const char *name, FmlxEngineModel *
              * nativa "ds4-slow" (opzione di registro `ds4_backend=slow`). */
             char bk[16]; bk[0] = 0;
             int slow = (llm_ai_mlx_opt_get_str("ds4_backend", bk, sizeof bk) == 0) && strcmp(bk, "slow") == 0;
-            out->eng = slow ? llmengine_llm_engine_ds4slow() : llmengine_llm_engine_ds4();
+            const LlmEngineLlmEngine* e = fmlx_engine_symbol(slow ? "llmengine_llm_engine_ds4slow" : "llmengine_llm_engine_ds4");
+            if (e == NULL && !slow) e = fmlx_engine_symbol("llmengine_llm_engine_ds4slow");
+            if (e != NULL) out->eng = e;   /* altrimenti resta l'engine MLX */
         } else if (is_dsv41_dir(out->dir)) {
             /* DS4.1 (deepseek_v41): motore `ds41-native`, stessi 9 metodi dell'ABI. */
-            out->eng = llmengine_llm_engine_ds41();
+            const LlmEngineLlmEngine* e = fmlx_engine_symbol("llmengine_llm_engine_ds41");
+            if (e != NULL) out->eng = e;
         }
     }
     if (!out->eng || !out->eng->load_model) {
