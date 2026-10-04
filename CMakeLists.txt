@@ -62,6 +62,9 @@ if(APPLE)
   # `llmengine_llm_engine_ds4()` (il motore ds4 vendorizzato) invece dell'inline nativo.
   if(TARGET ds4engine)
     target_link_libraries(llm_ai_mlx PUBLIC ds4engine)
+    # Riferimento diretto all'accessor vendored (default DS4) -> il simbolo entra in libllm_ai_mlx
+    # ed e' visibile anche via dlsym (fmlx/GMBasic). ds4-slow resta dlsym-only (cancellabile).
+    target_compile_definitions(llm_ai_mlx PRIVATE LLM_HAVE_DS4ENGINE=1)
   endif()
 endif()
 
