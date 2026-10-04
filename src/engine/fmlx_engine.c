@@ -577,8 +577,13 @@ int fmlx_engine_load(const char *cache_root, const char *name, FmlxEngineModel *
      * prefill ~2x, decode ~1.35x). Rilevato dalla firma, non dal nome. */
     {
         size_t dn = strlen(out->dir);
-        if (dn > 5 && strcmp(out->dir + dn - 5, ".gguf") == 0 && llm_ai_mlx_gguf_supported(out->dir) == 1)
-            out->eng = llmengine_llm_engine_ds4();
+        if (dn > 5 && strcmp(out->dir + dn - 5, ".gguf") == 0 && llm_ai_mlx_gguf_supported(out->dir) == 1) {
+            /* Due implementazioni DS4 dietro la STESSA ABI: il vendorizzato (default) e la nostra
+             * nativa "ds4-slow" (opzione di registro `ds4_backend=slow`). */
+            char bk[16]; bk[0] = 0;
+            int slow = (llm_ai_mlx_opt_get_str("ds4_backend", bk, sizeof bk) == 0) && strcmp(bk, "slow") == 0;
+            out->eng = slow ? llmengine_llm_engine_ds4slow() : llmengine_llm_engine_ds4();
+        }
     }
     if (!out->eng || !out->eng->load_model) {
         snprintf(err, errcap, "the MLX engine vtable is not available in this build");
