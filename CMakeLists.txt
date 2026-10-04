@@ -58,6 +58,11 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../LLMEnv/LLMEngine/llama ${CMAKE_B
 # usata da fmlx per i GGUF DeepSeek-V4 (piu' veloce del motore DS4 nativo). Richiede OBJC (ds4_metal.m).
 if(APPLE)
   add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../LLMEnv/LLMEngine/ds4engine ${CMAKE_BINARY_DIR}/ds4engine)
+  # llm_ai_mlx DEVE linkare ds4engine: per i GGUF DeepSeek-V4 usa l'interfaccia
+  # `llmengine_llm_engine_ds4()` (il motore ds4 vendorizzato) invece dell'inline nativo.
+  if(TARGET ds4engine)
+    target_link_libraries(llm_ai_mlx PUBLIC ds4engine)
+  endif()
 endif()
 
 # MLX carica `mlx.metallib` a runtime dal path ASSOLUTO compilato in libmlx (target `mlx-metallib`

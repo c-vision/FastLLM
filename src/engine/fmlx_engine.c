@@ -198,6 +198,33 @@ static int is_gguf_path(const char *p) {
     return n > 5 && strcmp(p + n - 5, ".gguf") == 0;
 }
 
+/* DS4.1: directory con config.json che dichiara `"deepseek_v41"` (release HF root). Rilevato
+ * dalla firma, non dal nome: instrada al motore `ds41-native` (stessi 9 metodi dell'ABI). */
+static int is_dsv41_dir(const char *dir) {
+    char p[4096];
+    FILE *f;
+    long n;
+    char *b;
+    int hit = 0;
+    if (!dir || !*dir) return 0;
+    if ((size_t)snprintf(p, sizeof p, "%s/config.json", dir) >= sizeof p) return 0;
+    f = fopen(p, "rb");
+    if (!f) return 0;
+    if (fseek(f, 0, SEEK_END) != 0 || (n = ftell(f)) <= 0 || n > (1 << 20) || fseek(f, 0, SEEK_SET) != 0) {
+        fclose(f);
+        return 0;
+    }
+    b = (char *)malloc((size_t)n + 1);
+    if (b) {
+        size_t rd = fread(b, 1, (size_t)n, f);
+        b[rd] = 0;
+        hit = strstr(b, "\"deepseek_v41\"") != NULL;
+        free(b);
+    }
+    fclose(f);
+    return hit;
+}
+
 /* Legge un file intero in una stringa malloc (NUL-terminata). NULL su errore. */
 static char *read_file(const char *path, size_t *out_len) {
     FILE *f = fopen(path, "rb");
@@ -583,6 +610,9 @@ int fmlx_engine_load(const char *cache_root, const char *name, FmlxEngineModel *
             char bk[16]; bk[0] = 0;
             int slow = (llm_ai_mlx_opt_get_str("ds4_backend", bk, sizeof bk) == 0) && strcmp(bk, "slow") == 0;
             out->eng = slow ? llmengine_llm_engine_ds4slow() : llmengine_llm_engine_ds4();
+        } else if (is_dsv41_dir(out->dir)) {
+            /* DS4.1 (deepseek_v41): motore `ds41-native`, stessi 9 metodi dell'ABI. */
+            out->eng = llmengine_llm_engine_ds41();
         }
     }
     if (!out->eng || !out->eng->load_model) {
