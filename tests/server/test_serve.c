@@ -1127,6 +1127,39 @@ static void case_stop_signal(void) {
     case_signal_exit(SIGINT, "SIGINT", 9200 + base);
 }
 
+/* D14-M0: uno slowloris — una testata che inizia e NON finisce — non deve appendere il server
+ * (che serve UNA connessione alla volta). Col timeout di inattivita' il server CHIUDE da sé: il
+ * `recv` del client ritorna 0 (peer chiuso) entro il timeout del server (300 ms), invece di
+ * restare appeso fino al timeout lato client (2 s) e poi fallire con EAGAIN. */
+static void case_read_timeout(void) {
+    int port = 8700 + (int)(getpid() % 100);
+    const char *part = "GET /v1/models HTTP/1.1\r\nHost: 127.0.0.1";
+    char buf[64];
+    pid_t pid;
+    int fd, w = 0;
+    ssize_t n;
+
+    setenv("FMLX_SERVE_KEEPALIVE_MS", "300", 1); /* inattivita' corta: il test non attende 2 s */
+    pid = serve_child(port, 1);
+    unsetenv("FMLX_SERVE_KEEPALIVE_MS"); /* il figlio ha gia' la sua copia dell'ambiente */
+    if (pid < 0) return;
+    fd = connect_child(port);
+    if (fd < 0) {
+        CK(0, "il server non ha ascoltato su 127.0.0.1:%d", port);
+        kill(pid, SIGKILL);
+        waitpid(pid, &w, 0);
+        return;
+    }
+    if (write(fd, part, strlen(part)) != (ssize_t)strlen(part))
+        CK(0, "invio della testata parziale");
+    n = recv(fd, buf, sizeof buf, 0);
+    CK(n == 0, "slowloris: atteso close dal server (recv=0), avuto %zd%s%s", n,
+       n < 0 ? " errno=" : "", n < 0 ? strerror(errno) : "");
+    close(fd);
+    kill(pid, SIGKILL);
+    waitpid(pid, &w, 0);
+}
+
 /* ============================================================================ */
 
 int main(int argc, char **argv) {
@@ -1151,6 +1184,7 @@ int main(int argc, char **argv) {
     case_env();
     case_round_trip();
     case_continue_100();
+    case_read_timeout();
     case_addr_in_use();
     case_no_perm();
     case_stop_signal();

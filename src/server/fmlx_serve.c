@@ -33,6 +33,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/time.h> /* SO_RCVTIMEO/SO_SNDTIMEO (D14-M0) */
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -85,6 +86,9 @@ static int write_all(int fd, const char *p, size_t n) {
             continue;
         }
         if (w < 0 && errno == EINTR) continue;
+        /* EAGAIN/EWOULDBLOCK = SO_SNDTIMEO scaduto: il client non legge. Chiudere è l'unica
+         * risposta onesta — una risposta a metà è peggio di una connessione chiusa. */
+        if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return -1;
         return -1;
     }
     return 0;
@@ -185,8 +189,24 @@ static int fmlx_serve_keepalive_ms(const FmlxServeOpts *o) {
     return 2000;
 }
 
+/* D14-M0: SO_RCVTIMEO/SO_SNDTIMEO sulla connessione. `ms<=0` = nessun timeout (comportamento di
+ * prima). Il timeout di LETTURA trasforma uno slowloris — una testata o un corpo che avanza a
+ * singhiozzo senza mai completarsi — in una connessione CHIUSA invece che in un server bloccato
+ * (il server serve UNA connessione alla volta); quello di SCRITTURA fa lo stesso per un client che
+ * smette di leggere lo stream. Riusa lo stesso valore dell'idle keep-alive: entrambi sono un
+ * timeout di INATTIVITA', e averne due divergenti sarebbe due server diversi. */
+static void fmlx_serve_set_conn_timeout(int fd, int ms) {
+    if (ms <= 0) return;
+    struct timeval tv;
+    tv.tv_sec = ms / 1000;
+    tv.tv_usec = (ms % 1000) * 1000;
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+}
+
 static void serve_conn(int fd, const FmlxServeOpts *o, FmlxServeBuf *sbuf, Conn *cn, FILE *log,
                        unsigned *req_no, const volatile sig_atomic_t *stop) {
+    fmlx_serve_set_conn_timeout(fd, fmlx_serve_keepalive_ms(o));
     for (;;) {
         FmlxHttpReq req;
         FmlxHttpStatus hs;
@@ -226,6 +246,10 @@ static void serve_conn(int fd, const FmlxServeOpts *o, FmlxServeBuf *sbuf, Conn 
                 continue;
             }
             if (r < 0 && errno == EINTR) continue;
+            if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                logf(log, "timeout in lettura della testata: connessione chiusa");
+                return;
+            }
             return; /* 0 o errore: il client ha chiuso senza completare una testata */
         }
         if (hs != FMLX_HTTP_OK) {
@@ -263,6 +287,10 @@ static void serve_conn(int fd, const FmlxServeOpts *o, FmlxServeBuf *sbuf, Conn 
                 continue;
             }
             if (r < 0 && errno == EINTR) continue;
+            if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                logf(log, "timeout in lettura del corpo: connessione chiusa");
+                return;
+            }
             logf(log, "corpo promesso e mai arrivato: connessione chiusa");
             return;
         }
