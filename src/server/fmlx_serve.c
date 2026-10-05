@@ -650,6 +650,35 @@ static void *spool_io_worker(void *arg) {
 }
 
 /* Il loop del modello B: crea il worker engine e il pool I/O, accetta e distribuisce. */
+/* M3 (batch): ogni worker I/O serve UNA connessione end-to-end col responder INVARIATO
+ * (`serve_conn`): il responder gira QUI (thread I/O) e le chiamate al motore sono RPC-ate al
+ * thread del coordinatore -> N responder avanzano INSIEME (lotto). Nessun worker engine. */
+static void *spool_io_conn_worker(void *arg) {
+    SPool *s = (SPool *)arg;
+    Conn cn;
+    FmlxServeBuf buf;
+    unsigned reqno = 0;
+
+    cn.cap = FMLX_HTTP_MAX_HEAD + fmlx_serve_body_limit(s->o) + 1;
+    cn.len = 0;
+    cn.buf = (char *)malloc(cn.cap);
+    if (!cn.buf) return NULL;
+    if (fmlx_serve_buf_init(&buf, FMLX_SERVE_RESP_MAX, 0) != 0) { free(cn.buf); return NULL; }
+    for (;;) {
+        int fd = spool_conn_pop(s);
+        if (fd < 0) break;
+        fmlx_serve_set_conn_timeout(fd, fmlx_serve_keepalive_ms(s->o));
+        serve_conn(fd, s->o, &buf, &cn, s->log, &reqno, s->stop);
+        close(fd);
+        pthread_mutex_lock(&s->cnt_mu);
+        s->conn_no++;
+        pthread_mutex_unlock(&s->cnt_mu);
+    }
+    fmlx_serve_buf_free(&buf);
+    free(cn.buf);
+    return NULL;
+}
+
 static FmlxServeSt fmlx_serve_pooled(const FmlxServeOpts *o, int ls, FILE *log,
                                      volatile sig_atomic_t *stop, unsigned *served, int nio) {
     SPool s;
@@ -681,20 +710,22 @@ static FmlxServeSt fmlx_serve_pooled(const FmlxServeOpts *o, int ls, FILE *log,
     }
     if (!s.cfd || !s.io) { free(s.cfd); free(s.io); fmlx_serve_buf_free(&s.ebuf); return FMLX_SERVE_BUF_SMALL; }
 
+    int has_engine = o->batch ? 0 : 1; /* batch: il motore vive nel coordinatore, non in un worker */
     {
         /* Pila GRANDE: il load del modello (llm_ai_mlx_load_model) usa molta pila — sul thread
          * principale (8 MB) va, sul default dei pthread (512 KB) va in SIGBUS. */
         pthread_attr_t at;
+        void *(*iowork)(void *) = o->batch ? spool_io_conn_worker : spool_io_worker;
         pthread_attr_init(&at);
-        pthread_attr_setstacksize(&at, 32u << 20);
-        if (pthread_create(&s.engine, &at, spool_engine_worker, &s) != 0) {
+        pthread_attr_setstacksize(&at, 48u << 20);
+        if (has_engine && pthread_create(&s.engine, &at, spool_engine_worker, &s) != 0) {
             logf(log, "pthread_create (worker engine): %s", strerror(errno));
             pthread_attr_destroy(&at);
             free(s.cfd); free(s.io); fmlx_serve_buf_free(&s.ebuf);
             return FMLX_SERVE_BIND_FAILED;
         }
         for (i = 0; i < nio; i++) {
-            if (pthread_create(&s.io[i], &at, spool_io_worker, &s) != 0) {
+            if (pthread_create(&s.io[i], &at, iowork, &s) != 0) {
                 logf(log, "pthread_create (worker I/O %d): %s", i, strerror(errno));
                 break;
             }
@@ -705,7 +736,7 @@ static FmlxServeSt fmlx_serve_pooled(const FmlxServeOpts *o, int ls, FILE *log,
     if (s.nio == 0) {
         pthread_mutex_lock(&s.qmu); s.running = 0;
         pthread_cond_broadcast(&s.qcv_data); pthread_mutex_unlock(&s.qmu);
-        pthread_join(s.engine, NULL);
+        if (has_engine) pthread_join(s.engine, NULL);
         free(s.cfd); free(s.io); fmlx_serve_buf_free(&s.ebuf);
         return FMLX_SERVE_BIND_FAILED;
     }
@@ -739,7 +770,7 @@ static FmlxServeSt fmlx_serve_pooled(const FmlxServeOpts *o, int ls, FILE *log,
     pthread_cond_broadcast(&s.qcv_data); pthread_cond_broadcast(&s.qcv_space);
     pthread_mutex_unlock(&s.qmu);
     for (i = 0; i < s.nio; i++) pthread_join(s.io[i], NULL);
-    pthread_join(s.engine, NULL);
+    if (has_engine) pthread_join(s.engine, NULL);
     /* job rimasti in coda (shutdown) */
     pthread_mutex_lock(&s.qmu);
     while (s.qhead) {
@@ -879,9 +910,7 @@ FmlxServeSt fmlx_serve(const FmlxServeOpts *o, FmlxServeBuf *sbuf, FILE *log,
     if (o) {
         int nio = (int)o->parallel;
         if (o->batch && nio <= 1) nio = 8; /* il lotto ha senso con più richieste in volo */
-        /* M3: l'attivazione del lotto e' DISATTIVATA finche' il coordinatore non gira sullo STESSO
-         * thread che ha caricato il modello (MLX lega device/stream al thread del load). Oggi il
-         * coordinatore e' un thread separato -> "no Stream(gpu,0)". `--batch` per ora = pool a 8. */
+        if (o->batch) fmlx_engine_batch_request(1); /* coordinatore = thread che carica il motore */
         if (nio > 1) {
             FmlxServeSt ps = fmlx_serve_pooled(o, ls, log, want_stop, served, nio);
             shutdown(ls, SHUT_RDWR);

@@ -1074,6 +1074,8 @@ typedef struct BJob {
     const FmlxApiChat *c;
     FmlxEngineGen *out;
     int used, cap;
+    FmlxBatchFn fn; /* kind 4 = CALL generico sul thread del motore (es. load) */
+    void *arg, *ptr;
     struct BJob *next;
 } BJob;
 
@@ -1089,34 +1091,28 @@ static struct {
 static pthread_mutex_t g_bc_init = PTHREAD_MUTEX_INITIALIZER;
 
 static void *bc_main(void *arg);
+static void bc_submit(BJob *j, int step);
 
 static int batch_on(void) { return g_bc.on; }
-/* Attiva il coordinatore al primo modello capace, se `fmlx_engine_batch_request(1)` è stato dato. */
-static void bc_activate_if_requested(FmlxEngineModel *m) {
-    if (g_bc.request && !g_bc.on) fmlx_engine_batch_enable(m, 8);
-}
 
-static int bc_has_cap(const FmlxEngineModel *m) {
-    return m && m->eng && m->eng->generate_batch && (m->eng->caps & LLMMODELIO_CAP_BATCH);
-}
-
-int fmlx_engine_batch_enable(FmlxEngineModel *m, int max) {
+/* Crea il thread del coordinatore. Indipendente dal modello: il LOAD avverrà SU questo thread
+ * (via `fmlx_engine_batch_call`), così possiede device/stream MLX. Idempotente. */
+static int bc_start_thread(int max) {
     pthread_mutex_lock(&g_bc_init);
     if (g_bc.on) { pthread_mutex_unlock(&g_bc_init); return 0; }
-    if (!bc_has_cap(m)) { pthread_mutex_unlock(&g_bc_init); return -1; }
     if (max < 2) max = 2;
     if (max > FMLX_BATCH_MAX) max = FMLX_BATCH_MAX;
     g_bc.ser_head = g_bc.ser_tail = g_bc.st_head = g_bc.st_tail = NULL;
-    g_bc.on = 1; g_bc.max = max; g_bc.m = m; g_bc.running = 1;
+    g_bc.on = 1; g_bc.max = max; g_bc.running = 1;
     pthread_mutex_init(&g_bc.mu, NULL);
     pthread_cond_init(&g_bc.cv_work, NULL);
     pthread_cond_init(&g_bc.cv_done, NULL);
     {
-        /* Pila GRANDE: prefill/decode e il render usano molta pila (vedi il pool del server). */
+        /* Pila GRANDE: il LOAD del modello e il render usano molta pila. */
         pthread_attr_t at;
         int rc;
         pthread_attr_init(&at);
-        pthread_attr_setstacksize(&at, 32u << 20);
+        pthread_attr_setstacksize(&at, 48u << 20);
         rc = pthread_create(&g_bc.th, &at, bc_main, NULL);
         pthread_attr_destroy(&at);
         if (rc != 0) {
@@ -1129,7 +1125,25 @@ int fmlx_engine_batch_enable(FmlxEngineModel *m, int max) {
     return 0;
 }
 
-void fmlx_engine_batch_request(int on) { g_bc.request = on; }
+int fmlx_engine_batch_enable(FmlxEngineModel *m, int max) { (void)m; return bc_start_thread(max); }
+
+int fmlx_engine_batch_active(void) { return g_bc.on; }
+
+void fmlx_engine_batch_request(int on) {
+    if (on) (void)bc_start_thread(g_bc.max ? g_bc.max : 8);
+    else fmlx_engine_batch_disable();
+}
+
+/* Esegue `fn(arg)` sul thread del coordinatore (dove vive il motore). Ritorna il risultato. */
+void *fmlx_engine_batch_call(FmlxBatchFn fn, void *arg) {
+    BJob j;
+    memset(&j, 0, sizeof j);
+    j.kind = 4;
+    j.fn = fn;
+    j.arg = arg;
+    bc_submit(&j, 0);
+    return j.ptr;
+}
 
 void fmlx_engine_batch_disable(void) {
     pthread_mutex_lock(&g_bc_init);
@@ -1188,6 +1202,9 @@ static void bc_run_serial(BJob *j) {
         else
             j->err = -1;
         break;
+    case 4: /* CALL generico (load del modello, ecc.) sul thread del motore */
+        j->ptr = j->fn ? j->fn(j->arg) : NULL;
+        break;
     }
     bc_finish(j);
 }
@@ -1198,26 +1215,36 @@ static void bc_run_steps(BJob *head) {
     LlmEngineLlmSession sess[FMLX_BATCH_MAX];
     int32_t out[FMLX_BATCH_MAX];
     BJob *map[FMLX_BATCH_MAX];
+    const FmlxEngineModel *base = NULL;
     int n = 0, rc = 0, i;
     BJob *j;
     char e[160];
 
+    /* Modello base del lotto: la prima gen batchabile (stesso `m` + `generate_batch`). */
     for (j = head; j; j = j->next) {
-        if (j->g->want_logprobs || j->g->m != g_bc.m) continue; /* non batchabile: seriale sotto */
+        if (j->g->want_logprobs) continue;
+        if (j->g->m && j->g->m->eng && j->g->m->eng->generate_batch) { base = j->g->m; break; }
+    }
+    for (j = head; j; j = j->next) {
+        if (j->g->want_logprobs || !base || j->g->m != base) continue; /* non batchabile: seriale sotto */
         if (adv_no_token(j->g)) { j->handled = 1; continue; }   /* lunghezza: nessun token */
         if (n >= g_bc.max) continue;                            /* oltre il lotto: seriale sotto */
         sess[n] = j->g->session;
+        out[n] = -1; /* sentinella: se l'engine SALTA la sessione (pending == eos) resta -1 */
         map[n] = j;
         j->handled = 1;
         n++;
     }
     if (n > 0) {
-        rc = g_bc.m->eng->generate_batch(sess, n, 1, g_bc.m->eos, out);
+        rc = base->eng->generate_batch(sess, n, 1, base->eos, out);
         for (i = 0; i < n; i++) {
             e[0] = '\0';
             if (rc != 0) {
                 map[i]->err = 1;
                 snprintf(map[i]->errmsg, sizeof map[i]->errmsg, "the engine failed while generating");
+            } else if (out[i] == -1) {
+                /* la sessione non ha prodotto: pending == eos -> l'engine l'ha saltata. */
+                (void)gen_apply_token(map[i]->g, 0, 0, e, sizeof e);
             } else if (gen_apply_token(map[i]->g, 1, out[i], e, sizeof e) != 0) {
                 map[i]->err = 1;
                 snprintf(map[i]->errmsg, sizeof map[i]->errmsg, "%s", e);
@@ -1339,7 +1366,6 @@ FmlxEngineGen *fmlx_engine_chat(FmlxEngineModel *m, const FmlxApiChat *c, char *
         max_tokens = c->has_max_tokens ? (int)c->max_tokens : def;
     }
     sampling_of(c, &sp);
-    bc_activate_if_requested(m);
     if (batch_on())
         g = batch_start(m, ids, n, max_tokens, &sp, c, c->want_logprobs, c->want_top_logprobs,
                         think_open, err, errcap);
@@ -1380,7 +1406,6 @@ FmlxEngineGen *fmlx_engine_prompt(FmlxEngineModel *m, const char *prompt, int ma
     sp.presence_penalty = presence;
     sp.frequency_penalty = frequency;
     sp.seed = seed;
-    bc_activate_if_requested(m);
     if (batch_on())
         g = batch_start(m, ids, n, max_tokens, &sp, c, c ? c->want_logprobs : 0,
                         c ? c->want_top_logprobs : 0, prompt_opens_think(prompt), err, errcap);

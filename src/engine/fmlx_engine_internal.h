@@ -140,4 +140,13 @@ int fmlx_engine_load(const char *cache_root, const char *name, FmlxEngineModel *
 int fmlx_engine_render_chat(const FmlxEngineModel *m, const FmlxApiChat *c, FmlxSb *b,
                             char *err, size_t errcap);
 
+/* ---- M3: coordinatore di lotto (definito in fmlx_engine_gen.c) ---- */
+/* 1 se il coordinatore (thread che possiede il motore) è attivo. */
+int fmlx_engine_batch_active(void);
+/* Esegue `fn(arg)` SUL thread del coordinatore (dove vive il motore/lo stream MLX) e ne ritorna
+ * il risultato. Usato per instradare il LOAD del modello: deve avvenire sul thread del motore,
+ * perché MLX lega device/stream al thread del load. */
+typedef void *(*FmlxBatchFn)(void *);
+void *fmlx_engine_batch_call(FmlxBatchFn fn, void *arg);
+
 #endif /* FMLX_ENGINE_INTERNAL_H */

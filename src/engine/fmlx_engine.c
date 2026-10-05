@@ -698,8 +698,8 @@ static struct {
     FmlxEngineModel m;
 } g_slot[FMLX_ENGINE_MODELS_MAX];
 
-FmlxEngineModel *fmlx_engine_model(const char *cache_root, const char *name, char *err,
-                                   size_t errcap) {
+static FmlxEngineModel *model_load_direct(const char *cache_root, const char *name, char *err,
+                                          size_t errcap) {
     if (!name || !*name) {
         set_err(err, errcap, "model name is empty", NULL);
         return NULL;
@@ -718,6 +718,35 @@ FmlxEngineModel *fmlx_engine_model(const char *cache_root, const char *name, cha
     set_err(err, errcap, "too many models resident (%d): restart the server to load another",
             NULL);
     return NULL;
+}
+
+/* M3: il LOAD deve avvenire SUL thread del motore (coordinatore), perché MLX lega device/stream
+ * al thread del load. Con il coordinatore attivo si instrada lì; senza, si carica qui come prima. */
+typedef struct {
+    const char *cache_root;
+    const char *name;
+    char *err;
+    size_t errcap;
+    FmlxEngineModel *out;
+} FmlxLoadArgs;
+static void *model_load_thunk(void *p) {
+    FmlxLoadArgs *a = (FmlxLoadArgs *)p;
+    a->out = model_load_direct(a->cache_root, a->name, a->err, a->errcap);
+    return a->out;
+}
+
+FmlxEngineModel *fmlx_engine_model(const char *cache_root, const char *name, char *err,
+                                   size_t errcap) {
+    if (fmlx_engine_batch_active()) {
+        FmlxLoadArgs a;
+        a.cache_root = cache_root;
+        a.name = name;
+        a.err = err;
+        a.errcap = errcap;
+        a.out = NULL;
+        return (FmlxEngineModel *)fmlx_engine_batch_call(model_load_thunk, &a);
+    }
+    return model_load_direct(cache_root, name, err, errcap);
 }
 
 void fmlx_engine_shutdown(void) {
