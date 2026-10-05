@@ -270,6 +270,7 @@ static void usage_verb(FILE *out, const char *v) {
             "  --cache <dir>          radice del cache che /v1/models elenca\n"
             "  --max-body <n>         tetto di byte di un corpo di richiesta\n"
             "  --parallel <n>         pool I/O + worker engine (n thread I/O; default 1 = single-thread)\n"
+            "  --batch                lotto continuo (M3): N richieste decodificano insieme (implica --parallel)\n"
             "  --once                 serve UNA richiesta e esce (smoke test)\n"
             "  --offload-experts      streama gli esperti MoE da disco (modelli > RAM)\n"
             "  --vision-model <gguf>  VLM per l'input immagini (richiede --vision-mmproj)\n"
@@ -383,7 +384,7 @@ enum {
     F_JSON, F_MAXTOKENS, F_SYSTEM, F_THINK, F_OFFLOAD,
     F_MMPROJ, F_MODALITY, F_PURGE,
     F_OPT,
-    F_WALK, F_MAXDEPTH, F_ROOTS, F_TYPE, F_PARALLEL,
+    F_WALK, F_MAXDEPTH, F_ROOTS, F_TYPE, F_PARALLEL, F_BATCH,
     F_N
 };
 #define F_PULL_ONLY                                                                                            \
@@ -391,7 +392,7 @@ enum {
      (1u << F_STALLRE) | (1u << F_DEST) | (1u << F_OFFLINE) | (1u << F_REPAIR))
 #define F_SERVE_ONLY ((1u << F_HOST) | (1u << F_PORT) | (1u << F_MAXBODY) | (1u << F_ONCE) | \
                       (1u << F_OFFLOAD) | (1u << F_VISION_MODEL) | (1u << F_VISION_MMPROJ) | \
-                      (1u << F_PARALLEL))
+                      (1u << F_PARALLEL) | (1u << F_BATCH))
 #define F_MODELS_ONLY ((1u << F_JSON))
 #define F_RUNCHAT_ONLY ((1u << F_MAXTOKENS) | (1u << F_SYSTEM) | (1u << F_THINK) | (1u << F_OFFLOAD))
 /* `add` porta il proiettore e la modalità di un modello locale; `rm` la cancellazione dei file. */
@@ -407,14 +408,15 @@ enum {
  * semantiche con la stessa grafia sono peggio di un rifiuto. */
 #define F_BOOLEANI                                                                                             \
     ((1u << F_QUIET) | (1u << F_OFFLINE) | (1u << F_REPAIR) | (1u << F_ONCE) | (1u << F_JSON) |                \
-     (1u << F_THINK) | (1u << F_OFFLOAD) | (1u << F_PURGE) | (1u << F_WALK) | (1u << F_ROOTS))
+     (1u << F_THINK) | (1u << F_OFFLOAD) | (1u << F_PURGE) | (1u << F_WALK) | (1u << F_ROOTS) |      \
+     (1u << F_BATCH))
 
 static const char *const FLN[F_N] = {
     "--quiet",    "--cache",        "--revision", "--endpoint", "--max-bytes", "--stall-timeout",
     "--stall-retries", "--dest",     "--offline",  "--repair",   "--host",      "--port",
     "--max-body", "--once",         "--vision-model", "--vision-mmproj", "--json", "--max-tokens", "--system", "--think",
     "--offload-experts", "--mmproj", "--modality", "--purge", "--opt", "--walk", "--max-depth", "--roots", "--type",
-    "--parallel"};
+    "--parallel", "--batch"};
 
 /* Il bit della bandiera `n`, 0 se la bandiera non esiste. */
 static unsigned flag_bit(const char *n) {
@@ -520,6 +522,7 @@ FmlxCliStatus fmlx_cli_parse(int argc, char **argv, FmlxCliArgs *out, char *msg,
         if (!strcmp(name, "--offload-experts")) { out->offload_experts = 1; continue; }
         if (!strcmp(name, "--purge")) { out->purge = 1; continue; }
         if (!strcmp(name, "--walk")) { out->search_walk = 1; continue; }
+        if (!strcmp(name, "--batch")) { out->serve.batch = 1; continue; }
         if (!strcmp(name, "--roots")) { out->search_roots = 1; continue; }
 
         /* Una bandiera che vuole un valore e non ce l'ha è un errore ANCHE se il valore sarebbe

@@ -71,6 +71,7 @@ typedef struct {
     size_t max_body;        /* 0 = FMLX_SERVE_BODY_MAX */
     unsigned max_conns;     /* 0 = nessun limite: si ferma col segnale */
     unsigned parallel;      /* 0/1 = loop single-thread (default); >1 = pool I/O + worker engine (D14 M1/M2) */
+    unsigned batch;         /* 1 = attiva il lotto continuo dell'engine (M3): le richieste concorrenti avanzano insieme */
     /* INPUT MULTIMODALE: VLM (GGUF modello + GGUF mmproj). Se impostati, le richieste con
      * blocchi immagine vengono descritte dal VLM e iniettate nel prompt come testo. */
     const char *vision_model;

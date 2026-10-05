@@ -147,6 +147,15 @@ int fmlx_engine_gen_kv_stats(const FmlxEngineGen *g, int *out_used, int *out_cap
 
 void fmlx_engine_gen_free(FmlxEngineGen *g);
 
+/* M3 — LOTTO CONTINUO (dynamic batching), opt-in. Con `fmlx_engine_batch_request(1)` le
+ * generazioni successive vengono servite da UN thread dedicato che possiede il motore
+ * (single-owner): le richieste concorrenti avanzano insieme, un token ciascuna per passo
+ * (`generate_batch`), e il thread chiamante attende. Default OFF: senza richiesta, tutto resta
+ * sul thread chiamante come prima. `fmlx_engine_batch_enable` parte al primo modello capace. */
+void fmlx_engine_batch_request(int on);
+int fmlx_engine_batch_enable(FmlxEngineModel *m, int max);
+void fmlx_engine_batch_disable(void);
+
 /* Libera la cache residente (per i test e per uno shutdown pulito). */
 void fmlx_engine_shutdown(void);
 

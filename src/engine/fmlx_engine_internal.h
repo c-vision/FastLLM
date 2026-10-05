@@ -75,6 +75,7 @@ struct FmlxEngineGen {
     int done; /* DONE già emesso */
     int err;  /* il motore ha fallito: ERR alla prossima chiamata */
     int prefix_hit; /* 1 = il prompt è stato riusato dalla prefix cache (nessun prefill) */
+    int batch;      /* 1 = questa gen è gestita dal coordinatore di lotto (M3), non dal thread chiamante */
     FmlxApiFinish finish;
     char stop_seq[FMLX_API_MAX_NAME];
 

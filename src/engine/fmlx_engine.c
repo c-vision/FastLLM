@@ -721,6 +721,7 @@ FmlxEngineModel *fmlx_engine_model(const char *cache_root, const char *name, cha
 }
 
 void fmlx_engine_shutdown(void) {
+    fmlx_engine_batch_disable(); /* ferma il coordinatore di lotto PRIMA di liberare i modelli */
     for (int i = 0; i < FMLX_ENGINE_MODELS_MAX; i++) {
         if (!g_slot[i].used) continue;
         if (g_slot[i].m.eng && g_slot[i].m.eng->free_model && g_slot[i].m.model)

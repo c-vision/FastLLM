@@ -21,6 +21,7 @@
 #include <string.h>
 #include <time.h>
 #include <math.h>
+#include <pthread.h>
 
 /* ---- contenuto dei messaggi ---- */
 
@@ -811,33 +812,21 @@ static int text_update(FmlxEngineGen *g, char *err, size_t errcap) {
     return 0;
 }
 
-/* Un passo di decode: esattamente UN token. Con `want_logprobs` si usa l'estensione ABI v2
- * `generate_ids_probs`, che cattura la logprob del token PRIMA di avanzare (esatta anche con
- * sampling: la distribuzione è quella del modello alla posizione di partenza). */
-static int advance(FmlxEngineGen *g, char *err, size_t errcap) {
-    int got;
-    int32_t id = 0;
-
+/* La generazione è finita PER LUNGHEZZA? 1 = sì (imposta `finish`/`ended`), 0 = serve un token. */
+static int adv_no_token(FmlxEngineGen *g) {
     if (g->n_gen >= g->max_new) {
         g->finish = FMLX_API_FINISH_LENGTH;
         g->ended = 1;
-        return 0;
+        return 1;
     }
-    if (g->want_logprobs) {
-        float lp = 0.0f;
-        /* TOP-K (ABI v3): prima del passo, la distribuzione pending fotografata ha lo stesso
-         * pending che `generate_ids_probs` usa per la logprob del token emesso. */
-        if (g->want_top_logprobs) {
-            int32_t *ti = g->top_ids + (size_t)g->n_gen * (size_t)g->top_k;
-            float *tl = g->top_lp + (size_t)g->n_gen * (size_t)g->top_k;
-            int rc = g->m->eng->token_topk(g->session, g->top_k, ti, tl);
-            for (int j = (rc < 0 ? 0 : rc); j < g->top_k; j++) ti[j] = -1;
-        }
-        got = g->m->eng->generate_ids_probs(g->session, 1, g->m->eos, &id, &lp);
-        if (got > 0) g->logprobs[g->n_gen] = lp;
-    } else {
-        got = g->m->eng->generate_ids(g->session, 1, g->m->eos, &id);
-    }
+    return 0;
+}
+
+/* La parte POST-generazione di un passo: applica UN token già generato. `got` = >0 token valido in
+ * `id`; 0 = l'engine ha incontrato l'eos primario e non l'ha emesso; <0 = errore. Separata dal
+ * `generate_*` perché il lotto continuo (M3) genera il token con `generate_batch` per TUTTE le
+ * sessioni e poi lo applica a ciascuna QUI, senza rifare il passo. */
+static int gen_apply_token(FmlxEngineGen *g, int got, int32_t id, char *err, size_t errcap) {
     if (getenv("GEN_IDS") && got > 0) fprintf(stderr, "[genid] %d\n", id);
     if (got < 0) {
         snprintf(err, errcap, "the engine failed while generating");
@@ -855,6 +844,32 @@ static int advance(FmlxEngineGen *g, char *err, size_t errcap) {
     }
     g->ids[g->n_gen++] = id;
     return text_update(g, err, errcap);
+}
+
+/* Un passo di decode: esattamente UN token. Con `want_logprobs` si usa l'estensione ABI v2
+ * `generate_ids_probs`, che cattura la logprob del token PRIMA di avanzare (esatta anche con
+ * sampling: la distribuzione è quella del modello alla posizione di partenza). */
+static int advance(FmlxEngineGen *g, char *err, size_t errcap) {
+    int got;
+    int32_t id = 0;
+
+    if (adv_no_token(g)) return 0;
+    if (g->want_logprobs) {
+        float lp = 0.0f;
+        /* TOP-K (ABI v3): prima del passo, la distribuzione pending fotografata ha lo stesso
+         * pending che `generate_ids_probs` usa per la logprob del token emesso. */
+        if (g->want_top_logprobs) {
+            int32_t *ti = g->top_ids + (size_t)g->n_gen * (size_t)g->top_k;
+            float *tl = g->top_lp + (size_t)g->n_gen * (size_t)g->top_k;
+            int rc = g->m->eng->token_topk(g->session, g->top_k, ti, tl);
+            for (int j = (rc < 0 ? 0 : rc); j < g->top_k; j++) ti[j] = -1;
+        }
+        got = g->m->eng->generate_ids_probs(g->session, 1, g->m->eos, &id, &lp);
+        if (got > 0) g->logprobs[g->n_gen] = lp;
+    } else {
+        got = g->m->eng->generate_ids(g->session, 1, g->m->eos, &id);
+    }
+    return gen_apply_token(g, got, id, err, errcap);
 }
 
 /* ---- avvio della generazione ---- */
@@ -1029,6 +1044,248 @@ static FmlxEngineGen *start(const FmlxEngineModel *m, const int32_t *ids, int n_
     return g;
 }
 
+/* ============================================================================
+ * M3 — LOTTO CONTINUO (dynamic batching) a livello ENGINE. Opt-in (`fmlx_engine_batch_request`).
+ *
+ * Problema: il responder gira su un thread I/O, ma le chiamate al modello devono stare su UN solo
+ * thread (single-owner, §8). Soluzione: un COORDINATORE con un thread dedicato che possiede il
+ * motore; i thread I/O sottopongono un lavoro e ATTENDONO. Default OFF -> path diretto di prima.
+ *  - START (crea sessione + prefill) e FREE (distrugge) sono SERIALI, in ordine;
+ *  - STEP: TUTTI gli `advance()` in attesa vengono serviti con UNA `generate_batch` (un token per
+ *    sessione) = continuous batching. Logprob/top-k e modelli diversi dal coordinatore restano
+ *    seriali (sempre sul thread del coordinatore, quindi single-owner resta vero).
+ * ============================================================================ */
+
+#define FMLX_BATCH_MAX 64
+
+typedef struct BJob {
+    int kind; /* 0 START, 1 STEP, 2 FREE, 3 KV */
+    int done, err, handled;
+    char errmsg[160];
+    FmlxEngineGen *g; /* STEP/FREE/KV */
+    const FmlxEngineModel *m;
+    const int32_t *ids;
+    int n_prompt, max_tokens, want_logprobs, want_top_logprobs, think_open;
+    LlmEngineLlmSampling sp;
+    const FmlxApiChat *c;
+    FmlxEngineGen *out;
+    int used, cap;
+    struct BJob *next;
+} BJob;
+
+static struct {
+    int on, request, max;
+    const FmlxEngineModel *m;
+    pthread_t th;
+    int running;
+    pthread_mutex_t mu;
+    pthread_cond_t cv_work, cv_done;
+    BJob *ser_head, *ser_tail, *st_head, *st_tail;
+} g_bc;
+static pthread_mutex_t g_bc_init = PTHREAD_MUTEX_INITIALIZER;
+
+static void *bc_main(void *arg);
+
+static int batch_on(void) { return g_bc.on; }
+/* Attiva il coordinatore al primo modello capace, se `fmlx_engine_batch_request(1)` è stato dato. */
+static void bc_activate_if_requested(FmlxEngineModel *m) {
+    if (g_bc.request && !g_bc.on) fmlx_engine_batch_enable(m, 8);
+}
+
+static int bc_has_cap(const FmlxEngineModel *m) {
+    return m && m->eng && m->eng->generate_batch && (m->eng->caps & LLMMODELIO_CAP_BATCH);
+}
+
+int fmlx_engine_batch_enable(FmlxEngineModel *m, int max) {
+    pthread_mutex_lock(&g_bc_init);
+    if (g_bc.on) { pthread_mutex_unlock(&g_bc_init); return 0; }
+    if (!bc_has_cap(m)) { pthread_mutex_unlock(&g_bc_init); return -1; }
+    if (max < 2) max = 2;
+    if (max > FMLX_BATCH_MAX) max = FMLX_BATCH_MAX;
+    g_bc.ser_head = g_bc.ser_tail = g_bc.st_head = g_bc.st_tail = NULL;
+    g_bc.on = 1; g_bc.max = max; g_bc.m = m; g_bc.running = 1;
+    pthread_mutex_init(&g_bc.mu, NULL);
+    pthread_cond_init(&g_bc.cv_work, NULL);
+    pthread_cond_init(&g_bc.cv_done, NULL);
+    if (pthread_create(&g_bc.th, NULL, bc_main, NULL) != 0) {
+        g_bc.on = 0;
+        pthread_mutex_unlock(&g_bc_init);
+        return -1;
+    }
+    pthread_mutex_unlock(&g_bc_init);
+    return 0;
+}
+
+void fmlx_engine_batch_request(int on) { g_bc.request = on; }
+
+void fmlx_engine_batch_disable(void) {
+    pthread_mutex_lock(&g_bc_init);
+    if (!g_bc.on) { pthread_mutex_unlock(&g_bc_init); return; }
+    pthread_mutex_lock(&g_bc.mu);
+    g_bc.running = 0;
+    pthread_cond_broadcast(&g_bc.cv_work);
+    pthread_cond_broadcast(&g_bc.cv_done);
+    pthread_mutex_unlock(&g_bc.mu);
+    pthread_join(g_bc.th, NULL);
+    g_bc.on = 0;
+    pthread_mutex_unlock(&g_bc_init);
+}
+
+/* Sottopone un lavoro e attende che il coordinatore l'abbia eseguito. `j` vive nello stack del
+ * chiamante fino al ritorno: il coordinatore scrive i risultati nei SUOI campi. */
+static void bc_submit(BJob *j, int step) {
+    pthread_mutex_lock(&g_bc.mu);
+    j->done = 0;
+    j->next = NULL;
+    if (step) {
+        if (g_bc.st_tail) g_bc.st_tail->next = j; else g_bc.st_head = j;
+        g_bc.st_tail = j;
+    } else {
+        if (g_bc.ser_tail) g_bc.ser_tail->next = j; else g_bc.ser_head = j;
+        g_bc.ser_tail = j;
+    }
+    pthread_cond_signal(&g_bc.cv_work);
+    while (!j->done) pthread_cond_wait(&g_bc.cv_done, &g_bc.mu);
+    pthread_mutex_unlock(&g_bc.mu);
+}
+
+static void bc_finish(BJob *j) {
+    pthread_mutex_lock(&g_bc.mu);
+    j->done = 1;
+    pthread_cond_broadcast(&g_bc.cv_done);
+    pthread_mutex_unlock(&g_bc.mu);
+}
+
+static void bc_run_serial(BJob *j) {
+    switch (j->kind) {
+    case 0: /* START */
+        j->out = start(j->m, j->ids, j->n_prompt, j->max_tokens, &j->sp, j->c, j->want_logprobs,
+                       j->want_top_logprobs, j->think_open, j->errmsg, sizeof j->errmsg);
+        j->err = j->out ? 0 : 1;
+        if (j->out) j->out->batch = 1;
+        break;
+    case 2: /* FREE */
+        if (j->g && j->g->session && j->g->m && j->g->m->eng && j->g->m->eng->destroy_session)
+            j->g->m->eng->destroy_session(j->g->session);
+        if (j->g) j->g->session = NULL;
+        break;
+    case 3: /* KV */
+        if (j->g && j->g->session && j->g->m && j->g->m->eng && j->g->m->eng->kv_stats)
+            j->err = j->g->m->eng->kv_stats(j->g->session, &j->used, &j->cap);
+        else
+            j->err = -1;
+        break;
+    }
+    bc_finish(j);
+}
+
+/* UN passo per TUTTE le gen in attesa: `generate_batch` per le batchabili, `advance` per le altre.
+ * Sempre sul thread del coordinatore -> il motore ha UN solo proprietario. */
+static void bc_run_steps(BJob *head) {
+    LlmEngineLlmSession sess[FMLX_BATCH_MAX];
+    int32_t out[FMLX_BATCH_MAX];
+    BJob *map[FMLX_BATCH_MAX];
+    int n = 0, rc = 0, i;
+    BJob *j;
+    char e[160];
+
+    for (j = head; j; j = j->next) {
+        if (j->g->want_logprobs || j->g->m != g_bc.m) continue; /* non batchabile: seriale sotto */
+        if (adv_no_token(j->g)) { j->handled = 1; continue; }   /* lunghezza: nessun token */
+        if (n >= g_bc.max) continue;                            /* oltre il lotto: seriale sotto */
+        sess[n] = j->g->session;
+        map[n] = j;
+        j->handled = 1;
+        n++;
+    }
+    if (n > 0) {
+        rc = g_bc.m->eng->generate_batch(sess, n, 1, g_bc.m->eos, out);
+        for (i = 0; i < n; i++) {
+            e[0] = '\0';
+            if (rc != 0) {
+                map[i]->err = 1;
+                snprintf(map[i]->errmsg, sizeof map[i]->errmsg, "the engine failed while generating");
+            } else if (gen_apply_token(map[i]->g, 1, out[i], e, sizeof e) != 0) {
+                map[i]->err = 1;
+                snprintf(map[i]->errmsg, sizeof map[i]->errmsg, "%s", e);
+            }
+        }
+    }
+    for (j = head; j; j = j->next) { /* le slave (logprob/altro modello/oltre cap) */
+        if (j->handled) continue;
+        e[0] = '\0';
+        if (advance(j->g, e, sizeof e) != 0) {
+            j->err = 1;
+            snprintf(j->errmsg, sizeof j->errmsg, "%s", e);
+        }
+        j->handled = 1;
+    }
+    for (j = head; j; j = j->next) bc_finish(j);
+}
+
+static void *bc_main(void *arg) {
+    (void)arg;
+    for (;;) {
+        BJob *ser, *st, *j;
+        pthread_mutex_lock(&g_bc.mu);
+        while (g_bc.running && !g_bc.ser_head && !g_bc.st_head)
+            pthread_cond_wait(&g_bc.cv_work, &g_bc.mu);
+        if (!g_bc.ser_head && !g_bc.st_head) { pthread_mutex_unlock(&g_bc.mu); break; }
+        ser = g_bc.ser_head; g_bc.ser_head = g_bc.ser_tail = NULL;
+        st = g_bc.st_head; g_bc.st_head = g_bc.st_tail = NULL;
+        pthread_mutex_unlock(&g_bc.mu);
+        for (j = ser; j; j = j->next) bc_run_serial(j);
+        if (st) bc_run_steps(st);
+    }
+    return NULL;
+}
+
+/* Wrapper: sottopongono al coordinatore e traducono l'esito per i chiamanti di prima. */
+static FmlxEngineGen *batch_start(const FmlxEngineModel *m, const int32_t *ids, int n_prompt,
+                                  int max_tokens, const LlmEngineLlmSampling *sp,
+                                  const FmlxApiChat *c, int wl, int wtl, int think_open, char *err,
+                                  size_t errcap) {
+    BJob j;
+    memset(&j, 0, sizeof j);
+    j.kind = 0; j.m = m; j.ids = ids; j.n_prompt = n_prompt; j.max_tokens = max_tokens;
+    if (sp) j.sp = *sp;
+    j.c = c; j.want_logprobs = wl; j.want_top_logprobs = wtl; j.think_open = think_open;
+    bc_submit(&j, 0);
+    if (j.err || !j.out) {
+        snprintf(err, errcap, "%s", j.errmsg[0] ? j.errmsg : "batch start failed");
+        return NULL;
+    }
+    return j.out;
+}
+
+static int batch_advance(FmlxEngineGen *g, char *err, size_t errcap) {
+    BJob j;
+    memset(&j, 0, sizeof j);
+    j.kind = 1; j.g = g;
+    bc_submit(&j, 1);
+    if (j.err) {
+        snprintf(err, errcap, "%s", j.errmsg[0] ? j.errmsg : "the engine failed while generating");
+        return -1;
+    }
+    return 0;
+}
+
+static void batch_free_gen(FmlxEngineGen *g) {
+    BJob j;
+    memset(&j, 0, sizeof j);
+    j.kind = 2; j.g = g;
+    bc_submit(&j, 0);
+}
+
+static int batch_kv(const FmlxEngineGen *g, int *used, int *cap) {
+    BJob j;
+    memset(&j, 0, sizeof j);
+    j.kind = 3; j.g = (FmlxEngineGen *)g;
+    bc_submit(&j, 0);
+    if (j.err == 0) { *used = j.used; *cap = j.cap; return 0; }
+    return -1;
+}
+
 /* ---- API pubblica ---- */
 
 static void sampling_of(const FmlxApiChat *c, LlmEngineLlmSampling *sp) {
@@ -1068,8 +1325,13 @@ FmlxEngineGen *fmlx_engine_chat(FmlxEngineModel *m, const FmlxApiChat *c, char *
         max_tokens = c->has_max_tokens ? (int)c->max_tokens : def;
     }
     sampling_of(c, &sp);
-    g = start(m, ids, n, max_tokens, &sp, c, c->want_logprobs, c->want_top_logprobs, think_open,
-              err, errcap);
+    bc_activate_if_requested(m);
+    if (batch_on())
+        g = batch_start(m, ids, n, max_tokens, &sp, c, c->want_logprobs, c->want_top_logprobs,
+                        think_open, err, errcap);
+    else
+        g = start(m, ids, n, max_tokens, &sp, c, c->want_logprobs, c->want_top_logprobs,
+                  think_open, err, errcap);
     free(ids);
     if (g && fmlx_api_tool_mode(c, NULL) != FMLX_API_TOOL_NONE) {
         /* Qwen/ChatML marca i tool con `<tool_call>`: lì il JSON nudo non si riconosce (una
@@ -1104,8 +1366,13 @@ FmlxEngineGen *fmlx_engine_prompt(FmlxEngineModel *m, const char *prompt, int ma
     sp.presence_penalty = presence;
     sp.frequency_penalty = frequency;
     sp.seed = seed;
-    g = start(m, ids, n, max_tokens, &sp, c, c ? c->want_logprobs : 0,
-              c ? c->want_top_logprobs : 0, prompt_opens_think(prompt), err, errcap);
+    bc_activate_if_requested(m);
+    if (batch_on())
+        g = batch_start(m, ids, n, max_tokens, &sp, c, c ? c->want_logprobs : 0,
+                        c ? c->want_top_logprobs : 0, prompt_opens_think(prompt), err, errcap);
+    else
+        g = start(m, ids, n, max_tokens, &sp, c, c ? c->want_logprobs : 0,
+                  c ? c->want_top_logprobs : 0, prompt_opens_think(prompt), err, errcap);
     free(ids);
     return g;
 }
@@ -1354,7 +1621,8 @@ FmlxApiGenSt fmlx_engine_next(void *ctx, FmlxApiEvent *ev, FmlxApiErrCtx *err) {
         }
         {
             char e[256] = "";
-            if (advance(g, e, sizeof e) != 0) {
+            int rc = g->batch ? batch_advance(g, e, sizeof e) : advance(g, e, sizeof e);
+            if (rc != 0) {
                 g->err = 1;
                 if (err) {
                     err->err = FMLX_API_INTERNAL;
@@ -1387,12 +1655,15 @@ int fmlx_engine_gen_prefix_hit(const FmlxEngineGen *g) { return g ? g->prefix_hi
 
 int fmlx_engine_gen_kv_stats(const FmlxEngineGen *g, int *out_used, int *out_cap) {
     if (!g || !g->session || !g->m || !g->m->eng || !g->m->eng->kv_stats) return -1;
+    if (g->batch) return batch_kv(g, out_used, out_cap);
     return g->m->eng->kv_stats(g->session, out_used, out_cap);
 }
 
 void fmlx_engine_gen_free(FmlxEngineGen *g) {
     if (!g) return;
-    if (g->session && g->m && g->m->eng && g->m->eng->destroy_session)
+    if (g->batch)
+        batch_free_gen(g); /* la distruzione della sessione avviene sul thread del motore */
+    else if (g->session && g->m && g->m->eng && g->m->eng->destroy_session)
         g->m->eng->destroy_session(g->session);
     free(g->ids);
     free(g->full);

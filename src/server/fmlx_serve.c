@@ -22,6 +22,8 @@
  */
 #include "fmlx/fmlx_serve.h"
 
+#include "engine/fmlx_engine.h"
+
 #include <errno.h>
 #include <netdb.h>
 #include <netinet/in.h>
@@ -863,14 +865,19 @@ FmlxServeSt fmlx_serve(const FmlxServeOpts *o, FmlxServeBuf *sbuf, FILE *log,
     want_stop = stop ? stop : &g_stop;
     if (!stop) install_handlers();
 
-    if (o && o->parallel > 1) {
-        FmlxServeSt ps = fmlx_serve_pooled(o, ls, log, want_stop, served, (int)o->parallel);
-        shutdown(ls, SHUT_RDWR);
-        close(ls);
-        if (!stop) restore_handlers();
-        free(cn.buf);
-        if (use_owned) fmlx_serve_buf_free(sbuf);
-        return ps;
+    if (o) {
+        int nio = (int)o->parallel;
+        if (o->batch && nio <= 1) nio = 8; /* il lotto ha senso con più richieste in volo */
+        if (o->batch) fmlx_engine_batch_request(1);
+        if (nio > 1) {
+            FmlxServeSt ps = fmlx_serve_pooled(o, ls, log, want_stop, served, nio);
+            shutdown(ls, SHUT_RDWR);
+            close(ls);
+            if (!stop) restore_handlers();
+            free(cn.buf);
+            if (use_owned) fmlx_serve_buf_free(sbuf);
+            return ps;
+        }
     }
 
     logf(log, "in ascolto su http://%s:%d: rispondo a /v1/models e /health, il motore non è "
