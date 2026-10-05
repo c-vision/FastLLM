@@ -27,6 +27,7 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <poll.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -339,6 +340,409 @@ static void serve_conn(int fd, const FmlxServeOpts *o, FmlxServeBuf *sbuf, Conn 
     }
 }
 
+/* ============================================================================
+ * D14 M1/M2 — pool I/O + worker engine single-owner (modello B del todo D14).
+ *
+ * Un POOL FISSO di thread I/O (uno leggere/scrivere UNA connessione per volta) + UN worker che
+ * possiede il MOTORE: le chiamate al modello stanno su UN solo thread, mai su thread arbitrari
+ * (§8: l'engine MLX non è concorrente). Il worker I/O legge la richiesta dal socket, la mette in
+ * una coda come `SJob`, e poi DRENA verso il socket i byte che il worker engine produce nel buffer
+ * del Job — quindi l'engine NON fa I/O sul socket, e un client lento non lo blocca.
+ *
+ * Memoria: `parallel` buffer di lettura (uno per worker, riusato), un responder-buffer riusato dal
+ * worker engine, e un buffer di risposta per Job ATTIVO (cresce con la risposta, non col numero di
+ * client in coda). Le due code sono LIMITATE: quanto lavoro può essere accodato è indipendente da
+ * quanti client si presentano (backpressure: il worker I/O attende se la coda è piena).
+ * ============================================================================ */
+
+typedef struct SJob {
+    struct SJob *next;
+    int fd;
+    char *raw;          /* testata+corpo (di proprietà del Job): le slice di `req` puntano qui */
+    FmlxHttpReq req;
+    size_t need;
+    int ka;
+    pthread_mutex_t mu;
+    pthread_cond_t cv;
+    char *out;          /* risposta prodotta dal worker engine, consumata dal worker I/O */
+    size_t out_len, out_cap, out_off;
+    int engine_done, cancelled;
+} SJob;
+
+typedef struct {
+    const FmlxServeOpts *o;
+    FILE *log;
+    volatile sig_atomic_t *stop;
+    int ls;
+    unsigned max_conns;
+    pthread_mutex_t cnt_mu;
+    unsigned conn_no; /* connessioni accettate (per --once/max_conns) */
+
+    FmlxServeBuf ebuf; /* riusato dal worker engine (resp/repos) */
+
+    SJob *qhead, *qtail;
+    int qlen, qcap;
+    pthread_mutex_t qmu;
+    pthread_cond_t qcv_data, qcv_space;
+
+    int *cfd;
+    int chead, ctail, clen, ccap;
+    pthread_mutex_t cmu;
+    pthread_cond_t ccv_data, ccv_space;
+
+    int running;
+    int nio;
+    pthread_t *io;
+    pthread_t engine;
+} SPool;
+
+/* Il `sink` del worker engine: accoda i byte alla risposta del Job. Ritorna -1 se il client è
+ * andato via (la generazione si ferma). Cresce il buffer del Job — con la RISPOSTA, non coi client. */
+static int sjob_sink(void *ctx, const char *p, size_t n) {
+    SJob *j = (SJob *)ctx;
+    pthread_mutex_lock(&j->mu);
+    if (j->cancelled) { pthread_mutex_unlock(&j->mu); return -1; }
+    if (j->out_len + n > j->out_cap) {
+        size_t nc = j->out_cap ? j->out_cap : 16384;
+        while (nc < j->out_len + n) nc *= 2;
+        char *np = (char *)realloc(j->out, nc);
+        if (!np) { pthread_mutex_unlock(&j->mu); return -1; }
+        j->out = np; j->out_cap = nc;
+    }
+    memcpy(j->out + j->out_len, p, n);
+    j->out_len += n;
+    pthread_cond_broadcast(&j->cv);
+    pthread_mutex_unlock(&j->mu);
+    return 0;
+}
+
+static void sjob_free(SJob *j) {
+    if (!j) return;
+    pthread_mutex_destroy(&j->mu);
+    pthread_cond_destroy(&j->cv);
+    free(j->out);
+    free(j->raw);
+    free(j);
+}
+
+static void spool_push(SPool *s, SJob *j) {
+    pthread_mutex_lock(&s->qmu);
+    while (s->qlen >= s->qcap && s->running) pthread_cond_wait(&s->qcv_space, &s->qmu);
+    j->next = NULL;
+    if (s->qtail) s->qtail->next = j; else s->qhead = j;
+    s->qtail = j; s->qlen++;
+    pthread_cond_signal(&s->qcv_data);
+    pthread_mutex_unlock(&s->qmu);
+}
+
+static int spool_conn_pop(SPool *s) {
+    int fd;
+    pthread_mutex_lock(&s->cmu);
+    while (s->clen == 0 && s->running) pthread_cond_wait(&s->ccv_data, &s->cmu);
+    if (s->clen == 0) { pthread_mutex_unlock(&s->cmu); return -1; }
+    fd = s->cfd[s->chead];
+    s->chead = (s->chead + 1) % s->ccap;
+    s->clen--;
+    pthread_cond_signal(&s->ccv_space);
+    pthread_mutex_unlock(&s->cmu);
+    return fd;
+}
+
+static int spool_conn_push(SPool *s, int fd) {
+    int ok;
+    pthread_mutex_lock(&s->cmu);
+    while (s->clen >= s->ccap && s->running) pthread_cond_wait(&s->ccv_space, &s->cmu);
+    ok = s->running;
+    if (ok) {
+        s->cfd[s->ctail] = fd;
+        s->ctail = (s->ctail + 1) % s->ccap;
+        s->clen++;
+        pthread_cond_signal(&s->ccv_data);
+    }
+    pthread_mutex_unlock(&s->cmu);
+    return ok ? 0 : -1;
+}
+
+/* UN thread che possiede il motore: estrae un Job, esegue `fmlx_serve_respond` (che consegna i
+ * token nel buffer del Job via `sink`), e segna `engine_done`. */
+static void *spool_engine_worker(void *arg) {
+    SPool *s = (SPool *)arg;
+    for (;;) {
+        SJob *j;
+        size_t out_len = 0;
+        int ka = 0;
+        const char *body;
+
+        pthread_mutex_lock(&s->qmu);
+        while (s->qlen == 0 && s->running) pthread_cond_wait(&s->qcv_data, &s->qmu);
+        j = s->qhead;
+        if (!j) { pthread_mutex_unlock(&s->qmu); break; } /* shutdown con coda vuota */
+        s->qhead = j->next;
+        if (!s->qhead) s->qtail = NULL;
+        s->qlen--;
+        pthread_cond_signal(&s->qcv_space);
+        pthread_mutex_unlock(&s->qmu);
+
+        body = j->need ? j->raw + j->req.body_off : NULL;
+        s->ebuf.sink = sjob_sink;
+        s->ebuf.sink_ctx = j;
+        (void)fmlx_serve_respond(&j->req, body, j->need, s->o, &s->ebuf, &out_len, &ka);
+        s->ebuf.sink = NULL;
+        s->ebuf.sink_ctx = NULL;
+        if (out_len) sjob_sink(j, s->ebuf.resp, out_len); /* non-streaming: consegna il corpo */
+        pthread_mutex_lock(&j->mu);
+        j->ka = ka;
+        j->engine_done = 1;
+        pthread_cond_broadcast(&j->cv);
+        pthread_mutex_unlock(&j->mu);
+    }
+    return NULL;
+}
+
+/* Il worker I/O: una connessione per volta. Legge la richiesta, la accoda, drena la risposta del
+ * Job verso il socket (scrivendo dal worker I/O, MAI dall'engine), gestisce il keep-alive. */
+static void *spool_io_worker(void *arg) {
+    SPool *s = (SPool *)arg;
+    Conn cn;
+    FmlxServeBuf rb; /* per i rifiuti del loop (framing, corpo troppo grande) */
+    char chunk[16384];
+
+    cn.cap = FMLX_HTTP_MAX_HEAD + fmlx_serve_body_limit(s->o) + 1;
+    cn.len = 0;
+    cn.buf = (char *)malloc(cn.cap);
+    if (!cn.buf) return NULL;
+    if (fmlx_serve_buf_init(&rb, 0, 0) != 0) { free(cn.buf); return NULL; }
+
+    for (;;) {
+        int fd = spool_conn_pop(s);
+        int keep = 1;
+        if (fd < 0) break;
+        fmlx_serve_set_conn_timeout(fd, fmlx_serve_keepalive_ms(s->o));
+        while (keep && s->running) {
+            FmlxHttpReq req;
+            FmlxHttpStatus hs;
+            size_t need = 0, out_len = 0;
+            int ka = 0, sent_100 = 0;
+            SJob *j;
+            char tgt[100];
+
+            fmlx_http_req_init(&req);
+            if (cn.len == 0) {
+                struct pollfd pfd;
+                pfd.fd = fd; pfd.events = POLLIN; pfd.revents = 0;
+                if (poll(&pfd, 1, fmlx_serve_keepalive_ms(s->o)) <= 0) break;
+            }
+            /* testata */
+            for (;;) {
+                ssize_t r;
+                hs = fmlx_http_parse_req(cn.buf, cn.len, &req);
+                if (hs != FMLX_HTTP_NEED_MORE) break;
+                if (cn.len >= cn.cap) { hs = FMLX_HTTP_ERR_HEAD_TOO_LARGE; break; }
+                r = recv(fd, cn.buf + cn.len, cn.cap - cn.len, 0);
+                if (r > 0) { cn.len += (size_t)r; continue; }
+                if (r < 0 && errno == EINTR) continue;
+                if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                    logf(s->log, "timeout in lettura della testata: connessione chiusa");
+                }
+                keep = 0;
+                break;
+            }
+            if (!keep) break;
+            if (hs != FMLX_HTTP_OK) {
+                out_len = 0;
+                if (loop_refuse_parse(&rb, hs, &out_len) == 0 && out_len) write_all(fd, rb.resp, out_len);
+                log_target(&req.err_field, tgt, sizeof tgt);
+                logf(s->log, "richiesta rifiutata dal codec [%s]%s%s",
+                     fmlx_http_status_str(hs), tgt[0] ? " header=" : "", tgt);
+                break;
+            }
+            /* corpo */
+            need = req.has_body ? (size_t)req.content_length : 0;
+            if (need > fmlx_serve_body_limit(s->o)) {
+                out_len = 0;
+                if (loop_refuse(&rb, FMLX_API_INVALID_REQUEST, FMLX_SERVE_CODE_BODY_LARGE,
+                                "request body is larger than this server accepts", &out_len) == 0 &&
+                    out_len)
+                    write_all(fd, rb.resp, out_len);
+                logf(s->log, "corpo promesso di %llu byte oltre il limite: connessione chiusa",
+                     (unsigned long long)req.content_length);
+                break;
+            }
+            while (req.head_len + need > cn.len) {
+                ssize_t r;
+                if (!sent_100 && fmlx_http_expects_continue(&req)) {
+                    static const char cont[] = "HTTP/1.1 100 Continue\r\n\r\n";
+                    if (write_all(fd, cont, sizeof cont - 1) < 0) { keep = 0; break; }
+                    sent_100 = 1;
+                }
+                if (!keep) break;
+                r = recv(fd, cn.buf + cn.len, cn.cap - cn.len, 0);
+                if (r > 0) { cn.len += (size_t)r; continue; }
+                if (r < 0 && errno == EINTR) continue;
+                if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+                    logf(s->log, "timeout in lettura del corpo: connessione chiusa");
+                else
+                    logf(s->log, "corpo promesso e mai arrivato: connessione chiusa");
+                keep = 0;
+                break;
+            }
+            if (!keep) break;
+
+            /* Job: il buffer di lettura PASSA al Job (le slice di `req` restano valide); un eventuale
+             * request PIPELINED resta nel buffer NUOVO del worker, non in quello del Job. */
+            {
+                size_t used = req.head_len + need;
+                size_t leftover = cn.len > used ? cn.len - used : 0;
+                char *fresh = (char *)malloc(cn.cap);
+                if (!fresh) { keep = 0; break; }
+                if (leftover) memmove(fresh, cn.buf + used, leftover);
+                j = (SJob *)calloc(1, sizeof *j);
+                if (!j) { free(fresh); keep = 0; break; }
+                pthread_mutex_init(&j->mu, NULL);
+                pthread_cond_init(&j->cv, NULL);
+                j->fd = fd;
+                j->raw = cn.buf;
+                j->req = req;
+                j->need = need;
+                cn.buf = fresh;
+                cn.len = leftover;
+                spool_push(s, j);
+            }
+
+            /* drena la risposta del Job: scrive il worker I/O, non l'engine. La copia sotto lock
+             * evita che il `realloc` dell'engine invalidi il puntatore durante la `write`. */
+            for (;;) {
+                size_t avail, take;
+                int edone;
+                pthread_mutex_lock(&j->mu);
+                while (j->out_off == j->out_len && !j->engine_done) pthread_cond_wait(&j->cv, &j->mu);
+                avail = j->out_len - j->out_off;
+                take = avail > sizeof chunk ? sizeof chunk : avail;
+                if (take) memcpy(chunk, j->out + j->out_off, take);
+                edone = j->engine_done;
+                j->out_off += take;
+                pthread_mutex_unlock(&j->mu);
+                if (take && write_all(fd, chunk, take) < 0) {
+                    pthread_mutex_lock(&j->mu);
+                    j->cancelled = 1; /* la generazione si ferma al prossimo token */
+                    pthread_mutex_unlock(&j->mu);
+                    keep = 0;
+                    break;
+                }
+                if (edone && take == 0) { ka = j->ka; break; }
+            }
+            sjob_free(j);
+            if (!keep) break;
+            if (!ka) break;
+        }
+        close(fd);
+        pthread_mutex_lock(&s->cnt_mu);
+        s->conn_no++;
+        pthread_mutex_unlock(&s->cnt_mu);
+    }
+    fmlx_serve_buf_free(&rb);
+    free(cn.buf);
+    return NULL;
+}
+
+/* Il loop del modello B: crea il worker engine e il pool I/O, accetta e distribuisce. */
+static FmlxServeSt fmlx_serve_pooled(const FmlxServeOpts *o, int ls, FILE *log,
+                                     volatile sig_atomic_t *stop, unsigned *served, int nio) {
+    SPool s;
+    int i, one = 1;
+
+    memset(&s, 0, sizeof s);
+    s.o = o;
+    s.log = log;
+    s.stop = stop;
+    s.ls = ls;
+    s.max_conns = o->max_conns;
+    s.nio = nio;
+    s.running = 1;
+    s.qcap = nio * 4 > 0 ? nio * 4 : 4;
+    s.ccap = nio * 4 > 0 ? nio * 4 : 4;
+    pthread_mutex_init(&s.cnt_mu, NULL);
+    pthread_mutex_init(&s.qmu, NULL);
+    pthread_cond_init(&s.qcv_data, NULL);
+    pthread_cond_init(&s.qcv_space, NULL);
+    pthread_mutex_init(&s.cmu, NULL);
+    pthread_cond_init(&s.ccv_data, NULL);
+    pthread_cond_init(&s.ccv_space, NULL);
+    s.cfd = (int *)malloc((size_t)s.ccap * sizeof(int));
+    s.io = (pthread_t *)malloc((size_t)nio * sizeof(pthread_t));
+    if (fmlx_serve_buf_init(&s.ebuf, 0, 0) != 0) {
+        logf(log, "memoria negata per il buffer del worker engine");
+        free(s.cfd); free(s.io);
+        return FMLX_SERVE_BUF_SMALL;
+    }
+    if (!s.cfd || !s.io) { free(s.cfd); free(s.io); fmlx_serve_buf_free(&s.ebuf); return FMLX_SERVE_BUF_SMALL; }
+
+    if (pthread_create(&s.engine, NULL, spool_engine_worker, &s) != 0) {
+        logf(log, "pthread_create (worker engine): %s", strerror(errno));
+        free(s.cfd); free(s.io); fmlx_serve_buf_free(&s.ebuf);
+        return FMLX_SERVE_BIND_FAILED;
+    }
+    for (i = 0; i < nio; i++) {
+        if (pthread_create(&s.io[i], NULL, spool_io_worker, &s) != 0) {
+            logf(log, "pthread_create (worker I/O %d): %s", i, strerror(errno));
+            break;
+        }
+    }
+    s.nio = i; /* quanti ne sono nati davvero */
+    if (s.nio == 0) {
+        pthread_mutex_lock(&s.qmu); s.running = 0;
+        pthread_cond_broadcast(&s.qcv_data); pthread_mutex_unlock(&s.qmu);
+        pthread_join(s.engine, NULL);
+        free(s.cfd); free(s.io); fmlx_serve_buf_free(&s.ebuf);
+        return FMLX_SERVE_BIND_FAILED;
+    }
+
+    /* accept: una connessione per volta dal thread principale, distribuita ai worker I/O. */
+    for (;;) {
+        int fd;
+        unsigned n;
+        if (*stop) break;
+        pthread_mutex_lock(&s.cnt_mu);
+        n = s.conn_no;
+        pthread_mutex_unlock(&s.cnt_mu);
+        if (s.max_conns && n >= s.max_conns) break;
+        fd = accept(ls, NULL, NULL);
+        if (fd < 0) {
+            if (errno == EINTR) continue;
+            logf(log, "accept: %s", strerror(errno));
+            if (errno == EMFILE || errno == ENFILE) break;
+            continue;
+        }
+        setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+        /* backpressure sull'accept: se il pool è saturo si attende qui, non si accumula memoria. */
+        if (spool_conn_push(&s, fd) != 0) { close(fd); break; }
+    }
+
+    /* shutdown: ferma i worker, sveglia tutte le attese, join. */
+    pthread_mutex_lock(&s.cmu); s.running = 0;
+    pthread_cond_broadcast(&s.ccv_data); pthread_cond_broadcast(&s.ccv_space);
+    pthread_mutex_unlock(&s.cmu);
+    pthread_mutex_lock(&s.qmu);
+    pthread_cond_broadcast(&s.qcv_data); pthread_cond_broadcast(&s.qcv_space);
+    pthread_mutex_unlock(&s.qmu);
+    for (i = 0; i < s.nio; i++) pthread_join(s.io[i], NULL);
+    pthread_join(s.engine, NULL);
+    /* job rimasti in coda (shutdown) */
+    pthread_mutex_lock(&s.qmu);
+    while (s.qhead) {
+        SJob *j = s.qhead;
+        s.qhead = j->next;
+        sjob_free(j);
+    }
+    pthread_mutex_unlock(&s.qmu);
+
+    free(s.cfd);
+    free(s.io);
+    fmlx_serve_buf_free(&s.ebuf);
+    if (served) *served = s.conn_no;
+    return FMLX_SERVE_OK;
+}
+
 /* ---- il loop ---- */
 
 static volatile sig_atomic_t g_stop;
@@ -458,6 +862,16 @@ FmlxServeSt fmlx_serve(const FmlxServeOpts *o, FmlxServeBuf *sbuf, FILE *log,
 
     want_stop = stop ? stop : &g_stop;
     if (!stop) install_handlers();
+
+    if (o && o->parallel > 1) {
+        FmlxServeSt ps = fmlx_serve_pooled(o, ls, log, want_stop, served, (int)o->parallel);
+        shutdown(ls, SHUT_RDWR);
+        close(ls);
+        if (!stop) restore_handlers();
+        free(cn.buf);
+        if (use_owned) fmlx_serve_buf_free(sbuf);
+        return ps;
+    }
 
     logf(log, "in ascolto su http://%s:%d: rispondo a /v1/models e /health, il motore non è "
               "collegato",

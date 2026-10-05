@@ -716,6 +716,25 @@ static pid_t serve_child(int port, unsigned max_requests) {
     return pid;
 }
 
+/* Come `serve_child` ma col pool D14 (M1/M2): `parallel` thread I/O + worker engine single-owner. */
+static pid_t serve_child_parallel(int port, unsigned max_requests, unsigned parallel) {
+    pid_t pid;
+
+    fflush(stdout);
+    pid = fork();
+    if (pid < 0) { CK(0, "fork: %s", strerror(errno)); return -1; }
+    if (pid == 0) {
+        FmlxServeOpts o = opts_default();
+        volatile sig_atomic_t stop = 0;
+        o.host = "127.0.0.1";
+        o.port = port;
+        o.max_conns = max_requests;
+        o.parallel = parallel;
+        _exit(fmlx_serve(&o, NULL, NULL, &stop, NULL) == FMLX_SERVE_OK ? 0 : 1);
+    }
+    return pid;
+}
+
 /* La loopback con la pazienza che serve: il figlio deve arrivare a `listen` prima che la `connect`
  * vada a buon fine. `SO_RCVTIMEO` NON è cortesia: senza, un server che non risponde mai renderebbe
  * il test un processo da uccidere, e il sintomo sarebbe "la suite è lenta" invece che "il framing è
@@ -1160,6 +1179,48 @@ static void case_read_timeout(void) {
     waitpid(pid, &w, 0);
 }
 
+/* D14 M1/M2: col POOL un client lento (testata parziale mai terminata) NON blocca gli altri — è la
+ * ragione del modello B. Nel loop single-thread quel client terrebbe il server fino al timeout, e la
+ * seconda connessione non verrebbe nemmeno accettata. */
+static void case_parallel(void) {
+    int port = 8800 + (int)(getpid() % 50);
+    const char *part = "GET /v1/models HTTP/1.1\r\nHost: 127.0.0.1"; /* mai terminata */
+    char req[256], got[8192];
+    size_t have;
+    pid_t pid;
+    int slow, fast, w = 0;
+
+    pid = serve_child_parallel(port, 0, 4);
+    if (pid < 0) return;
+    slow = connect_child(port);
+    if (slow < 0) {
+        CK(0, "il server non ha ascoltato su 127.0.0.1:%d", port);
+        kill(pid, SIGKILL);
+        waitpid(pid, &w, 0);
+        return;
+    }
+    if (write(slow, part, strlen(part)) != (ssize_t)strlen(part)) CK(0, "invio testata parziale");
+    /* il 1° client è "occupato" (slowloris): un SECONDO client deve comunque essere servito. */
+    fast = connect_child(port);
+    if (fast < 0) {
+        CK(0, "seconda connessione refused su 127.0.0.1:%d", port);
+        close(slow);
+        kill(pid, SIGKILL);
+        waitpid(pid, &w, 0);
+        return;
+    }
+    snprintf(req, sizeof req,
+             "GET /v1/models HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nConnection: close\r\n\r\n", port);
+    if (write(fast, req, strlen(req)) != (ssize_t)strlen(req)) CK(0, "invio della richiesta al 2° client");
+    have = read_all(fast, got, sizeof got);
+    CK(have > 0 && strncmp(got, "HTTP/1.1 200", 12) == 0,
+       "col pool il 2° client dev'essere servito mentre il 1° è lento; risposta:\n%s", got);
+    close(fast);
+    close(slow);
+    kill(pid, SIGKILL);
+    waitpid(pid, &w, 0);
+}
+
 /* ============================================================================ */
 
 int main(int argc, char **argv) {
@@ -1185,6 +1246,7 @@ int main(int argc, char **argv) {
     case_round_trip();
     case_continue_100();
     case_read_timeout();
+    case_parallel();
     case_addr_in_use();
     case_no_perm();
     case_stop_signal();

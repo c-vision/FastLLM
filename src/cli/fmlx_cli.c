@@ -269,6 +269,7 @@ static void usage_verb(FILE *out, const char *v) {
             "  --port <n>             porta TCP (default 8000)\n"
             "  --cache <dir>          radice del cache che /v1/models elenca\n"
             "  --max-body <n>         tetto di byte di un corpo di richiesta\n"
+            "  --parallel <n>         pool I/O + worker engine (n thread I/O; default 1 = single-thread)\n"
             "  --once                 serve UNA richiesta e esce (smoke test)\n"
             "  --offload-experts      streama gli esperti MoE da disco (modelli > RAM)\n"
             "  --vision-model <gguf>  VLM per l'input immagini (richiede --vision-mmproj)\n"
@@ -382,14 +383,15 @@ enum {
     F_JSON, F_MAXTOKENS, F_SYSTEM, F_THINK, F_OFFLOAD,
     F_MMPROJ, F_MODALITY, F_PURGE,
     F_OPT,
-    F_WALK, F_MAXDEPTH, F_ROOTS, F_TYPE,
+    F_WALK, F_MAXDEPTH, F_ROOTS, F_TYPE, F_PARALLEL,
     F_N
 };
 #define F_PULL_ONLY                                                                                            \
     ((1u << F_REVISION) | (1u << F_ENDPOINT) | (1u << F_MAXBYTES) | (1u << F_STALLTO) |                        \
      (1u << F_STALLRE) | (1u << F_DEST) | (1u << F_OFFLINE) | (1u << F_REPAIR))
 #define F_SERVE_ONLY ((1u << F_HOST) | (1u << F_PORT) | (1u << F_MAXBODY) | (1u << F_ONCE) | \
-                      (1u << F_OFFLOAD) | (1u << F_VISION_MODEL) | (1u << F_VISION_MMPROJ))
+                      (1u << F_OFFLOAD) | (1u << F_VISION_MODEL) | (1u << F_VISION_MMPROJ) | \
+                      (1u << F_PARALLEL))
 #define F_MODELS_ONLY ((1u << F_JSON))
 #define F_RUNCHAT_ONLY ((1u << F_MAXTOKENS) | (1u << F_SYSTEM) | (1u << F_THINK) | (1u << F_OFFLOAD))
 /* `add` porta il proiettore e la modalità di un modello locale; `rm` la cancellazione dei file. */
@@ -411,7 +413,8 @@ static const char *const FLN[F_N] = {
     "--quiet",    "--cache",        "--revision", "--endpoint", "--max-bytes", "--stall-timeout",
     "--stall-retries", "--dest",     "--offline",  "--repair",   "--host",      "--port",
     "--max-body", "--once",         "--vision-model", "--vision-mmproj", "--json", "--max-tokens", "--system", "--think",
-    "--offload-experts", "--mmproj", "--modality", "--purge", "--opt", "--walk", "--max-depth", "--roots", "--type"};
+    "--offload-experts", "--mmproj", "--modality", "--purge", "--opt", "--walk", "--max-depth", "--roots", "--type",
+    "--parallel"};
 
 /* Il bit della bandiera `n`, 0 se la bandiera non esiste. */
 static unsigned flag_bit(const char *n) {
@@ -569,6 +572,10 @@ FmlxCliStatus fmlx_cli_parse(int argc, char **argv, FmlxCliArgs *out, char *msg,
             if (!parse_num(val, 1, LLONG_MAX, &n))
                 return fail(out, msg, msg_len, "--max-body: '%s' non è un numero >= 1", val);
             out->serve.max_body = (size_t)n;
+        } else if (!strcmp(name, "--parallel")) {
+            if (!parse_num(val, 1, 64, &n))
+                return fail(out, msg, msg_len, "--parallel: '%s' non è un numero 1..64", val);
+            out->serve.parallel = (unsigned)n;
         } else if (!strcmp(name, "--max-tokens")) {
             /* Il tetto vero lo applica il motore (`FMLX_ENGINE_MAX_NEW`): qui si valida solo che
              * sia un intero >= 1, perché `--max-tokens 0` è "genera zero token", cioè nessuna
