@@ -469,6 +469,8 @@ static int spool_conn_push(SPool *s, int fd) {
  * token nel buffer del Job via `sink`), e segna `engine_done`. */
 static void *spool_engine_worker(void *arg) {
     SPool *s = (SPool *)arg;
+    extern int llm_ai_mlx_thread_init(void);
+    llm_ai_mlx_thread_init(); /* il motore vive su questo thread: registra device/stream MLX */
     for (;;) {
         SJob *j;
         size_t out_len = 0;
@@ -679,16 +681,25 @@ static FmlxServeSt fmlx_serve_pooled(const FmlxServeOpts *o, int ls, FILE *log,
     }
     if (!s.cfd || !s.io) { free(s.cfd); free(s.io); fmlx_serve_buf_free(&s.ebuf); return FMLX_SERVE_BUF_SMALL; }
 
-    if (pthread_create(&s.engine, NULL, spool_engine_worker, &s) != 0) {
-        logf(log, "pthread_create (worker engine): %s", strerror(errno));
-        free(s.cfd); free(s.io); fmlx_serve_buf_free(&s.ebuf);
-        return FMLX_SERVE_BIND_FAILED;
-    }
-    for (i = 0; i < nio; i++) {
-        if (pthread_create(&s.io[i], NULL, spool_io_worker, &s) != 0) {
-            logf(log, "pthread_create (worker I/O %d): %s", i, strerror(errno));
-            break;
+    {
+        /* Pila GRANDE: il load del modello (llm_ai_mlx_load_model) usa molta pila — sul thread
+         * principale (8 MB) va, sul default dei pthread (512 KB) va in SIGBUS. */
+        pthread_attr_t at;
+        pthread_attr_init(&at);
+        pthread_attr_setstacksize(&at, 32u << 20);
+        if (pthread_create(&s.engine, &at, spool_engine_worker, &s) != 0) {
+            logf(log, "pthread_create (worker engine): %s", strerror(errno));
+            pthread_attr_destroy(&at);
+            free(s.cfd); free(s.io); fmlx_serve_buf_free(&s.ebuf);
+            return FMLX_SERVE_BIND_FAILED;
         }
+        for (i = 0; i < nio; i++) {
+            if (pthread_create(&s.io[i], &at, spool_io_worker, &s) != 0) {
+                logf(log, "pthread_create (worker I/O %d): %s", i, strerror(errno));
+                break;
+            }
+        }
+        pthread_attr_destroy(&at);
     }
     s.nio = i; /* quanti ne sono nati davvero */
     if (s.nio == 0) {
@@ -868,7 +879,9 @@ FmlxServeSt fmlx_serve(const FmlxServeOpts *o, FmlxServeBuf *sbuf, FILE *log,
     if (o) {
         int nio = (int)o->parallel;
         if (o->batch && nio <= 1) nio = 8; /* il lotto ha senso con più richieste in volo */
-        if (o->batch) fmlx_engine_batch_request(1);
+        /* M3: l'attivazione del lotto e' DISATTIVATA finche' il coordinatore non gira sullo STESSO
+         * thread che ha caricato il modello (MLX lega device/stream al thread del load). Oggi il
+         * coordinatore e' un thread separato -> "no Stream(gpu,0)". `--batch` per ora = pool a 8. */
         if (nio > 1) {
             FmlxServeSt ps = fmlx_serve_pooled(o, ls, log, want_stop, served, nio);
             shutdown(ls, SHUT_RDWR);

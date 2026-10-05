@@ -23,6 +23,10 @@
 #include <math.h>
 #include <pthread.h>
 
+/* MLX: device/stream di default PER-THREAD. Ogni thread di lavoro che usa il motore deve
+ * registrarlo (idempotente), altrimenti la prima op MLX aborta con "no Stream(gpu, 0)". */
+extern int llm_ai_mlx_thread_init(void);
+
 /* ---- contenuto dei messaggi ---- */
 
 static void trim_span(const char **p, size_t *n) {
@@ -1107,10 +1111,19 @@ int fmlx_engine_batch_enable(FmlxEngineModel *m, int max) {
     pthread_mutex_init(&g_bc.mu, NULL);
     pthread_cond_init(&g_bc.cv_work, NULL);
     pthread_cond_init(&g_bc.cv_done, NULL);
-    if (pthread_create(&g_bc.th, NULL, bc_main, NULL) != 0) {
-        g_bc.on = 0;
-        pthread_mutex_unlock(&g_bc_init);
-        return -1;
+    {
+        /* Pila GRANDE: prefill/decode e il render usano molta pila (vedi il pool del server). */
+        pthread_attr_t at;
+        int rc;
+        pthread_attr_init(&at);
+        pthread_attr_setstacksize(&at, 32u << 20);
+        rc = pthread_create(&g_bc.th, &at, bc_main, NULL);
+        pthread_attr_destroy(&at);
+        if (rc != 0) {
+            g_bc.on = 0;
+            pthread_mutex_unlock(&g_bc_init);
+            return -1;
+        }
     }
     pthread_mutex_unlock(&g_bc_init);
     return 0;
@@ -1225,6 +1238,7 @@ static void bc_run_steps(BJob *head) {
 
 static void *bc_main(void *arg) {
     (void)arg;
+    llm_ai_mlx_thread_init(); /* questo thread possiede il motore: registra device/stream MLX */
     for (;;) {
         BJob *ser, *st, *j;
         pthread_mutex_lock(&g_bc.mu);
