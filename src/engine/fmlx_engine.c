@@ -30,8 +30,8 @@
 #include <dlfcn.h>
 
 /* Risolve un accessor d'engine (`llmengine_llm_engine_*`) per NOME: il consumatore NON linka
- * hard i simboli degli engine opzionali (ds4 vendored, ds4-slow, ds41), cosi' le loro cartelle
- * restano cancellabili senza errori di compilazione/link. Fallback: l'engine MLX. */
+ * hard i simboli degli engine opzionali (ds4, ds41), cosi' le loro cartelle restano cancellabili
+ * senza errori di compilazione/link. Fallback: l'engine MLX. */
 static const LlmEngineLlmEngine* fmlx_engine_symbol(const char* name) {
     const LlmEngineLlmEngine* (*fn)(void);
     *(void**)(&fn) = dlsym(RTLD_DEFAULT, name);
