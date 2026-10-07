@@ -610,17 +610,11 @@ int fmlx_engine_load(const char *cache_root, const char *name, FmlxEngineModel *
     }
 
     out->eng = llmengine_llm_engine_mlx();
-    /* DS4 (firma GGUF "deepseek4"): usa il MOTORE ds4 VENDORIZZATO (piu' veloce del nativo:
-     * prefill ~2x, decode ~1.35x). Rilevato dalla firma, non dal nome. */
+    /* DS4 (firma GGUF "deepseek4"): motore unico DS4 nativo (LLMEngine/mlx/ds4) via ABI. */
     {
         size_t dn = strlen(out->dir);
         if (dn > 5 && strcmp(out->dir + dn - 5, ".gguf") == 0 && llm_ai_mlx_gguf_supported(out->dir) == 1) {
-            /* Due implementazioni DS4 dietro la STESSA ABI: il vendorizzato (default) e la nostra
-             * nativa "ds4-slow" (opzione di registro `ds4_backend=slow`). */
-            char bk[16]; bk[0] = 0;
-            int slow = (llm_ai_mlx_opt_get_str("ds4_backend", bk, sizeof bk) == 0) && strcmp(bk, "slow") == 0;
-            const LlmEngineLlmEngine* e = fmlx_engine_symbol(slow ? "llmengine_llm_engine_ds4slow" : "llmengine_llm_engine_ds4");
-            if (e == NULL && !slow) e = fmlx_engine_symbol("llmengine_llm_engine_ds4slow");
+            const LlmEngineLlmEngine* e = fmlx_engine_symbol("llmengine_llm_engine_ds4");
             if (e != NULL) out->eng = e;   /* altrimenti resta l'engine MLX */
         } else if (is_dsv41_dir(out->dir)) {
             /* DS4.1 (deepseek_v41): motore `ds41-native`, stessi 9 metodi dell'ABI. */
