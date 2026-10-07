@@ -3,7 +3,7 @@
 # fastllm_smoke_models.sh - smoke del motore FastLLM su TUTTI i modelli "chat"
 # del registro. NESSUNA comparazione/performance: solo load+generate OK.
 # NON-interattivo: FASTLLM_NO_OFFLOAD_PROMPT=1 (niente [Y/n] sui modelli > RAM).
-# Uso: tools/fastllm_smoke_models.sh [filtro]
+# Uso: FastLLM/tools_smoke_models.sh [filtro]
 # ============================================================================
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; cd "$ROOT"
