@@ -55,8 +55,10 @@ endif()
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../LLMEnv/LLMEngine/llama ${CMAKE_BINARY_DIR}/llmengine_llama)
 
 # Motore ds4 VENDORIZZATO (LLMEnv/LLMEngine/ds4engine): espone l'ABI `llmengine_llm_engine_ds4()`,
-# usata da fmlx per i GGUF DeepSeek-V4 (piu' veloce del motore DS4 nativo). Richiede OBJC (ds4_metal.m).
-if(APPLE)
+# usata da fmlx per i GGUF DeepSeek-V4. RITIRATO: ds4-slow e' promosso a motore DS4 unico e vive in
+# LLMEnv/LLMEngine/mlx/ds4; il vendored e' spostato in LLMEnv/backups/ds4engine. fmlx risolve l'engine
+# via dlsym CON fallback (fmlx_engine.c): senza il vendored usa `llmengine_llm_engine_ds4slow`.
+if(APPLE AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/../LLMEnv/LLMEngine/ds4engine/CMakeLists.txt)
   add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../LLMEnv/LLMEngine/ds4engine ${CMAKE_BINARY_DIR}/ds4engine)
   # llm_ai_mlx DEVE linkare ds4engine: per i GGUF DeepSeek-V4 usa l'interfaccia
   # `llmengine_llm_engine_ds4()` (il motore ds4 vendorizzato) invece dell'inline nativo.
@@ -264,7 +266,7 @@ target_include_directories(fmlx_serve PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
 # `llmtoken` (dylib nel build tree). La generazione non è opzionale in questa lane: un
 # `fastllm serve` che non potesse generare sarebbe il comando-che-risponde-di-sì.
 target_link_libraries(fmlx_serve PUBLIC fmlx_api fmlx_hf llm_ai_mlx llmtoken llmjinja llm_ai_llamacpp)
-if(APPLE)
+if(APPLE AND TARGET ds4engine)
   target_link_libraries(fmlx_serve PUBLIC ds4engine)
 endif()
 
@@ -320,7 +322,7 @@ target_link_libraries(fmlx_cli PUBLIC fmlx_hf_fetch fmlx_serve llmcodec llmcodec
 add_executable(fastllm src/cli/fastllm_main.c)
 target_link_libraries(fastllm PRIVATE fmlx_cli)
 # Il motore ds4 resolve i sorgenti Metal accanto all'ESEGUIBILE: copiali nel dir del binario.
-if(APPLE)
+if(APPLE AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/../LLMEnv/LLMEngine/ds4engine/metal)
   add_custom_command(TARGET fastllm POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
       ${CMAKE_CURRENT_SOURCE_DIR}/../LLMEnv/LLMEngine/ds4engine/metal
