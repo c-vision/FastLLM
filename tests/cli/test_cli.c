@@ -161,8 +161,14 @@ static void case_bandiere_rifiutate(void) {
     CK_PARSE(FMLX_CLI_USAGE, "fastllm", "pull");
     CK(strstr(msg, "repo") != NULL, "msg=%s", msg);
 
+    /* Un primo token che NON è un verbo è un NOME DI MODELLO: la CLI assume `chat <nome>` (è ciò
+     * che rende scrivibile `fastllm <modello>`), e l'ingresso non è un errore di parse. Il secondo
+     * posizionale, invece, resta un errore. */
+    CK_PARSE(FMLX_CLI_OK, "fastllm", "fetch");
+    CK(strcmp(a.verb, "chat") == 0 && strcmp(a.repo, "fetch") == 0, "verb=%s repo=%s", a.verb, a.repo);
+
     CK_PARSE(FMLX_CLI_USAGE, "fastllm", "fetch", "o/r");
-    CK(strstr(msg, "comando sconosciuto") != NULL, "msg=%s", msg);
+    CK(strstr(msg, "posizionali") != NULL, "msg=%s", msg);
 
     CK_PARSE(FMLX_CLI_USAGE, "fastllm");
 
@@ -183,11 +189,12 @@ static void case_bandiere_rifiutate(void) {
  * tenerli in questa lista passerebbe anche se il dispatch fosse rotto, perché NOT_WIRED sarebbe il
  * codice "giusto" per il verbo sbagliato. Le prove di run/chat stanno nella loro sezione.
  *
- * `cp` e `rm` condividono la STESSA ragione (è una sola cosa che manca: la scrittura del cache fuori
- * dal download), quindi qui non si prova più che i messaggi siano distinti — si prova che ciascuno
- * nomini il PROPRIO verbo e dica che un pezzo manca. */
+ * `cp` è l'ULTIMO verbo non cablato (manca chi scrive/cancella nel cache fuori dal download):
+ * qui si prova che il messaggio nomini il PROPRIO verbo e dica che un pezzo manca. `rm` è USCITO
+ * da questa lista: toglie una voce dal REGISTRO locale ed è cablato. Tenerlo qui passerebbe anche
+ * col dispatch rotto, perché NOT_WIRED sarebbe il codice "giusto" per il verbo sbagliato. */
 static void case_motori_non_collegati(void) {
-    static const char *const verbs[] = {"cp", "rm"};
+    static const char *const verbs[] = {"cp"};
     size_t i;
 
     for (i = 0; i < sizeof verbs / sizeof verbs[0]; i++) {
@@ -206,6 +213,22 @@ static void case_motori_non_collegati(void) {
            "%s: il messaggio non dice che il pezzo manca: %s", verbs[i], errb);
         /* Niente stdout: un comando che non può girare non emette mezzo risultato. */
         CK(on == 0, "%s: ha scritto anche su stdout (%zu byte)", verbs[i], on);
+        free(outb);
+        free(errb);
+    }
+
+    /* `rm` è cablato (registro): su una voce ASSENTE fallisce per la registrazione, non con
+     * NOT_WIRED — è il codice che distingue "non ancora possibile" da "possibile e fallito". */
+    {
+        FmlxCliArgs a;
+        char msg[256];
+        char *outb = NULL, *errb = NULL;
+        size_t en = 0, on = 0;
+        FILE *out = open_memstream(&outb, &on), *err = open_memstream(&errb, &en);
+        CK_PARSE(FMLX_CLI_OK, "fastllm", "rm", "qualcosa");
+        CK_ST(fmlx_cli_exec_with(&a, &DEAD, out, err), FMLX_CLI_FAILED);
+        fclose(out);
+        fclose(err);
         free(outb);
         free(errb);
     }
@@ -528,7 +551,7 @@ static void case_models_quiet(void) {
     size_t on = 0, en = 0, lines = 0;
     FILE *out = open_memstream(&outb, &on), *err = open_memstream(&errb, &en);
 
-    CK_PARSE(FMLX_CLI_OK, "fastllm", "list", "--cache", at("cache"), "--quiet");
+    CK_PARSE(FMLX_CLI_OK, "fastllm", "models", "--cache", at("cache"), "--quiet");
     CK_ST(fmlx_cli_exec_with(&a, &DEAD, out, err), FMLX_CLI_OK);
     fclose(out);
     fclose(err);
@@ -541,8 +564,10 @@ static void case_models_quiet(void) {
     for (const char *p = outb; p && *p; p++)
         if (*p == '\n') lines++;
     CK(lines == 4, "righe=%zu, attese 4 (una per repo)\n%s", lines, outb ? outb : "(vuoto)");
-    /* `list` alias di `models`: stessa tabella, stesse colonne. */
-    CK(en == 0, "l'alias ha scritto sull'errore: %s", errb ? errb : "(null)");
+    /* `models --quiet`: SOLO gli id, nell'ordine del catalogo, zero colonne. (`list` è il registro
+     * NUMERATO — registro locale + cache — e ha una tabella propria: non è un alias di `models`, e
+     * il suo header resta anche con `--quiet`.) */
+    CK(en == 0, "l'elenco ha scritto sull'errore: %s", errb ? errb : "(null)");
     free(outb);
     free(errb);
 }
@@ -606,8 +631,8 @@ static void case_models_filtro(void) {
     char *up[] = {"fastllm", "models", "--cache", NULL, "MM/UNO"};
     char *none[] = {"fastllm", "models", "--cache", NULL, "nope/nope"};
     char *star[] = {"fastllm", "models", "--cache", NULL, "or*x"};
-    char *q[] = {"fastllm", "list", "--quiet", "--cache", NULL, "uno"};
-    char *qnone[] = {"fastllm", "list", "--quiet", "--cache", NULL, "nope/nope"};
+    char *q[] = {"fastllm", "models", "--quiet", "--cache", NULL, "uno"};
+    char *qnone[] = {"fastllm", "models", "--quiet", "--cache", NULL, "nope/nope"};
 
     build_cache_fixture();
     /* `at()` dà UN buffer statico: `cv` si cattura DOPO l'ultima chiamata della fixture, o punterebbe
@@ -932,51 +957,54 @@ static void case_aiuto(void) {
     fclose(out);
     if (b) b[n] = '\0';
     CK(b && strstr(b, "pull <repo>") != NULL, "l'aiuto non nomina pull: %s", b ? b : "(vuoto)");
-    CK(b && strstr(b, "models, list") != NULL, "l'aiuto non nomina models: %s", b ? b : "(vuoto)");
-    CK(b && strstr(b, "in attesa del motore") != NULL, "l'aiuto non distingue i verbi non cablati");
-    /* Un verbo che ORA gira non può restare nella lista di quelli in attesa: sarebbe il contrario
-     * della regola per cui l'aiuto dice ciò che esiste. Vale per `models`, `serve`, `doctor` e — dal
-     * passo 5 — per `run`, `chat`, `ps`, che ora usano il motore davvero. La lista di attesa è
-     * scesa a `cp, rm`. */
-    {
-        const char *tail = strstr(b, "in attesa del motore");
-        CK(tail && strstr(tail, "models") == NULL, "`models` ancora tra i verbi non cablati");
-        CK(tail && strstr(tail, "serve") == NULL, "`serve` ancora tra i verbi non cablati");
-        CK(tail && strstr(tail, "run") == NULL, "`run` ancora tra i verbi non cablati");
-        CK(tail && strstr(tail, "chat") == NULL, "`chat` ancora tra i verbi non cablati");
-        CK(tail && strstr(tail, "ps") == NULL, "`ps` ancora tra i verbi non cablati");
-        CK(tail && strstr(tail, "cp") != NULL, "`cp` manca dalla lista di attesa");
-    }
+    CK(b && strstr(b, "models [<filtro>]") != NULL, "l'aiuto non nomina models: %s", b ? b : "(vuoto)");
+    CK(b && strstr(b, "list, ls") != NULL, "l'aiuto non nomina list/ls: %s", b ? b : "(vuoto)");
+    /* Un verbo che gira DEVE comparire nell'aiuto, e non tra quelli "in attesa": l'aiuto dice ciò
+     * che ESISTE. Oggi nell'aiuto non c'è alcuna lista di verbi in attesa. */
+    CK(b && strstr(b, "in attesa del motore") == NULL, "l'aiuto promette verbi in attesa che girano");
     CK(b && strstr(b, "  serve ") != NULL, "l'aiuto non nomina serve: %s", b ? b : "(vuoto)");
-    CK(b && strstr(b, "  run <modello> [prompt]") != NULL, "l'aiuto non nomina run: %s",
-       b ? b : "(vuoto)");
-    CK(b && strstr(b, "  chat <modello>") != NULL, "l'aiuto non nomina chat: %s", b ? b : "(vuoto)");
+    CK(b && strstr(b, "  run <nome|#n>") != NULL, "l'aiuto non nomina run: %s", b ? b : "(vuoto)");
+    CK(b && strstr(b, "  chat <nome|#n>") != NULL, "l'aiuto non nomina chat: %s", b ? b : "(vuoto)");
     CK(b && strstr(b, "  ps ") != NULL, "l'aiuto non nomina ps: %s", b ? b : "(vuoto)");
-    /* Le bandiere nuove devono essere leggibili: `--max-tokens`/`--system` esistono solo per chi ha
-     * letto il sorgente se l'aiuto non le nomina. */
-    CK(b && strstr(b, "--max-tokens") != NULL && strstr(b, "--system") != NULL,
-       "l'aiuto non elenca le bandiere di run/chat");
-    CK(b && strstr(b, "--json") != NULL, "l'aiuto non nomina --json di models");
-    /* Le bandiere nuove devono essere leggibili: un `--port` che non è scritto nell'aiuto è una
-     * bandiera che esiste solo per chi ha letto il sorgente. */
-    CK(b && strstr(b, "--port") != NULL && strstr(b, "--max-body") != NULL &&
-           strstr(b, "--once") != NULL,
-       "l'aiuto non elenca le bandiere di serve");
-    /* E l'auth DEVE dire da dove arriva: una chiave in argv finirebbe nella cronologia della
-     * shell e nei processi altrui, la stessa ragione di HF_TOKEN. */
-    CK(b && strstr(b, "FASTLLM_API_KEY") != NULL, "l'aiuto non dice come si passa la chiave");
+    CK(b && strstr(b, "  doctor ") != NULL, "l'aiuto non nomina doctor: %s", b ? b : "(vuoto)");
+    /* L'auth e il token arrivano SOLO da ambiente: la help lo dice, perché una chiave in argv
+     * finirebbe nella cronologia della shell e nei processi altrui. */
     CK(b && strstr(b, "HF_TOKEN") != NULL, "l'aiuto non dice come si passa il token");
-    /* Il filtro e la sua regola d'uscita stanno qui dentro, non solo nel sorgente: chi digita
-     * `models xyz` e riceve 1 deve poter leggere PERCHÉ senza aprire `fmlx_models.c`. */
+    CK(b && strstr(b, "$FASTLLM_HOME/models.tsv") != NULL, "l'aiuto non dice dove sta il registro");
+    /* Il filtro e la sua regola d'uscita stanno qui dentro: chi digita `models xyz` e riceve 1 deve
+     * poter leggere PERCHÉ senza aprire `fmlx_models.c`. */
     CK(b && strstr(b, "[<filtro>]") != NULL, "l'aiuto non nomina il filtro di `models`");
-    CK(b && strstr(b, "uscita 1") != NULL, "l'aiuto non dice che zero match sono un fallimento");
-    /* E la politica dell'avanzamento: un carattere di controllo che arriva in una pipe è ciò che
-     * l'utente legge come sporcizia, quindi il contratto si dichiara prima che si scopra. */
-    CK(b && strstr(b, " UNA riga che si riscrive") != NULL,
-       "l'aiuto non dice come il `pull` segna l'avanzamento");
-    CK(b && strstr(b, "senza nessun carattere di controllo") != NULL,
-       "l'aiuto non dice che su pipe/log non ci sono `\\r`");
     free(b);
+
+    /* Le bandiere di run/chat e di serve stanno nell'aiuto PER-VERBO (`fastllm help <verbo>`):
+     * là devono essere leggibili, o esisterebbero solo per chi legge il sorgente. */
+    {
+        char *rb = NULL;
+        size_t rn = 0;
+
+        FILE *ro = open_memstream(&rb, &rn);
+        CK_PARSE(FMLX_CLI_OK, "fastllm", "help", "run");
+        CK_ST(fmlx_cli_exec_with(&a, &DEAD, ro, ro), FMLX_CLI_OK);
+        fclose(ro);
+        if (rb) rb[rn] = '\0';
+        CK(rb && strstr(rb, "--max-tokens") != NULL && strstr(rb, "--system") != NULL,
+           "help run non elenca le bandiere di run/chat");
+        free(rb);
+    }
+    {
+        char *sb = NULL;
+        size_t sn = 0;
+
+        FILE *so = open_memstream(&sb, &sn);
+        CK_PARSE(FMLX_CLI_OK, "fastllm", "help", "serve");
+        CK_ST(fmlx_cli_exec_with(&a, &DEAD, so, so), FMLX_CLI_OK);
+        fclose(so);
+        if (sb) sb[sn] = '\0';
+        CK(sb && strstr(sb, "--port") != NULL && strstr(sb, "--max-body") != NULL &&
+               strstr(sb, "--once") != NULL,
+           "help serve non elenca le bandiere di serve");
+        free(sb);
+    }
 }
 
 int main(int argc, char **argv) {
@@ -1003,6 +1031,18 @@ int main(int argc, char **argv) {
     }
     snprintf(WORK, sizeof WORK, "%s", argv[1]);
     wipe(WORK);
+
+    /* Il registro è `$FASTLLM_HOME/models.tsv` (default `~/.fastllm/models.tsv`): senza un home
+     * controllato i test di `models`/`list` leggerebbero il registro VERO della macchina e
+     * conterebbero i modelli di chi esegue — l'ambiente di chi esegue non deve decidere i
+     * risultati. `list`/`models` uniscono registro + cache `--cache`, quindi qui il registro è
+     * VUOTO e la sola sorgente è il fixture. */
+    {
+        char h[FMLX_HF_PATH_MAX];
+        snprintf(h, sizeof h, "%s/home", WORK);
+        fmlx_hf_mkdir_p(h);
+        setenv("FASTLLM_HOME", h, 1);
+    }
 
     case_pull_minimo();
     case_pull_ogni_bandiera();
