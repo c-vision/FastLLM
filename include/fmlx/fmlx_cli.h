@@ -95,11 +95,13 @@ typedef struct {
                           * esistere anche nel server, o sarebbe una bandiera che mente (§1.1) */
     int quiet;
     int json;      /* `models --json`: la stessa tabella in forma macchina-leggibile */
+    int diffable;  /* `tensors --diffable`: omette offset/byte -> output deterministico (golden/diff) */
     int want_help; /* -h/--help: NON è un errore, e l'uscita è 0 */
     int search_walk;      /* `search --walk`: forza il walk del filesystem (niente Spotlight) */
     int search_max_depth; /* `search --max-depth N`: tetto di profondita' (0 = nessun tetto) */
     int search_roots;     /* `search --roots`: mostra le cartelle RADICE (tree), non i singoli modelli */
     char search_type[8];  /* `search --type`: filtra mlx|gguf|hf (vuoto = tutti) */
+    const char *glob;     /* `compare --glob`: filtro glob sui nomi tensore, NULL = tutti */
     /* Parametri del motore (registro, NIENTE env): `--opt nome=valore`, ripetibile. */
     char opts[16][192];
     int  n_opts;
@@ -145,6 +147,15 @@ FmlxCliStatus fmlx_search_exec(const FmlxCliArgs *a, FILE *out, FILE *err);
 
 /* `fastllm test <nome|#n|path>` — il modello e' completo su disco e non corrotto? */
 FmlxCliStatus fmlx_test_exec(const FmlxCliArgs *a, FILE *out, FILE *err);
+
+/* `fastllm compare <a.gguf> <b.gguf> [--glob G]` — confronto NUMERICO per-tensore tra due GGUF
+ * (dequant + rel_l2 + avg_diff% normalizzato, stile antirez/gguf-tools). Lineage/frozen-layer e
+ * breakdown per-ruolo. Core in LLMEnv/LLMCodec (`llmcodec_gguf_compare`), UNA SOLA SORGENTE. */
+FmlxCliStatus fmlx_compare_exec(const FmlxCliArgs *a, FILE *out, FILE *err);
+
+/* `fastllm tensors <model.gguf> [--diffable]` — dump di KV + tabella tensori (port di antirez
+ * gguf-tools `show`). `--diffable` omette offset/byte -> output deterministico per golden/diff. */
+FmlxCliStatus fmlx_tensors_exec(const FmlxCliArgs *a, FILE *out, FILE *err);
 
 /* ---- registro locale (stile Ollama) — src/cli/fmlx_registry.c ---- */
 

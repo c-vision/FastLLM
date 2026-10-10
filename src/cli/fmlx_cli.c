@@ -55,6 +55,8 @@ void fmlx_cli_usage(FILE *out) {
             "                         inventaria dove ESISTONO modelli\n"
             "  search [<dir>]         trova i MODELLI (--roots: le cartelle radice); default: tutti i dischi\n"
             "  test <nome|#n|path>    verifica che il modello sia COMPLETO e non corrotto su disco\n"
+            "  compare <a.gguf> <b.gguf>   confronto numerico PER-TENSORE tra due GGUF (lineage/frozen-layer)\n"
+            "  tensors <model.gguf>    dump di KV + tabella tensori (--diffable: output deterministico)\n"
             "\n"
             "GENERAZIONE\n"
             "  run <nome|#n> [prompt] una generazione col motore; il testo esce token-live\n"
@@ -186,6 +188,36 @@ static void usage_verb(FILE *out, const char *v) {
             "  fastllm test ds4\n"
             "  fastllm test ~/ai/Models/Qwen3-8B-4bit\n"
             "  fastllm test /Volumes/Armor5TB/LocalLLM/ai/models/Qwen3.8-27B-DFlash2\n");
+    else if (!strcmp(v, "compare"))
+        fprintf(out,
+            "fastllm compare <a.gguf> <b.gguf> [opzioni]\n"
+            "  <a.gguf> <b.gguf>      due modelli GGUF da confrontare (per nome tensore)\n"
+            "  --glob <pat>           filtro glob sui nomi tensore (es. 'blk.*.ffn_*'; default: tutti)\n"
+            "  -h, --help             questo testo\n"
+            "\n"
+            "Confronto NUMERICO PER-TENSORE (dequantizza i tensori comuni e ne misura la differenza):\n"
+            "  rel_l2       = sqrt(Sum (cand-ref)^2 / Sum ref^2)\n"
+            "  avg_diff%%    = avg|Delta|/avg_mag*75   (0 = identico, ~100 = random)\n"
+            "Utile per LINEAGE (questo modello deriva da quello? quali layer sono FROZEN: avg_diff ~ 0)\n"
+            "e per il breakdown per-ruolo dopo quant/surgery (non un solo numero aggregato).\n"
+            "\n"
+            "esempi:\n"
+            "  fastllm compare base.gguf quant.gguf\n"
+            "  fastllm compare a.gguf b.gguf --glob 'blk.*.attn_*'\n");
+    else if (!strcmp(v, "tensors"))
+        fprintf(out,
+            "fastllm tensors <model.gguf> [opzioni]\n"
+            "  <model.gguf>           un file GGUF\n"
+            "  --diffable             OMETTE offset e byte dei tensori (output deterministico per diff)\n"
+            "  -h, --help             questo testo\n"
+            "\n"
+            "Stampa i metadati (key-value) e la TABELLA tensori (tipo, nome, dims; e offset+byte se non\n"
+            "--diffable). Port di `gguf-tools show` (antirez). Con --diffable due file identici a meno\n"
+            "della disposizione dei byte danno lo STESSO output -> golden test / diff stabili.\n"
+            "\n"
+            "esempi:\n"
+            "  fastllm tensors modello.gguf\n"
+            "  fastllm tensors modello.gguf --diffable\n");
     else if (!strcmp(v, "list") || !strcmp(v, "ls"))
         fprintf(out,
             "fastllm list   (alias: ls)   [opzioni]\n"
@@ -337,7 +369,8 @@ static const char *missing_piece(const char *verb) {
 static int is_verb(const char *v) {
     static const char *const known[] = {"pull", "run", "chat",  "serve", "models",
                                         "list", "ls",  "ps",    "cp",    "rm",    "doctor",
-                                        "add",  "show", "help",  "options", "paths", "search", "test"};
+                                        "add",  "show", "help",  "options", "paths", "search", "test",
+                                        "compare", "tensors"};
     size_t i;
     for (i = 0; i < sizeof known / sizeof known[0]; i++)
         if (!strcmp(v, known[i])) return 1;
@@ -385,6 +418,7 @@ enum {
     F_MMPROJ, F_MODALITY, F_PURGE,
     F_OPT,
     F_WALK, F_MAXDEPTH, F_ROOTS, F_TYPE, F_PARALLEL, F_BATCH,
+    F_GLOB, F_DIFFABLE,
     F_N
 };
 #define F_PULL_ONLY                                                                                            \
@@ -409,27 +443,27 @@ enum {
 #define F_BOOLEANI                                                                                             \
     ((1u << F_QUIET) | (1u << F_OFFLINE) | (1u << F_REPAIR) | (1u << F_ONCE) | (1u << F_JSON) |                \
      (1u << F_THINK) | (1u << F_OFFLOAD) | (1u << F_PURGE) | (1u << F_WALK) | (1u << F_ROOTS) |      \
-     (1u << F_BATCH))
+     (1u << F_BATCH) | (1ull << F_DIFFABLE))
 
 static const char *const FLN[F_N] = {
     "--quiet",    "--cache",        "--revision", "--endpoint", "--max-bytes", "--stall-timeout",
     "--stall-retries", "--dest",     "--offline",  "--repair",   "--host",      "--port",
     "--max-body", "--once",         "--vision-model", "--vision-mmproj", "--json", "--max-tokens", "--system", "--think",
     "--offload-experts", "--mmproj", "--modality", "--purge", "--opt", "--walk", "--max-depth", "--roots", "--type",
-    "--parallel", "--batch"};
+    "--parallel", "--batch", "--glob", "--diffable"};
 
 /* Il bit della bandiera `n`, 0 se la bandiera non esiste. */
-static unsigned flag_bit(const char *n) {
+static unsigned long long flag_bit(const char *n) {
     int i;
     for (i = 0; i < F_N; i++)
-        if (!strcmp(n, FLN[i])) return 1u << i;
+        if (!strcmp(n, FLN[i])) return 1ull << i;
     return 0;
 }
 
 FmlxCliStatus fmlx_cli_parse(int argc, char **argv, FmlxCliArgs *out, char *msg, size_t msg_len) {
     int i, verb_seen = 0, repo_seen = 0;
     long long n;
-    unsigned seen = 0;
+    unsigned long long seen = 0;
 
     memset(out, 0, sizeof *out);
     out->revision = "main";
@@ -441,7 +475,7 @@ FmlxCliStatus fmlx_cli_parse(int argc, char **argv, FmlxCliArgs *out, char *msg,
         const char *name;
         const char *val = NULL;
         const char *eq;
-        unsigned b;
+        unsigned long long b;
 
         if (!a) return fail(out, msg, msg_len, "argomento NULL alla posizione %d", i);
 
@@ -491,6 +525,13 @@ FmlxCliStatus fmlx_cli_parse(int argc, char **argv, FmlxCliArgs *out, char *msg,
                                     (int)sizeof out->path);
                     continue;
                 }
+                /* `compare <a.gguf> <b.gguf>`: il secondo posizionale è il SECONDO modello. */
+                if (!strcmp(out->verb, "compare") && !out->path[0]) {
+                    if (snprintf(out->path, sizeof out->path, "%s", a) >= (int)sizeof out->path)
+                        return fail(out, msg, msg_len, "compare: il percorso supera %d byte",
+                                    (int)sizeof out->path);
+                    continue;
+                }
                 return fail(out, msg, msg_len, "troppi argomenti posizionali: %s", a);
             }
             snprintf(out->repo, sizeof out->repo, "%s", a);
@@ -518,6 +559,7 @@ FmlxCliStatus fmlx_cli_parse(int argc, char **argv, FmlxCliArgs *out, char *msg,
         if (!strcmp(name, "--repair")) { out->pull.fetch.repair = 1; continue; }
         if (!strcmp(name, "--once")) { out->serve.max_conns = 1; continue; }
         if (!strcmp(name, "--json")) { out->json = 1; continue; }
+        if (!strcmp(name, "--diffable")) { out->diffable = 1; continue; }
         if (!strcmp(name, "--think")) { out->show_think = 1; continue; }
         if (!strcmp(name, "--offload-experts")) { out->offload_experts = 1; continue; }
         if (!strcmp(name, "--purge")) { out->purge = 1; continue; }
@@ -594,6 +636,8 @@ FmlxCliStatus fmlx_cli_parse(int argc, char **argv, FmlxCliArgs *out, char *msg,
             if (!parse_num(val, 1, 4096, &n))
                 return fail(out, msg, msg_len, "--max-depth: '%s' non è un numero >= 1", val);
             out->search_max_depth = (int)n;
+        } else if (!strcmp(name, "--glob")) {
+            out->glob = val;   /* filtro glob sui nomi tensore (`compare`) */
         } else if (!strcmp(name, "--system")) {
             out->system = val;
         } else if (!strcmp(name, "--opt")) {
@@ -658,7 +702,7 @@ FmlxCliStatus fmlx_cli_parse(int argc, char **argv, FmlxCliArgs *out, char *msg,
      * risposta onesta è ancora una sola — non esistono — ed è `NOT_WIRED` nel dispatch, non un
      * elenco di bandiere che NON accettano. */
     if (verb_seen) {
-        unsigned allowed = (1u << F_QUIET) | (1u << F_CACHE) | (1u << F_OPT); /* condivise: sempre */
+        unsigned long long allowed = (1ull << F_QUIET) | (1ull << F_CACHE) | (1ull << F_OPT); /* condivise: sempre */
         int has_surface = 1, k;
         if (!strcmp(out->verb, "pull")) allowed |= F_PULL_ONLY;
         else if (!strcmp(out->verb, "serve")) allowed |= F_SERVE_ONLY;
@@ -672,6 +716,8 @@ FmlxCliStatus fmlx_cli_parse(int argc, char **argv, FmlxCliArgs *out, char *msg,
         else if (!strcmp(out->verb, "search"))
             allowed |= (1u << F_JSON) | (1u << F_WALK) | (1u << F_MAXDEPTH) | (1u << F_ROOTS) | (1u << F_TYPE);
         else if (!strcmp(out->verb, "test")) allowed |= 0; /* solo le condivise (--quiet) */
+        else if (!strcmp(out->verb, "compare")) allowed |= (1u << F_GLOB);
+        else if (!strcmp(out->verb, "tensors")) allowed |= (1ull << F_DIFFABLE);
         else if (!strcmp(out->verb, "rm")) allowed |= F_RM_ONLY;
         else if (!strcmp(out->verb, "show") || !strcmp(out->verb, "help")) allowed |= 0;
         else has_surface = 0; /* cp: nessuna superficie da difendere */
@@ -822,6 +868,8 @@ FmlxCliStatus fmlx_cli_exec_with(const FmlxCliArgs *a_in, const FmlxHfTransport 
     if (!strcmp(a->verb, "paths")) return fmlx_paths_exec(a, out, err);
     if (!strcmp(a->verb, "search")) return fmlx_search_exec(a, out, err);
     if (!strcmp(a->verb, "test")) return fmlx_test_exec(a, out, err);
+    if (!strcmp(a->verb, "compare")) return fmlx_compare_exec(a, out, err);
+    if (!strcmp(a->verb, "tensors")) return fmlx_tensors_exec(a, out, err);
     if (!strcmp(a->verb, "doctor"))
         /* Nemmeno qui il transport viene guardato: l'audit hashà ciò che è già su disco, e una
          * rete finta non aggiungerebbe nessuna prova — semmai ne toglierebbe, perché il verdetto

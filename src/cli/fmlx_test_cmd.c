@@ -63,7 +63,9 @@ static int t_check_gguf(const char *path, char *msg, size_t mn) {
         uint64_t e = info.data_start + info.tensors[i].offset + llmcodec_gguf_tensor_bytes(&info.tensors[i]);
         if (e > end) end = e;
     }
-    if (info.alignment > 1) end = ((end + info.alignment - 1) / info.alignment) * info.alignment;
+    /* NB: NON si arrotonda `end` all'allineamento. In GGUF ogni tensore PARTE a un offset allineato
+     * (tra tensori c'e' il padding), ma l'ULTIMO tensore puo' terminare a EOF SENZA padding finale:
+     * un file il cui ultimo dato finisce esattamente a fine file e' VALIDO (llama.cpp fa cosi').*/
     if (info.file_size < end) {
         t_fmt(end - info.file_size, fb, sizeof fb);
         snprintf(msg, mn, "TRONCATO: i tensori chiedono %s, il file ne ha %s in meno (%llu tensori)", fb, fb, (unsigned long long)info.n_tensors);
