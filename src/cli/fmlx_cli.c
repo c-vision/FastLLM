@@ -218,6 +218,17 @@ static void usage_verb(FILE *out, const char *v) {
             "esempi:\n"
             "  fastllm tensors modello.gguf\n"
             "  fastllm tensors modello.gguf --diffable\n");
+    else if (!strcmp(v, "asr"))
+        fprintf(out,
+            "fastllm asr <model_dir> <file.wav>\n"
+            "  <model_dir>            dir di un modello Qwen3-ASR (0.6B/1.7B, safetensors HF)\n"
+            "  <file.wav>             audio da trascrivere (PCM 16-bit, mono/stereo, qualsiasi rate)\n"
+            "  -h, --help             questo testo\n"
+            "\n"
+            "Speech-to-text (engine ASR nativo, inference). Il testo esce TOKEN-LIVE su stdout\n"
+            "(streaming: chunk 2 s + cache finestre encoder + prefix rollback). Al termine una riga\n"
+            "vuota. Esempio:\n"
+            "  fastllm asr ~/ai/Models/Qwen3-ASR-0.6B discorso.wav\n");
     else if (!strcmp(v, "list") || !strcmp(v, "ls"))
         fprintf(out,
             "fastllm list   (alias: ls)   [opzioni]\n"
@@ -370,7 +381,7 @@ static int is_verb(const char *v) {
     static const char *const known[] = {"pull", "run", "chat",  "serve", "models",
                                         "list", "ls",  "ps",    "cp",    "rm",    "doctor",
                                         "add",  "show", "help",  "options", "paths", "search", "test",
-                                        "compare", "tensors"};
+                                        "compare", "tensors", "asr"};
     size_t i;
     for (i = 0; i < sizeof known / sizeof known[0]; i++)
         if (!strcmp(v, known[i])) return 1;
@@ -529,6 +540,13 @@ FmlxCliStatus fmlx_cli_parse(int argc, char **argv, FmlxCliArgs *out, char *msg,
                 if (!strcmp(out->verb, "compare") && !out->path[0]) {
                     if (snprintf(out->path, sizeof out->path, "%s", a) >= (int)sizeof out->path)
                         return fail(out, msg, msg_len, "compare: il percorso supera %d byte",
+                                    (int)sizeof out->path);
+                    continue;
+                }
+                /* `asr <model_dir> <file.wav>`: il secondo posizionale è il WAV da trascrivere. */
+                if (!strcmp(out->verb, "asr") && !out->path[0]) {
+                    if (snprintf(out->path, sizeof out->path, "%s", a) >= (int)sizeof out->path)
+                        return fail(out, msg, msg_len, "asr: il percorso supera %d byte",
                                     (int)sizeof out->path);
                     continue;
                 }
@@ -870,6 +888,7 @@ FmlxCliStatus fmlx_cli_exec_with(const FmlxCliArgs *a_in, const FmlxHfTransport 
     if (!strcmp(a->verb, "test")) return fmlx_test_exec(a, out, err);
     if (!strcmp(a->verb, "compare")) return fmlx_compare_exec(a, out, err);
     if (!strcmp(a->verb, "tensors")) return fmlx_tensors_exec(a, out, err);
+    if (!strcmp(a->verb, "asr")) return fmlx_asr_exec(a, out, err);
     if (!strcmp(a->verb, "doctor"))
         /* Nemmeno qui il transport viene guardato: l'audit hashà ciò che è già su disco, e una
          * rete finta non aggiungerebbe nessuna prova — semmai ne toglierebbe, perché il verdetto

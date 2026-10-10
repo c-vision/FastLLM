@@ -157,6 +157,11 @@ FmlxCliStatus fmlx_compare_exec(const FmlxCliArgs *a, FILE *out, FILE *err);
  * gguf-tools `show`). `--diffable` omette offset/byte -> output deterministico per golden/diff. */
 FmlxCliStatus fmlx_tensors_exec(const FmlxCliArgs *a, FILE *out, FILE *err);
 
+/* `fastllm asr <model_dir> <file.wav>` — speech-to-text Qwen3-ASR (engine nativo C, inference).
+ * Il testo esce TOKEN-LIVE su `out` (streaming). Engine in LLMEnv/LLMEngine/asr (target `llm_asr`),
+ * la STESSA sorgente usata da GMBasic (superficie BASIC `ASR.RECOGNIZE`). */
+FmlxCliStatus fmlx_asr_exec(const FmlxCliArgs *a, FILE *out, FILE *err);
+
 /* ---- registro locale (stile Ollama) — src/cli/fmlx_registry.c ---- */
 
 /* `add <nome> <path> [--mmproj <p>] [--modality chat|vlm|ocr|audio]`: registra un modello locale

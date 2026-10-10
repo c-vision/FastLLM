@@ -54,6 +54,10 @@ if(APPLE)
 endif()
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../LLMEnv/LLMEngine/llama ${CMAKE_BINARY_DIR}/llmengine_llama)
 
+# Engine ASR Qwen3-ASR (inference-only, Apache) per `fastllm asr`. Stessa libreria `llm_asr`
+# consumata da GMBasic: nessuna copia dei sorgenti.
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../LLMEnv/LLMEngine/asr ${CMAKE_BINARY_DIR}/llmengine_asr)
+
 
 # MLX carica `mlx.metallib` a runtime dal path ASSOLUTO compilato in libmlx (target `mlx-metallib`
 # di MLX). Senza il file, OGNI forward Metal fallisce. Il target esiste, ma MLX lo lascia
@@ -290,7 +294,8 @@ add_library(fmlx_cli STATIC src/cli/fmlx_pull.c src/cli/fmlx_models.c src/cli/fm
                             src/cli/fmlx_gen.c src/cli/fmlx_run.c src/cli/fmlx_chat.c
                             src/cli/fmlx_ps.c src/cli/fmlx_banner.c src/cli/fmlx_registry.c
                             src/cli/fmlx_paths_cmd.c src/cli/fmlx_search_cmd.c
-                            src/cli/fmlx_test_cmd.c src/cli/fmlx_compare.c src/cli/fmlx_tensors.c)
+                            src/cli/fmlx_test_cmd.c src/cli/fmlx_compare.c src/cli/fmlx_tensors.c
+                            src/cli/fmlx_asr.c)
 target_include_directories(fmlx_cli PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
                                       ${CMAKE_CURRENT_SOURCE_DIR}/../LLMEnv/LLMEngine/mlx
                                       ${CMAKE_CURRENT_SOURCE_DIR}/../LLMEnv/LLMEngine/Options
@@ -299,7 +304,7 @@ target_include_directories(fmlx_cli PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
 # `fmlx_serve` tra le dipendenze PUBBLICHE: il verbo c'è solo se il loop c'è, e un `serve` che
 # compilasse senza il socket sarebbe il "comando che risponde di sì" che il piano vieta. Da lì
 # arrivano anche `llm_ai_mlx`/`llmtoken`/`llmjinja`, cioè il motore di cui `run`/`chat` si servono.
-target_link_libraries(fmlx_cli PUBLIC fmlx_hf_fetch fmlx_serve llmcodec llmcodec_ggml)
+target_link_libraries(fmlx_cli PUBLIC fmlx_hf_fetch fmlx_serve llmcodec llmcodec_ggml llm_asr)
 
 add_executable(fastllm src/cli/fastllm_main.c)
 target_link_libraries(fastllm PRIVATE fmlx_cli)
