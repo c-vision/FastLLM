@@ -22,6 +22,7 @@
 #include <time.h>
 #include <math.h>
 #include <pthread.h>
+#include "llm_grammar.h"
 
 /* MLX: device/stream di default PER-THREAD. Ogni thread di lavoro che usa il motore deve
  * registrarlo (idempotente), altrimenti la prima op MLX aborta con "no Stream(gpu, 0)". */
@@ -858,6 +859,20 @@ static int advance(FmlxEngineGen *g, char *err, size_t errcap) {
     int32_t id = 0;
 
     if (adv_no_token(g)) return 0;
+    if (g->gram) { /* token dalla bitmask della grammatica (ABI v6), greedy */
+        LlmGrammar *gr = (LlmGrammar *)g->gram;
+        if (llm_grammar_fill_mask(gr, g->gmask) <= 0) {
+            snprintf(err, errcap, "the grammar has no valid continuation");
+            return -1;
+        }
+        int rc = g->m->eng->generate_id_masked(g->session, g->gmask, g->gwords, &id);
+        if (rc != 0) {
+            snprintf(err, errcap, "the engine failed while generating");
+            return -1;
+        }
+        (void)llm_grammar_accept(gr, id);
+        return gen_apply_token(g, id == g->m->eos ? 0 : 1, id, err, errcap);
+    }
     if (g->want_logprobs) {
         float lp = 0.0f;
         /* TOP-K (ABI v3): prima del passo, la distribuzione pending fotografata ha lo stesso
@@ -874,6 +889,84 @@ static int advance(FmlxEngineGen *g, char *err, size_t errcap) {
         got = g->m->eng->generate_ids(g->session, 1, g->m->eos, &id);
     }
     return gen_apply_token(g, got, id, err, errcap);
+}
+
+/* ---- GRAMMATICA (response_format) ----
+ * Tabella id -> byte del vocabolario, costruita una volta per modello (decode di ogni id SENZA strip dello spazio
+ * iniziale). I token speciali (tipo CONTROL del tokenizer, oppure <|...|>, <s>, </s>, <unk>, <pad>) hanno lunghezza 0:
+ * la grammatica non li ammette mai tranne l'EOS a documento completo. */
+static struct { const FmlxEngineModel *m; int n; uint8_t **tok; int *len; } g_gv;
+static pthread_mutex_t g_gv_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static int gram_special_text(const char *s, int l) {
+    if (l >= 4 && s[0] == '<' && s[1] == '|' && s[l - 2] == '|' && s[l - 1] == '>') return 1;
+    if ((l == 3 && !memcmp(s, "<s>", 3)) || (l == 4 && !memcmp(s, "</s>", 4)) || (l == 5 && !memcmp(s, "<unk>", 5)) ||
+        (l == 5 && !memcmp(s, "<pad>", 5)))
+        return 1;
+    return 0;
+}
+
+static int gram_vocab(const FmlxEngineModel *m) {
+    size_t n = 0;
+
+    pthread_mutex_lock(&g_gv_mu);
+    if (g_gv.m == m && g_gv.n > 0) { pthread_mutex_unlock(&g_gv_mu); return g_gv.n; }
+    if (!m->tok || !llmtoken_export_tokens(m->tok, &n) || n == 0) { pthread_mutex_unlock(&g_gv_mu); return 0; }
+    size_t nt = 0;
+    const int32_t *types = llmtoken_export_token_types(m->tok, &nt);
+    uint8_t **tok = calloc(n, sizeof *tok);
+    int *len = calloc(n, sizeof *len);
+    if (!tok || !len) { free(tok); free(len); pthread_mutex_unlock(&g_gv_mu); return 0; }
+    char buf[512];
+    for (size_t i = 0; i < n; i++) {
+        int32_t id = (int32_t)i;
+        int l = llmtoken_decode_ex(m->tok, &id, 1, buf, sizeof buf, 0);
+        if (l <= 0 || l >= (int)sizeof buf) continue;
+        if (types && i < nt && types[i] == 3) continue;   /* CONTROL */
+        if (gram_special_text(buf, l)) continue;
+        tok[i] = malloc((size_t)l);
+        if (!tok[i]) continue;
+        memcpy(tok[i], buf, (size_t)l);
+        len[i] = l;
+    }
+    if (g_gv.tok) { for (int i = 0; i < g_gv.n; i++) free(g_gv.tok[i]); free(g_gv.tok); free(g_gv.len); }
+    g_gv.m = m; g_gv.n = (int)n; g_gv.tok = tok; g_gv.len = len;
+    pthread_mutex_unlock(&g_gv_mu);
+    return (int)n;
+}
+
+/* Crea la grammatica per la richiesta (NULL = nessun vincolo o non supportato: resta l'istruzione nel prompt). */
+static void gram_setup(FmlxEngineGen *g, const FmlxApiChat *c, const FmlxEngineModel *m) {
+    LlmGrammar *gr = NULL;
+    char err[200] = "";
+
+    if (!c || !c->response_format || !(c->rf_json_object || c->rf_json_schema)) return;
+    if (!m->eng->generate_id_masked || g->want_logprobs || g->want_think) return;
+    if (c->tools && fmlx_json_arr_n(c->tools)) return;   /* tool-calling: l'uscita non e' un singolo documento JSON */
+    if (c->rf_json_schema) {
+        const FmlxJsonValue *js = fmlx_json_obj_get(c->response_format, "json_schema");
+        const FmlxJsonValue *sch = js ? fmlx_json_obj_get(js, "schema") : NULL;
+        FmlxSb sb = { 0 };
+        if (!sch || sb_json(&sb, sch) != 0) { free(sb.p); return; }
+        gr = llm_grammar_new_schema(sb.p, sb.len, err, sizeof err);
+        free(sb.p);
+        if (!gr) { fprintf(stderr, "fastllm: json_schema non compilabile in grammatica (%s): solo istruzione nel prompt\n", err); return; }
+    } else {
+        gr = llm_grammar_new_json_object();
+        if (!gr) return;
+    }
+    int nv = gram_vocab(m);
+    if (nv <= 0) { llm_grammar_free(gr); return; }
+    pthread_mutex_lock(&g_gv_mu);
+    int eos[FMLX_ENGINE_EOS_MAX + 1], ne = 0;
+    eos[ne++] = m->eos;
+    for (int i = 0; i < m->n_eos && ne < FMLX_ENGINE_EOS_MAX; i++) if (m->eos_list[i] != m->eos) eos[ne++] = m->eos_list[i];
+    int rc = llm_grammar_set_vocab(gr, g_gv.n, (const uint8_t *const *)g_gv.tok, g_gv.len, eos, ne);
+    pthread_mutex_unlock(&g_gv_mu);
+    g->gmask = rc == 0 ? malloc((size_t)gr->n_words * sizeof *g->gmask) : NULL;
+    if (!g->gmask) { llm_grammar_free(gr); return; }
+    g->gwords = gr->n_words;
+    g->gram = gr;
 }
 
 /* ---- avvio della generazione ---- */
@@ -1045,6 +1138,7 @@ static FmlxEngineGen *start(const FmlxEngineModel *m, const int32_t *ids, int n_
     g->in_think = (think_open && !can_lp) ? 1 : 0;
     g->skip_ws = 0;
     g->think_out = 0;
+    gram_setup(g, c, m);
     return g;
 }
 
@@ -1222,11 +1316,11 @@ static void bc_run_steps(BJob *head) {
 
     /* Modello base del lotto: la prima gen batchabile (stesso `m` + `generate_batch`). */
     for (j = head; j; j = j->next) {
-        if (j->g->want_logprobs) continue;
+        if (j->g->want_logprobs || j->g->gram) continue;
         if (j->g->m && j->g->m->eng && j->g->m->eng->generate_batch) { base = j->g->m; break; }
     }
     for (j = head; j; j = j->next) {
-        if (j->g->want_logprobs || !base || j->g->m != base) continue; /* non batchabile: seriale sotto */
+        if (j->g->want_logprobs || j->g->gram || !base || j->g->m != base) continue; /* non batchabile: seriale sotto */
         if (adv_no_token(j->g)) { j->handled = 1; continue; }   /* lunghezza: nessun token */
         if (n >= g_bc.max) continue;                            /* oltre il lotto: seriale sotto */
         sess[n] = j->g->session;
@@ -1711,6 +1805,8 @@ void fmlx_engine_gen_free(FmlxEngineGen *g) {
     free(g->tok_end);
     free(g->top_ids);
     free(g->top_lp);
+    if (g->gram) llm_grammar_free((LlmGrammar *)g->gram);
+    free(g->gmask);
     if (g->tools) fmlx_toolstream_free(g->tools);
     free(g);
 }

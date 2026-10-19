@@ -85,6 +85,12 @@ struct FmlxEngineGen {
     void *tools; /* FmlxToolStream* */
     int tools_flushed;
 
+    /* GRAMMATICA (response_format json_object/json_schema): LlmGrammar* + bitmask del passo. Quando non NULL
+     * ogni token esce da `generate_id_masked` (ABI v6) e la gen NON entra nel lotto (maschera per sequenza). */
+    void *gram;
+    uint32_t *gmask;
+    int gwords;
+
     /* LOGPROBS (ABI v2). Quando `want_logprobs` è 1 il decode usa `generate_ids_probs` e il
      * testo esce UN TOKEN PER EVENTO leggendo da `full` (non dal buffer a chunk `text`):
      * `tok_end[i]` è la fine in byte del token i dentro `full`, `tok_emit` il prossimo token
