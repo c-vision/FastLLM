@@ -28,6 +28,7 @@
 /* CHUNKED PREFILL + MIXED BATCH: stream in decode gestiti dal coordinatore e flag "START in corso sul coordinatore". */
 static int g_active_streams;
 static int g_in_coord_start;
+static void gram_jump(FmlxEngineGen *g, char *err, size_t errcap);
 
 /* MLX: device/stream di default PER-THREAD. Ogni thread di lavoro che usa il motore deve
  * registrarlo (idempotente), altrimenti la prima op MLX aborta con "no Stream(gpu, 0)". */
@@ -876,7 +877,11 @@ static int advance(FmlxEngineGen *g, char *err, size_t errcap) {
             return -1;
         }
         (void)llm_grammar_accept(gr, id);
-        return gen_apply_token(g, id == g->m->eos ? 0 : 1, id, err, errcap);
+        {
+            int rcg = gen_apply_token(g, id == g->m->eos ? 0 : 1, id, err, errcap);
+            if (rcg == 0 && !g->ended) gram_jump(g, err, errcap);
+            return rcg;
+        }
     }
     if (g->want_logprobs) {
         float lp = 0.0f;
@@ -974,6 +979,70 @@ static void gram_setup(FmlxEngineGen *g, const FmlxApiChat *c, const FmlxEngineM
     g->gram = gr;
 }
 
+/* JUMP-FORWARD (opzione `grammar_jump_forward`, default 0): quando la grammatica impone un tratto di testo (chiavi
+ * dello schema, separatori), lo si accoda con UN append invece di un decode per token. Si accettano solo i token che
+ * cadono interamente nel tratto forzato E la cui tokenizzazione in contesto coincide (encode(testo+forzato) deve
+ * cominciare esattamente con gli id gia' generati); altrimenti nessun salto. Assume JSON compatto (nessuna whitespace
+ * nel tratto saltato). I token saltati non hanno logprob. */
+static void gram_jump(FmlxEngineGen *g, char *err, size_t errcap) {
+    LlmGrammar *gr = (LlmGrammar *)g->gram;
+    uint8_t forced[256];
+    int on = 0;
+
+    if (fmlx_engine_opt_get_int("grammar_jump_forward", &on) != 0 || !on) return;
+    if (!g->m->eng->append_ids || !g->full) return;
+    int fl = llm_grammar_forced(gr, forced, (int)sizeof forced);
+    if (fl < 4) return;
+    size_t base = g->full_len;
+    char *cand = malloc(base + (size_t)fl + 1);
+    if (!cand) return;
+    memcpy(cand, g->full, base);
+    memcpy(cand + base, forced, (size_t)fl);
+    cand[base + (size_t)fl] = 0;
+    int n = 0;
+    char e2[64];
+    int32_t *ids = tokenize(g->m->tok, cand, &n, e2, sizeof e2);
+    free(cand);
+    if (!ids) return;
+    int ok = n > g->n_gen && memcmp(ids, g->ids, (size_t)g->n_gen * sizeof *ids) == 0;
+    int j = 0, used = 0;
+    if (ok) {
+        for (int i = g->n_gen; i < n; i++) {
+            int l = (i < g_gv.n) ? g_gv.len[ids[i]] : 0;
+            if (l <= 0 || used + l > fl || memcmp(forced + used, g_gv.tok[ids[i]], (size_t)l) != 0) break;
+            used += l; j++;
+        }
+        if (g->n_gen + j >= g->max_new) j = g->max_new - g->n_gen - 1;
+    }
+    if (ok && j > 0 && g->m->eng->append_ids(g->session, ids + g->n_gen, j) == 0) {
+        /* `text_update` SOSTITUISCE il testo in attesa di consegna: quello del token appena emesso va conservato e
+         * anteposto al nuovo, altrimenti il consumer perde i byte (es. la `{` iniziale). */
+        char *old = g->text;
+        size_t old_n = g->text_len > g->pos ? g->text_len - g->pos : 0;
+        size_t old_pos = g->pos;
+        g->text = NULL; g->text_len = 0; g->pos = 0;
+        for (int i = 0; i < j; i++) {
+            int32_t id = ids[g->n_gen];
+            if (llm_grammar_accept(gr, id) != 0) break;   /* non dovrebbe accadere: stato coerente fino qui */
+            g->ids[g->n_gen++] = id;
+        }
+        (void)text_update(g, err, errcap);
+        if (old) {
+            if (old_n) {
+                char *nb = malloc(old_n + g->text_len);
+                if (nb) {
+                    memcpy(nb, old + old_pos, old_n);
+                    if (g->text_len) memcpy(nb + old_n, g->text + g->pos, g->text_len - g->pos);
+                    free(g->text);
+                    g->text = nb; g->text_len = old_n + (g->text_len - g->pos); g->pos = 0;
+                }
+            }
+            free(old);
+        }
+    }
+    free(ids);
+}
+
 /* ---- avvio della generazione ---- */
 
 /* Intero d'ambiente con minimo: un valore assente/illeggibile/fuori range ricade sul default
@@ -1061,9 +1130,15 @@ static FmlxEngineGen *start(const FmlxEngineModel *m, const int32_t *ids, int n_
      * ricerca (token-per-token); -1 è un errore vero e abortisce, come nel server C di GMBasic. */
     can_prefix = (m->eng->caps & LLMMODELIO_CAP_PREFIX) && m->eng->append_ids_prefix;
     if (can_prefix) {
-        int rc = m->eng->append_ids_prefix(m->model, s, ids, n_prompt,
+        /* GRAMMATICA: la decodifica a maschera parte da `pending_h`, che un riuso di prefisso con coda vuota (prompt identico
+         * a uno salvato) NON ripristina. Si ingerisce quindi il prompt meno l'ultimo token via prefisso e l'ultimo con un
+         * append, cosi' pending_h e' sempre calcolato. */
+        const int gram_req = c && c->response_format && (c->rf_json_object || c->rf_json_schema) &&
+                             m->eng->generate_id_masked && m->eng->append_ids && n_prompt >= 2;
+        int rc = m->eng->append_ids_prefix(m->model, s, ids, gram_req ? n_prompt - 1 : n_prompt,
                                            opt_int_at_least("prefix_min_match",
                                                             FMLX_PREFIX_MIN_MATCH, 1));
+        if (rc >= 0 && gram_req && m->eng->append_ids(s, ids + n_prompt - 1, 1) != 0) rc = -1;
         if (rc < 0) {
             m->eng->destroy_session(s);
             snprintf(err, errcap, "the engine failed to ingest the prompt");
