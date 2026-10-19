@@ -23,6 +23,11 @@
 #include <math.h>
 #include <pthread.h>
 #include "llm_grammar.h"
+#include "llmengine_mlx.h" /* llm_ai_mlx_set_prefill_yield / session_set_prefill_chunk (chunked prefill + mixed batch) */
+
+/* CHUNKED PREFILL + MIXED BATCH: stream in decode gestiti dal coordinatore e flag "START in corso sul coordinatore". */
+static int g_active_streams;
+static int g_in_coord_start;
 
 /* MLX: device/stream di default PER-THREAD. Ogni thread di lavoro che usa il motore deve
  * registrarlo (idempotente), altrimenti la prima op MLX aborta con "no Stream(gpu, 0)". */
@@ -1041,6 +1046,14 @@ static FmlxEngineGen *start(const FmlxEngineModel *m, const int32_t *ids, int n_
         return NULL;
     }
     if (sp && m->eng->set_sampling) m->eng->set_sampling(s, sp);
+    /* Mixed batch: se altri stream stanno decodificando, il prefill di questo prompt procede a chunk PICCOLI (opzione
+     * `serve_prefill_chunk`, default 512) e fra un chunk e l'altro il coordinatore fa avanzare i loro decode (yield). Senza
+     * stream attivi resta il chunk di default del motore (throughput massimo). Solo motore MLX (handle = LlmMlxSession). */
+    if (g_in_coord_start && m->eng == llmengine_llm_engine_mlx() && __atomic_load_n(&g_active_streams, __ATOMIC_RELAXED) > 0) {
+        int pc = 512;
+        if (fmlx_engine_opt_get_int("serve_prefill_chunk", &pc) != 0 || pc < 1) pc = 512;
+        (void)llm_ai_mlx_session_set_prefill_chunk((llm_ai_mlx_session_handle)s, pc);
+    }
 
     /* Prefill. Con CAP_PREFIX si usa il percorso AUTOMATICO (`append_ids_prefix`): il runner cerca
      * il prefisso salvato che meglio combacia coi token d'ingresso e pre-filla SOLO la coda; se
@@ -1277,17 +1290,38 @@ static void bc_finish(BJob *j) {
     pthread_mutex_unlock(&g_bc.mu);
 }
 
+static void bc_run_steps(BJob *head);
+
+/* Chiamata dal prefill (stesso thread del coordinatore) fra un chunk e l'altro: serve i STEP in coda (un token per stream
+ * attivo). Non tocca i job seriali (START/FREE): niente START annidati. */
+static void bc_yield(void *arg) {
+    BJob *st;
+
+    (void)arg;
+    pthread_mutex_lock(&g_bc.mu);
+    st = g_bc.st_head;
+    g_bc.st_head = g_bc.st_tail = NULL;
+    pthread_mutex_unlock(&g_bc.mu);
+    if (st) bc_run_steps(st);
+}
+
 static void bc_run_serial(BJob *j) {
     switch (j->kind) {
     case 0: /* START */
+        g_in_coord_start = 1;
+        llm_ai_mlx_set_prefill_yield(bc_yield, NULL);   /* i decode degli altri stream avanzano fra i chunk del prefill */
         j->out = start(j->m, j->ids, j->n_prompt, j->max_tokens, &j->sp, j->c, j->want_logprobs,
                        j->want_top_logprobs, j->think_open, j->errmsg, sizeof j->errmsg);
+        llm_ai_mlx_set_prefill_yield(NULL, NULL);
+        g_in_coord_start = 0;
         j->err = j->out ? 0 : 1;
-        if (j->out) j->out->batch = 1;
+        if (j->out) { j->out->batch = 1; __atomic_add_fetch(&g_active_streams, 1, __ATOMIC_RELAXED); }
         break;
     case 2: /* FREE */
-        if (j->g && j->g->session && j->g->m && j->g->m->eng && j->g->m->eng->destroy_session)
+        if (j->g && j->g->session && j->g->m && j->g->m->eng && j->g->m->eng->destroy_session) {
             j->g->m->eng->destroy_session(j->g->session);
+            __atomic_sub_fetch(&g_active_streams, 1, __ATOMIC_RELAXED);
+        }
         if (j->g) j->g->session = NULL;
         break;
     case 3: /* KV */
