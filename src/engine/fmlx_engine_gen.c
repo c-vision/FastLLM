@@ -964,15 +964,100 @@ static int gram_vocab(const FmlxEngineModel *m) {
     return (int)n;
 }
 
+/* TOOL-CALLING OBBLIGATO (`tool_choice` = required o una funzione specifica): lo schema delle chiamate ammesse
+ * {anyOf:[{name:const, <argkey>:<parametri>}...]} nel formato della famiglia del modello (ChatML/Qwen: avvolto in
+ * <tool_call>\n..\n</tool_call> con "arguments"; Llama-3: oggetto nudo con "parameters"). Ritorna 1 e riempie `sch`/pre/post. */
+static int gram_tool_schema(const FmlxApiChat *c, const FmlxEngineModel *m, FmlxSb *sch, const char **pre,
+                            const char **post) {
+    FmlxSlice named = { 0 };
+    int mode = fmlx_api_tool_mode(c, &named);
+    const char *argkey;
+    int on = 1;
+
+    if (fmlx_engine_opt_get_int("grammar_tools", &on) == 0 && !on) return 0;   /* A/B: 0 = tool_choice obbligato SENZA grammatica */
+
+    if (!c->tools || !fmlx_json_arr_n(c->tools) || (mode != FMLX_API_TOOL_REQUIRED && mode != FMLX_API_TOOL_NAMED)) return 0;
+    {   /* formato di chiamata dedotto dal template della famiglia (il classificatore GENERIC non basta: Llama-3.2 non cita <|begin_of_text|>) */
+        const int has_tc = (m->chat_tpl && strstr(m->chat_tpl, "<tool_call>")) ? 1 : 0;
+        const int has_params = (m->chat_tpl && strstr(m->chat_tpl, "\"parameters\"")) ? 1 : 0;
+        if (m->tpl == FMLX_TPL_CHATML || has_tc) { *pre = "<tool_call>\n"; *post = "\n</tool_call>"; argkey = "arguments"; }
+        else if (m->tpl == FMLX_TPL_LLAMA3 || has_params) { *pre = NULL; *post = NULL; argkey = "parameters"; }
+        else return 0;
+    }
+    {   /* due passate sui tool ammessi: i nomi (enum) e i parametri (anyOf), nello STESSO ordine: lo schema usa
+         * l'estensione `x-dependent-arguments` (il ramo di `arguments` e' scelto dal nome gia' emesso) */
+        const FmlxJsonValue *sel[64];
+        size_t nsel = 0;
+
+        for (size_t i = 0; i < fmlx_json_arr_n(c->tools) && nsel < 64; i++) {
+            const FmlxJsonValue *t = fmlx_json_arr_at(c->tools, i);
+            const FmlxJsonValue *fn = t ? fmlx_json_obj_get(t, "function") : NULL;
+            const FmlxJsonValue *src = fn ? fn : t;
+            const FmlxJsonValue *nm = src ? fmlx_json_obj_get(src, "name") : NULL;
+            const char *s = nm ? fmlx_json_str(nm) : NULL;
+            size_t sl = nm ? fmlx_json_str_len(nm) : 0;
+            int safe = s && sl > 0;
+
+            for (size_t k = 0; safe && k < sl; k++) {
+                char ch = s[k];
+                if (!((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_' || ch == '-' || ch == '.'))
+                    safe = 0;
+            }
+            if (!safe) continue;
+            if (mode == FMLX_API_TOOL_NAMED && (named.n != sl || memcmp(named.p, s, sl) != 0)) continue;
+            sel[nsel++] = src;
+        }
+        if (nsel == 0) return 0;
+        if (fmlx_sb_cstr(sch, "{\"type\":\"object\",\"x-dependent-arguments\":true,\"properties\":{\"name\":{\"enum\":[") != 0) return 0;
+        for (size_t i = 0; i < nsel; i++) {
+            const FmlxJsonValue *nm = fmlx_json_obj_get(sel[i], "name");
+            if ((i && fmlx_sb_cstr(sch, ",") != 0) || fmlx_sb_cstr(sch, "\"") != 0 ||
+                fmlx_sb_add(sch, fmlx_json_str(nm), fmlx_json_str_len(nm)) != 0 || fmlx_sb_cstr(sch, "\"") != 0)
+                return 0;
+        }
+        if (fmlx_sb_cstr(sch, "]},\"") != 0 || fmlx_sb_cstr(sch, argkey) != 0 || fmlx_sb_cstr(sch, "\":{\"anyOf\":[") != 0) return 0;
+        for (size_t i = 0; i < nsel; i++) {
+            const FmlxJsonValue *ps = fmlx_json_obj_get(sel[i], "parameters");
+            if (!ps) ps = fmlx_json_obj_get(sel[i], "input_schema");
+            if (i && fmlx_sb_cstr(sch, ",") != 0) return 0;
+            if (ps) { if (sb_json(sch, ps) != 0) return 0; }
+            else if (fmlx_sb_cstr(sch, "{\"type\":\"object\"}") != 0) return 0;
+        }
+        if (fmlx_sb_cstr(sch, "]}},\"required\":[\"name\",\"") != 0 || fmlx_sb_cstr(sch, argkey) != 0 || fmlx_sb_cstr(sch, "\"]}") != 0) return 0;
+    }
+    return 1;
+}
+
+static int gram_wanted(const FmlxApiChat *c) {
+    FmlxSlice n = { 0 };
+    int mode;
+    int on = 1;
+
+    if (!c) return 0;
+    if (c->response_format && (c->rf_json_object || c->rf_json_schema)) return 1;
+    if (fmlx_engine_opt_get_int("grammar_tools", &on) == 0 && !on) return 0;
+    mode = fmlx_api_tool_mode(c, &n);
+    return c->tools && fmlx_json_arr_n(c->tools) && (mode == FMLX_API_TOOL_REQUIRED || mode == FMLX_API_TOOL_NAMED);
+}
+
 /* Crea la grammatica per la richiesta (NULL = nessun vincolo o non supportato: resta l'istruzione nel prompt). */
 static void gram_setup(FmlxEngineGen *g, const FmlxApiChat *c, const FmlxEngineModel *m) {
     LlmGrammar *gr = NULL;
     char err[200] = "";
+    FmlxSb tsch = { 0 };
+    const char *tpre = NULL, *tpost = NULL;
+    int tool = 0;
 
-    if (!c || !c->response_format || !(c->rf_json_object || c->rf_json_schema)) return;
-    if (!m->eng->generate_id_masked || g->want_logprobs || g->want_think) return;
-    if (c->tools && fmlx_json_arr_n(c->tools)) return;   /* tool-calling: l'uscita non e' un singolo documento JSON */
-    if (c->rf_json_schema) {
+    if (!c || !m->eng->generate_id_masked || g->want_logprobs || g->want_think) return;
+    if (!c->response_format || !(c->rf_json_object || c->rf_json_schema)) {
+        tool = gram_tool_schema(c, m, &tsch, &tpre, &tpost);
+        if (!tool) { free(tsch.p); return; }
+    } else if (c->tools && fmlx_json_arr_n(c->tools)) return;   /* tools + response_format: non vincolare */
+    if (tool) {
+        gr = llm_grammar_new_schema_wrapped(tsch.p, tsch.len, tpre, tpost, err, sizeof err);
+        free(tsch.p);
+        if (!gr) { fprintf(stderr, "fastllm: schema dei tool non compilabile in grammatica (%s): chiamata non vincolata\n", err); return; }
+    } else if (c->rf_json_schema) {
         const FmlxJsonValue *js = fmlx_json_obj_get(c->response_format, "json_schema");
         const FmlxJsonValue *sch = js ? fmlx_json_obj_get(js, "schema") : NULL;
         FmlxSb sb = { 0 };
@@ -1152,7 +1237,7 @@ static FmlxEngineGen *start(const FmlxEngineModel *m, const int32_t *ids, int n_
         /* GRAMMATICA: la decodifica a maschera parte da `pending_h`, che un riuso di prefisso con coda vuota (prompt identico
          * a uno salvato) NON ripristina. Si ingerisce quindi il prompt meno l'ultimo token via prefisso e l'ultimo con un
          * append, cosi' pending_h e' sempre calcolato. */
-        const int gram_req = c && c->response_format && (c->rf_json_object || c->rf_json_schema) &&
+        const int gram_req = gram_wanted(c) &&
                              m->eng->generate_id_masked && m->eng->append_ids && n_prompt >= 2;
         int rc = m->eng->append_ids_prefix(m->model, s, ids, gram_req ? n_prompt - 1 : n_prompt,
                                            opt_int_at_least("prefix_min_match",
