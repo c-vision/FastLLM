@@ -723,30 +723,49 @@ static size_t think_holdback(const char *s, size_t len, int in_think) {
 /* Ricalcola il testo dell'intera sequenza, decide la stop e consegna la coda nuova (tagliata a
  * un confine di codepoint) in `g->text`. Ritorna 0/-1. */
 static int text_update(FmlxEngineGen *g, char *err, size_t errcap) {
-    int need = llmtoken_decode(g->m->tok, g->ids, g->n_gen, NULL, 0);
     char *cur;
     size_t limit, hb;
     const char *which = NULL;
     uint32_t which_n = 0;
+    const size_t prev_len = g->full_len;
 
-    if (need < 0) {
-        snprintf(err, errcap, "the tokenizer could not decode the output");
-        return -1;
+    /* DECODE INCREMENTALE (C14): si decodificano solo i token NUOVI e si accodano a `full` (il decode di una sequenza e'
+     * la concatenazione dei decode dei singoli token; solo il PRIMO ha lo strip dello spazio iniziale del metaspace).
+     * Verificato su tokenizer byte-level e metaspace (gemma4) contro il decode dell'intera sequenza. Prima: decode di
+     * TUTTA la sequenza a ogni token = O(n^2) su uscite lunghe. */
+    for (int i = g->dec_n; i < g->n_gen; i++) {
+        char buf[512];
+        int32_t id = g->ids[i];
+        int l = llmtoken_decode_ex(g->m->tok, &id, 1, buf, sizeof buf, i == 0 ? 1 : 0);
+        if (l < 0 || l >= (int)sizeof buf) {
+            snprintf(err, errcap, "the tokenizer could not decode the output");
+            return -1;
+        }
+        if (g->full_len + (size_t)l + 1 > g->full_cap) {
+            size_t nc = (g->full_cap ? g->full_cap * 2 : 256);
+            while (nc < g->full_len + (size_t)l + 1) nc *= 2;
+            cur = realloc(g->full, nc);
+            if (!cur) {
+                snprintf(err, errcap, "out of memory decoding the output");
+                return -1;
+            }
+            g->full = cur;
+            g->full_cap = nc;
+        }
+        memcpy(g->full + g->full_len, buf, (size_t)l);
+        g->full_len += (size_t)l;
+        g->full[g->full_len] = '\0';
     }
-    cur = malloc((size_t)need + 1);
-    if (!cur) {
-        snprintf(err, errcap, "out of memory decoding the output");
-        return -1;
+    g->dec_n = g->n_gen;
+    if (!g->full) { /* nessun token: full vuoto ma valido */
+        g->full = malloc(1);
+        if (!g->full) {
+            snprintf(err, errcap, "out of memory decoding the output");
+            return -1;
+        }
+        g->full[0] = '\0';
+        g->full_cap = 1;
     }
-    if (need && llmtoken_decode(g->m->tok, g->ids, g->n_gen, cur, need + 1) != need) {
-        free(cur);
-        snprintf(err, errcap, "the tokenizer produced an inconsistent decode");
-        return -1;
-    }
-    cur[need] = '\0';
-    free(g->full);
-    g->full = cur;
-    g->full_len = (size_t)need;
     /* Confine in byte di QUESTO token dentro `full`: il decode di un prefisso è un prefisso
      * del decode intero (byte-level BPE; metaspace toglie lo spazio solo in testa), quindi
      * `full_len` appena calcolato è la fine del token `n_gen-1`. */
@@ -759,7 +778,7 @@ static int text_update(FmlxEngineGen *g, char *err, size_t errcap) {
             const char *s = g->c->stop[i].p;
             uint32_t sn = g->c->stop[i].n;
             if (!s || sn == 0 || (size_t)sn > g->full_len) continue;
-            for (size_t k = 0; k + sn <= g->full_len; k++) {
+            for (size_t k = prev_len + 1 > sn ? prev_len + 1 - sn : 0; k + sn <= g->full_len; k++) { /* solo le posizioni nuove */
                 if (memcmp(g->full + k, s, sn) == 0) {
                     if (k < limit) {
                         limit = k;

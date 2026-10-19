@@ -63,6 +63,8 @@ struct FmlxEngineGen {
      * può cambiare la coda del decode, mai il prefisso già consegnato. */
     char *full;
     size_t full_len;
+    size_t full_cap; /* capacita' di `full` (decode incrementale) */
+    int dec_n;       /* token gia' decodificati dentro `full` */
     size_t emitted;
 
     /* Testo in attesa di essere emesso (copia). `fmlx_engine_next` lo consegna a pezzi. */
