@@ -34,6 +34,36 @@ static void gram_jump(FmlxEngineGen *g, char *err, size_t errcap);
  * registrarlo (idempotente), altrimenti la prima op MLX aborta con "no Stream(gpu, 0)". */
 extern int llm_ai_mlx_thread_init(void);
 
+/* ---- ANTI-INJECTION dei token di controllo ----
+ * Il testo non fidato (messaggi, tool, argomenti, risultati, nomi) entra nel prompt solo tramite `sb_add_untrusted`/`untrusted_dup`: i marcatori di
+ * controllo vengono racchiusi fra guardie (U+E000/U+E001) e `tokenize_chat` li codifica come testo ORDINARIO. Il template resta libero di
+ * emettere i propri token di controllo. t_guard e' per-thread (il render puo' girare su piu' thread I/O). */
+static __thread llmtoken_handle t_guard;
+
+static int sb_add_untrusted(FmlxSb *out, const char *p, size_t n) {
+    if (!t_guard || n == 0) return fmlx_sb_add(out, p, n);
+    size_t i = 0;
+    while (i < n) {   /* i NUL non possono stare in una stringa C: si saltano (nessun testo valido li contiene) */
+        size_t j = i;
+        while (j < n && p[j] != 0) j++;
+        if (j > i) {
+            char *tmp = malloc(j - i + 1), *g;
+            int rc;
+            if (!tmp) return -1;
+            memcpy(tmp, p + i, j - i);
+            tmp[j - i] = 0;
+            g = llmtoken_guard_text(t_guard, tmp);
+            free(tmp);
+            if (!g) return -1;
+            rc = fmlx_sb_add(out, g, strlen(g));
+            free(g);
+            if (rc != 0) return -1;
+        }
+        i = j + 1;
+    }
+    return 0;
+}
+
 /* ---- contenuto dei messaggi ---- */
 
 static void trim_span(const char **p, size_t *n) {
@@ -107,7 +137,7 @@ static int content_text(const FmlxJsonValue *content, FmlxSb *out, int trim) {
         size_t n = fmlx_json_str_len(content);
         if (!p) return -1;
         if (trim) trim_span(&p, &n);
-        return fmlx_sb_add(out, p, n);
+        return sb_add_untrusted(out, p, n);
     }
     if (content->type != FMLX_JSON_ARR) return 0;
     for (size_t i = 0; i < fmlx_json_arr_n(content); i++) {
@@ -116,7 +146,7 @@ static int content_text(const FmlxJsonValue *content, FmlxSb *out, int trim) {
         if (b->type == FMLX_JSON_STR) {
             const char *p = fmlx_json_str(b);
             size_t n = fmlx_json_str_len(b);
-            if (p && fmlx_sb_add(out, p, n) != 0) return -1;
+            if (p && sb_add_untrusted(out, p, n) != 0) return -1;
         } else if (b->type == FMLX_JSON_OBJ) {
             /* blocco testo (Anthropic e OpenAI a blocchi): si prende `text`. Un blocco IMMAGINE
              * viene descritto da un VLM (descrittore registrato dal server) e iniettato come testo. */
@@ -124,14 +154,14 @@ static int content_text(const FmlxJsonValue *content, FmlxSb *out, int trim) {
             if (t && t->type == FMLX_JSON_STR) {
                 const char *p = fmlx_json_str(t);
                 size_t n = fmlx_json_str_len(t);
-                if (p && fmlx_sb_add(out, p, n) != 0) return -1;
+                if (p && sb_add_untrusted(out, p, n) != 0) return -1;
             } else if (g_img_desc) {
                 char *u = image_url_dup(b);
                 if (u) {
                     char desc[16384];
                     if (g_img_desc(g_img_ctx, u, strlen(u), desc, sizeof desc) == 0 && desc[0])
                         if (fmlx_sb_add(out, "\n", 1) != 0 ||
-                            fmlx_sb_add(out, desc, strlen(desc)) != 0) { free(u); return -1; }
+                            sb_add_untrusted(out, desc, strlen(desc)) != 0) { free(u); return -1; }
                     free(u);
                 }
             }
@@ -203,6 +233,10 @@ static llmjinja_val *jv_from_json(const FmlxJsonValue *v) {
         if (!tmp) return llmjinja_str("");
         memcpy(tmp, s, n);
         tmp[n] = '\0';
+        if (t_guard) {   /* stringa non fidata: marcatori di controllo protetti */
+            char *gd = llmtoken_guard_text(t_guard, tmp);
+            if (gd) { free(tmp); tmp = gd; }
+        }
         r = llmjinja_str(tmp);
         free(tmp);
         return r;
@@ -250,7 +284,7 @@ static int sb_json(FmlxSb *b, const FmlxJsonValue *v) {
 
     fmlx_jsonw_init(&w, NULL, 0, 1u << 20);
     if (fmlx_json_render(v, &w) == FMLX_JSON_OK && fmlx_jsonw_finish(&w, &n) == FMLX_JSON_OK)
-        rc = fmlx_sb_add(b, w.buf ? w.buf : "null", n);
+        rc = sb_add_untrusted(b, w.buf ? w.buf : "null", n);
     fmlx_jsonw_free(&w);
     return rc;
 }
@@ -312,7 +346,7 @@ static int append_rf(FmlxSb *b, const FmlxApiChat *c) {
 static int build_system(FmlxSb *out, const FmlxApiChat *c, const char *sys, size_t sys_n,
                         int include_tools, int mode, const FmlxSlice *named, FmlxTplKind tpl,
                         char *err, size_t errcap) {
-    if (sys_n && fmlx_sb_add(out, sys, sys_n) != 0) goto oom;
+    if (sys_n && sb_add_untrusted(out, sys, sys_n) != 0) goto oom;
     if (include_tools && mode != FMLX_API_TOOL_NONE && c->tools &&
         fmlx_json_arr_n(c->tools)) {
         if (out->len && fmlx_sb_cstr(out, "\n\n") != 0) goto oom;
@@ -324,7 +358,7 @@ static int build_system(FmlxSb *out, const FmlxApiChat *c, const char *sys, size
     } else if (mode == FMLX_API_TOOL_NAMED) {
         if (out->len && fmlx_sb_cstr(out, "\n\n") != 0) goto oom;
         if (fmlx_sb_cstr(out, "You MUST call the function ") != 0 ||
-            fmlx_sb_add(out, named->p, named->n) != 0 || fmlx_sb_cstr(out, ".") != 0)
+            sb_add_untrusted(out, named->p, named->n) != 0 || fmlx_sb_cstr(out, ".") != 0)
             goto oom;
     }
     if (c->response_format) {
@@ -467,8 +501,7 @@ static int render_jinja(const FmlxEngineModel *m, const FmlxApiChat *c, FmlxSb *
 }
 /* ---- render del prompt ---- */
 
-int fmlx_engine_render_chat(const FmlxEngineModel *m, const FmlxApiChat *c, FmlxSb *b, char *err,
-                            size_t errcap) {
+static int render_chat_impl(const FmlxEngineModel *m, const FmlxApiChat *c, FmlxSb *b, char *err, size_t errcap) {
     char *sysmem = NULL;
     FmlxSlice sys = {NULL, 0};
     FmlxSlice named = {NULL, 0};
@@ -519,7 +552,7 @@ int fmlx_engine_render_chat(const FmlxEngineModel *m, const FmlxApiChat *c, Fmlx
             role_of(msg, &role, &rn);
             if (!role || is_system_role(role, rn)) continue;
             if (fmlx_sb_cstr(b, "<|start_header_id|>") != 0 ||
-                fmlx_sb_add(b, role, rn) != 0 ||
+                sb_add_untrusted(b, role, rn) != 0 ||
                 fmlx_sb_cstr(b, "<|end_header_id|>\n\n") != 0 ||
                 content_text(fmlx_json_obj_get(msg, "content"), b, 1) != 0 ||
                 fmlx_sb_cstr(b, "<|eot_id|>") != 0)
@@ -536,7 +569,7 @@ int fmlx_engine_render_chat(const FmlxEngineModel *m, const FmlxApiChat *c, Fmlx
             size_t rn;
             role_of(msg, &role, &rn);
             if (!role || is_system_role(role, rn)) continue;
-            if (fmlx_sb_cstr(b, "<|im_start|>") != 0 || fmlx_sb_add(b, role, rn) != 0 ||
+            if (fmlx_sb_cstr(b, "<|im_start|>") != 0 || sb_add_untrusted(b, role, rn) != 0 ||
                 fmlx_sb_cstr(b, "\n") != 0 ||
                 content_text(fmlx_json_obj_get(msg, "content"), b, 0) != 0 ||
                 fmlx_sb_cstr(b, "<|im_end|>\n") != 0)
@@ -580,7 +613,7 @@ int fmlx_engine_render_chat(const FmlxEngineModel *m, const FmlxApiChat *c, Fmlx
             size_t rn;
             role_of(msg, &role, &rn);
             if (!role || is_system_role(role, rn)) continue;
-            if (fmlx_sb_add(b, role, rn) != 0 || fmlx_sb_cstr(b, ": ") != 0 ||
+            if (sb_add_untrusted(b, role, rn) != 0 || fmlx_sb_cstr(b, ": ") != 0 ||
                 content_text(fmlx_json_obj_get(msg, "content"), b, 0) != 0 ||
                 fmlx_sb_cstr(b, "\n") != 0)
                 goto oom;
@@ -597,11 +630,20 @@ oom:
     return -1;
 }
 
+int fmlx_engine_render_chat(const FmlxEngineModel *m, const FmlxApiChat *c, FmlxSb *b, char *err, size_t errcap) {
+    int rc;
+
+    if (!m) return -1;
+    t_guard = m->tok;   /* attiva la protezione dei marcatori di controllo per tutto il render (per-thread) */
+    rc = render_chat_impl(m, c, b, err, errcap);
+    t_guard = NULL;
+    return rc;
+}
+
 /* ---- tokenizzazione ---- */
 
-static int32_t *tokenize(llmtoken_handle tok, const char *text, int *out_n, char *err,
-                         size_t errcap) {
-    int n = llmtoken_encode(tok, text, NULL, 0);
+static int32_t *tokenize_g(llmtoken_handle tok, const char *text, int guarded, int *out_n, char *err, size_t errcap) {
+    int n = guarded ? llmtoken_encode_guarded(tok, text, NULL, 0) : llmtoken_encode(tok, text, NULL, 0);
     int32_t *ids;
 
     if (n < 0) {
@@ -617,13 +659,22 @@ static int32_t *tokenize(llmtoken_handle tok, const char *text, int *out_n, char
         snprintf(err, errcap, "out of memory allocating %d prompt tokens", n);
         return NULL;
     }
-    if (llmtoken_encode(tok, text, ids, n) != n) {
+    if ((guarded ? llmtoken_encode_guarded(tok, text, ids, n) : llmtoken_encode(tok, text, ids, n)) != n) {
         free(ids);
         snprintf(err, errcap, "the tokenizer produced an inconsistent token count");
         return NULL;
     }
     *out_n = n;
     return ids;
+}
+
+/* Testo grezzo (completions, candidati interni): i token speciali scritti nel testo restano riconosciuti, e' un prompt "raw" dell'utente. */
+static int32_t *tokenize(llmtoken_handle tok, const char *text, int *out_n, char *err, size_t errcap) {
+    return tokenize_g(tok, text, 0, out_n, err, errcap);
+}
+/* Prompt di chat renderizzato: gli span non fidati protetti da guardie sono testo ORDINARIO. */
+static int32_t *tokenize_chat(llmtoken_handle tok, const char *text, int *out_n, char *err, size_t errcap) {
+    return tokenize_g(tok, text, 1, out_n, err, errcap);
 }
 
 /* ---- stop sequences ---- */
@@ -1663,7 +1714,7 @@ FmlxEngineGen *fmlx_engine_chat(FmlxEngineModel *m, const FmlxApiChat *c, char *
         return NULL;
     }
     think_open = prompt_opens_think(prompt.p);
-    ids = tokenize(m->tok, prompt.p ? prompt.p : "", &n, err, errcap);
+    ids = tokenize_chat(m->tok, prompt.p ? prompt.p : "", &n, err, errcap);
     fmlx_sb_free(&prompt);
     if (!ids) return NULL;
     /* Default = parametro `maxtokens` del registro; `--max-tokens` (esplicito) vince. Nessuna env. */
@@ -1733,7 +1784,7 @@ int fmlx_engine_count_tokens(FmlxEngineModel *m, const FmlxApiChat *c, int *out,
         fmlx_sb_free(&prompt);
         return -1;
     }
-    n = llmtoken_encode(m->tok, prompt.p ? prompt.p : "", NULL, 0);
+    n = llmtoken_encode_guarded(m->tok, prompt.p ? prompt.p : "", NULL, 0);
     fmlx_sb_free(&prompt);
     if (n < 0) {
         snprintf(err, errcap, "the tokenizer rejected the prompt");
