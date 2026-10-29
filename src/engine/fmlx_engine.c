@@ -600,6 +600,54 @@ static llmtoken_handle load_tokenizer(const char *dir) {
     return NULL;
 }
 
+/* GGUF: architettura, chat template, eos/bos REALI dai metadati del file (llm_ai_mlx_gguf_chat_meta) invece di assumere
+ * DeepSeek-V4 per ogni .gguf. Riempie `out->gguf_arch`; per le architetture diverse da deepseek4 anche template, eos e bos. */
+static void read_gguf_meta(FmlxEngineModel *out) {
+    size_t n = 0;
+    char *js = llm_ai_mlx_gguf_chat_meta(out->dir, &n);
+    FmlxJsonDoc doc;
+    const FmlxJsonValue *root, *v;
+
+    out->gguf_arch[0] = '\0';
+    if (!js || n == 0) { free(js); return; }
+    fmlx_json_doc_init(&doc);
+    if (fmlx_json_parse(js, n, 0, &doc) != FMLX_JSON_OK) { fmlx_json_doc_free(&doc); free(js); return; }
+    root = fmlx_json_root(&doc);
+    v = fmlx_json_obj_get(root, "architecture");
+    if (v && v->type == FMLX_JSON_STR && fmlx_json_str_len(v) < sizeof out->gguf_arch) {
+        memcpy(out->gguf_arch, fmlx_json_str(v), fmlx_json_str_len(v));
+        out->gguf_arch[fmlx_json_str_len(v)] = '\0';
+    }
+    if (strcmp(out->gguf_arch, "deepseek4") != 0) {
+        char *copy;
+        v = fmlx_json_obj_get(root, "chat_template");
+        out->tpl = FMLX_TPL_DS4;
+        if (v && v->type == FMLX_JSON_STR && fmlx_json_str_len(v) > 0 &&
+            (copy = malloc(fmlx_json_str_len(v) + 1)) != NULL) {
+            memcpy(copy, fmlx_json_str(v), fmlx_json_str_len(v));
+            copy[fmlx_json_str_len(v)] = '\0';
+            out->tpl = classify_tpl(copy, fmlx_json_str_len(v), &out->chat_tpl, &out->chat_tpl_len);
+            free(copy);
+        }
+        v = fmlx_json_obj_get(root, "eos_token");
+        if (v && v->type == FMLX_JSON_STR) {
+            char s[128]; int32_t eid = -1;
+            size_t sn = fmlx_json_str_len(v);
+            if (sn > 0 && sn < sizeof s) {
+                memcpy(s, fmlx_json_str(v), sn); s[sn] = '\0';
+                if (llmtoken_encode(out->tok, s, &eid, 1) == 1) { out->eos_list[0] = eid; out->n_eos = 1; }
+            }
+        }
+        v = fmlx_json_obj_get(root, "bos_token");
+        if (v && v->type == FMLX_JSON_STR && fmlx_json_str_len(v) < sizeof out->bos) {
+            memcpy(out->bos, fmlx_json_str(v), fmlx_json_str_len(v));
+            out->bos[fmlx_json_str_len(v)] = '\0';
+        }
+    }
+    fmlx_json_doc_free(&doc);
+    free(js);
+}
+
 /* ---- caricamento ---- */
 
 int fmlx_engine_load(const char *cache_root, const char *name, FmlxEngineModel *out, char *err,
@@ -615,18 +663,21 @@ int fmlx_engine_load(const char *cache_root, const char *name, FmlxEngineModel *
         return -1;
     }
     if (is_gguf_path(out->dir)) {
-        /* GGUF/DS4: niente config.json/tokenizer_config.json accanto al file — template di
-         * famiglia DS4 e eos dedotto dal tokenizer (l'`<｜end▁of▁sentence｜>` è nel vocabolario). */
+        /* GGUF: nessun config.json/tokenizer_config.json accanto al file. Default = famiglia DS4 (eos dedotto dal tokenizer);
+         * per le altre architetture template, eos e bos vengono dai metadati del GGUF (read_gguf_meta). */
         int32_t eid = -1;
         out->tpl = FMLX_TPL_DS4;
         out->chat_tpl = NULL;
         out->chat_tpl_len = 0;
-        if (llmtoken_encode(out->tok, "<｜end▁of▁sentence｜>", &eid, 1) == 1) {
-            out->eos_list[0] = eid;
-            out->n_eos = 1;
+        out->bos[0] = '\0';
+        read_gguf_meta(out);
+        if (strcmp(out->gguf_arch, "deepseek4") == 0 || out->gguf_arch[0] == '\0') {
+            if (llmtoken_encode(out->tok, "<｜end▁of▁sentence｜>", &eid, 1) == 1) {
+                out->eos_list[0] = eid;
+                out->n_eos = 1;
+            }
         }
         out->eos = out->n_eos > 0 ? out->eos_list[out->n_eos - 1] : -1;
-        out->bos[0] = '\0';
     } else {
         out->n_eos = read_eos_list(out->dir, out->eos_list, FMLX_ENGINE_EOS_MAX);
         /* L'ABI accetta UN eos: si passa l'ULTIMO della lista (nei modelli instruct è il token di
@@ -641,7 +692,11 @@ int fmlx_engine_load(const char *cache_root, const char *name, FmlxEngineModel *
     /* DS4 (firma GGUF "deepseek4"): motore unico DS4 nativo (LLMEngine/mlx/ds4) via ABI. */
     {
         size_t dn = strlen(out->dir);
-        if (dn > 5 && strcmp(out->dir + dn - 5, ".gguf") == 0 && llm_ai_mlx_gguf_supported(out->dir) == 1) {
+        if (dn > 5 && strcmp(out->dir + dn - 5, ".gguf") == 0 && strcmp(out->gguf_arch, "qwen4exp") == 0) {
+            /* Qwen3.8-Flash-Next in GGUF: motore ds4 integrato in LLMEngine. */
+            const LlmEngineLlmEngine* e = fmlx_engine_symbol("llmengine_llm_engine_ds4n");
+            if (e != NULL) out->eng = e;
+        } else if (dn > 5 && strcmp(out->dir + dn - 5, ".gguf") == 0 && strcmp(out->gguf_arch, "deepseek4") == 0) {
             const LlmEngineLlmEngine* e = fmlx_engine_symbol("llmengine_llm_engine_ds4");
             if (e != NULL) out->eng = e;   /* altrimenti resta l'engine MLX */
         } else if (is_dsv41_dir(out->dir)) {
@@ -675,7 +730,7 @@ int fmlx_engine_load(const char *cache_root, const char *name, FmlxEngineModel *
         {
             size_t dn = strlen(out->dir);
             if (dn > 5 && strcmp(out->dir + dn - 5, ".gguf") == 0)
-                is_dsv4 = (llm_ai_mlx_gguf_supported(out->dir) == 1);
+                is_dsv4 = (strcmp(out->gguf_arch, "deepseek4") == 0);
         }
         /* Il PARAMETRO `context` (registro) vince; altrimenti default per arch (DS4 più basso). */
         if (llm_ai_mlx_opt_is_set("context") == 1) {

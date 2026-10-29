@@ -44,6 +44,9 @@ struct FmlxEngineModel {
     size_t chat_tpl_len;
     /* `bos_token` (stringa) del config, "" se assente: alcune template lo rendono. */
     char bos[64];
+    /* GGUF single-file: general.architecture ("" se non GGUF). Sceglie il motore: deepseek4 -> ds4, qwen4exp -> ds4 integrato,
+     * altre architetture -> motore MLX generico. */
+    char gguf_arch[48];
 };
 
 /* Una generazione INCREMENTALE: un token per chiamata di `fmlx_engine_next`, così il testo
