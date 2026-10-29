@@ -739,13 +739,16 @@ int fmlx_engine_load(const char *cache_root, const char *name, FmlxEngineModel *
         /* Il PARAMETRO `context` (registro) vince; altrimenti default per arch (DS4 più basso). */
         if (llm_ai_mlx_opt_is_set("context") == 1) {
             llm_ai_mlx_opt_get_int("context", &ctx);
+        } else if (out->gguf_arch[0] && !is_dsv4) {
+            ctx = 0;   /* GGUF su llama.cpp o ds4 integrato: il motore sceglie (contesto del modello, entro la memoria) */
         } else {
             ctx = is_dsv4 ? FMLX_DSV4_DEFAULT_CTX : FMLX_ENGINE_DEFAULT_CTX;
         }
         out->ctx = ctx;
         if (out->eng->kv_set_max) {
             int crc = out->eng->kv_set_max(out->model, ctx);
-            fprintf(stderr, "contesto: %d token%s\n", ctx, crc == 0 ? "" : " (motore: non impostabile)");
+            if (ctx == 0) fprintf(stderr, "contesto: automatico%s\n", crc == 0 ? "" : " (motore: non impostabile)");
+            else fprintf(stderr, "contesto: %d token%s\n", ctx, crc == 0 ? "" : " (motore: non impostabile)");
         }
     }
     /* `dtype` e `kvquant` (registro): applicati subito al modello, per qualunque modello MLX. */

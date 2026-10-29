@@ -72,6 +72,8 @@ void fmlx_cli_usage(FILE *out) {
             "OPZIONI COMUNI\n"
             "  --opt <nome>=<valore>  imposta un parametro del motore (registro, no env); elenco:\n"
             "                         `fastllm options` (tutte le opzioni con esempi)\n"
+            "  --context <n>          lunghezza del contesto in token, per ogni modello (anche 32k, 1m).\n"
+            "                         Default: quella del modello, entro la memoria disponibile\n"
             "  --offload-experts      streama gli esperti MoE da disco (per modelli piu' grandi della\n"
             "                         RAM: residente piccolo, piu' lento). Se il modello supera META'\n"
             "                         della memoria libera+reclamabile e l'opzione non e' data, run/chat\n"
@@ -282,6 +284,7 @@ static void usage_verb(FILE *out, const char *v) {
             "  --cache <dir>          radice da cui risolvere il modello\n"
             "  --system <testo>       messaggio di sistema anteposto\n"
             "  --max-tokens <n>       tetto sui token generati\n"
+            "  --context <n>          lunghezza del contesto in token (anche 32k, 1m); default: quella del modello\n"
             "  --think                abilita il thinking e lo mostra (default: thinking DISATTIVATO)\n"
             "  --offload-experts      streama gli esperti MoE da disco (modelli > RAM)\n"
             "  -h, --help             questo testo\n"
@@ -297,6 +300,7 @@ static void usage_verb(FILE *out, const char *v) {
             "  --cache <dir>          radice da cui risolvere il modello\n"
             "  --system <testo>       system iniziale (modificabile con /system)\n"
             "  --max-tokens <n>       tetto sui token generati\n"
+            "  --context <n>          lunghezza del contesto in token (anche 32k, 1m); default: quella del modello\n"
             "  --think                abilita il thinking e lo mostra (default: thinking DISATTIVATO)\n"
             "  --offload-experts      streama gli esperti MoE da disco (modelli > RAM)\n"
             "  -h, --help             questo testo\n"
@@ -490,6 +494,19 @@ FmlxCliStatus fmlx_cli_parse(int argc, char **argv, FmlxCliArgs *out, char *msg,
 
         if (!a) return fail(out, msg, msg_len, "argomento NULL alla posizione %d", i);
 
+        /* --context <n> | --context=<n>: lunghezza del contesto in token (anche 32k, 1m); e' l'opzione di registro `context` */
+        if (!strcmp(a, "--context") || !strncmp(a, "--context=", 10)) {
+            const char *cv = a[9] == '=' ? a + 10 : (i + 1 < argc ? argv[++i] : NULL);
+            long long cn = 0; char *ce = NULL;
+            if (cv) { cn = strtoll(cv, &ce, 10); if (ce && (*ce == 'k' || *ce == 'K')) { cn *= 1024; ce++; } else if (ce && (*ce == 'm' || *ce == 'M')) { cn *= 1048576; ce++; } }
+            if (!cv || !ce || *ce != '\0' || cn < 1 || cn > 16777216)
+                return fail(out, msg, msg_len, "--context: '%s' non è un numero 1..16777216 (anche 32k, 1m)", cv ? cv : "");
+            if (out->n_opts < (int)(sizeof out->opts / sizeof out->opts[0]))
+                snprintf(out->opts[out->n_opts++], sizeof out->opts[0], "context=%lld", cn);
+            else
+                return fail(out, msg, msg_len, "--context: troppe opzioni");
+            continue;
+        }
         /* -h/--help in qualunque punto: non è un errore invocare l'aiuto con altre bandiere. */
         if (!strcmp(a, "-h") || !strcmp(a, "--help")) {
             out->want_help = 1;
