@@ -699,6 +699,10 @@ int fmlx_engine_load(const char *cache_root, const char *name, FmlxEngineModel *
         } else if (dn > 5 && strcmp(out->dir + dn - 5, ".gguf") == 0 && strcmp(out->gguf_arch, "deepseek4") == 0) {
             const LlmEngineLlmEngine* e = fmlx_engine_symbol("llmengine_llm_engine_ds4");
             if (e != NULL) out->eng = e;   /* altrimenti resta l'engine MLX */
+        } else if (dn > 5 && strcmp(out->dir + dn - 5, ".gguf") == 0 && out->gguf_arch[0] != '\0') {
+            /* Ogni altro GGUF: llama.cpp in versione a id (stessi tokenizer/template/streaming degli altri motori). */
+            const LlmEngineLlmEngine* e = fmlx_engine_symbol("llmengine_llm_engine_llamacpp_ids");
+            if (e != NULL) out->eng = e;
         } else if (is_dsv41_dir(out->dir)) {
             /* DS4.1 (deepseek_v41): motore `ds41-native`, stessi 9 metodi dell'ABI. */
             const LlmEngineLlmEngine* e = fmlx_engine_symbol("llmengine_llm_engine_ds41");
