@@ -161,7 +161,7 @@ FmlxApiErr fmlx_api_anthropic_parse(const FmlxJsonValue *root, FmlxApiChat *c,
     c->system = v;
 
     /* `max_tokens` è OBBLIGATORIO nel protocollo Anthropic. Il piano:510 dice cosa fare
-     * quando manca: default interno 2048 E un warning, non un errore e non "nessun limite".
+     * quando manca: default interno (FMLX_API_DEF_MAX_TOKENS) E un warning, non un errore e non "nessun limite".
      * Nessun limite è la richiesta che manda il server in out-of-memory su un modello da
      * 128k di contesto. */
     v = fmlx_json_obj_get(root, "max_tokens");
@@ -169,7 +169,7 @@ FmlxApiErr fmlx_api_anthropic_parse(const FmlxJsonValue *root, FmlxApiChat *c,
         c->max_tokens = FMLX_API_DEF_MAX_TOKENS;
         c->max_tokens_defaulted = 1;
         c->has_max_tokens = 1;
-        fmlx_api_warn(c, "max_tokens assente: applicato il default di 2048 (piano:510)");
+        fmlx_api_warn(c, "max_tokens assente: applicato il default del motore (262144; il tetto reale e' la KV) (piano:510)");
     } else {
         if (!fmlx_json_as_i64(v, &c->max_tokens) || c->max_tokens <= 0) {
             set_err(err, FMLX_API_INVALID_REQUEST,

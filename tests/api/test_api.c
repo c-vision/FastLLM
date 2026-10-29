@@ -211,9 +211,9 @@ static void t_openai_parse(void) {
     CK(c.n_sys_msgs == 2, "system E developer sono entrambi di sistema (piano:507), %u",
        c.n_sys_msgs);
     CK(c.tools != NULL, "tools");
-    CK(c.n_ignored == 3, "logit_bias + user + reasoning_effort in ignored, %u", c.n_ignored);
-    CK(fmlx_api_streq(c.ignored[2], "reasoning_effort"),
-       "il campo che il piano non nomina affatto è ignorato");
+    CK(c.n_ignored == 2, "logit_bias + user in ignored (reasoning_effort e' ora onorato), %u", c.n_ignored);
+    CK(fmlx_api_streq(c.ignored[1], "user"), "l'ultimo campo ignorato e' user");
+    CK(c.has_think && c.think, "reasoning_effort=low accende il thinking (bd3e2fc)");
 
     r = body("{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"c\"},"
              "{\"role\":\"system\",\"content\":\"S1\"},{\"role\":\"system\",\"content\":\"S2\"}]}",
@@ -308,9 +308,9 @@ static void t_anthropic_parse(void) {
     CK(sys.p == mem, "qui la copia SERVE: due blocchi non sono contigui nel DOM");
 
     r = body("{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"c\"}]}", &d);
-    CK(fmlx_api_anthropic_parse(r, &c, &e) == FMLX_API_OK && c.max_tokens == 2048 &&
+    CK(fmlx_api_anthropic_parse(r, &c, &e) == FMLX_API_OK && c.max_tokens == FMLX_API_DEF_MAX_TOKENS &&
            c.max_tokens_defaulted && c.n_warn == 1,
-       "max_tokens obbligatorio: default 2048 E warning (piano:510)");
+       "max_tokens obbligatorio: default del motore E warning (piano:510)");
 
     r = body("{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"c\"}],"
              "\"max_tokens\":64,\"temperature\":1.5}",
@@ -495,9 +495,8 @@ static void t_openai_render(void) {
     fmlx_api_openai_completion(&c, &m, &a, &w);
     fmlx_jsonw_finish(&w, &n);
     out[n] = '\0';
-    CK(!HAS(out, "reasoning_content"),
-       "il thinking NON è nel formato OpenAI non-stream: `message` ha content e tool_calls, "
-       "il campo è solo del delta (piano:466,469)");
+    CK(HAS(out, "\"reasoning_content\":\"rifletto\""),
+       "il thinking e' in `message.reasoning_content` (estensione de-fatto, come nel delta; piano:466,469)");
     fmlx_jsonw_free(&w);
 
     /* tool con argomenti troncati */
