@@ -600,6 +600,10 @@ static llmtoken_handle load_tokenizer(const char *dir) {
     return NULL;
 }
 
+/* Template di chat di Llama-2 (formato [INST] con <<SYS>>), identico a quello ufficiale di Hugging Face: serve ai GGUF Llama/Mistral
+ * senza `tokenizer.chat_template` (p.es. quelli di TheBloke), che altrimenti avrebbero il prompt di un altra famiglia e senza BOS. */
+static const char FMLX_LLAMA2_TPL[] = "{% if messages[0]['role'] == 'system' %}{% set loop_messages = messages[1:] %}{% set system_message = messages[0]['content'] %}{% else %}{% set loop_messages = messages %}{% set system_message = false %}{% endif %}{% for message in loop_messages %}{% if (message['role'] == 'user') != (loop.index0 % 2 == 0) %}{{ raise_exception('Conversation roles must alternate user/assistant/user/assistant/...') }}{% endif %}{% if loop.index0 == 0 and system_message != false %}{% set content = '<<SYS>>\\n' + system_message + '\\n<</SYS>>\\n\\n' + message['content'] %}{% else %}{% set content = message['content'] %}{% endif %}{% if message['role'] == 'user' %}{{ bos_token + '[INST] ' + content.strip() + ' [/INST]' }}{% elif message['role'] == 'assistant' %}{{ ' ' + content.strip() + ' ' + eos_token }}{% endif %}{% endfor %}";
+
 /* GGUF: architettura, chat template, eos/bos REALI dai metadati del file (llm_ai_mlx_gguf_chat_meta) invece di assumere
  * DeepSeek-V4 per ogni .gguf. Riempie `out->gguf_arch`; per le architetture diverse da deepseek4 anche template, eos e bos. */
 static void read_gguf_meta(FmlxEngineModel *out) {
@@ -621,13 +625,19 @@ static void read_gguf_meta(FmlxEngineModel *out) {
     if (strcmp(out->gguf_arch, "deepseek4") != 0) {
         char *copy;
         v = fmlx_json_obj_get(root, "chat_template");
-        out->tpl = FMLX_TPL_DS4;
+        out->tpl = FMLX_TPL_GENERIC;
         if (v && v->type == FMLX_JSON_STR && fmlx_json_str_len(v) > 0 &&
             (copy = malloc(fmlx_json_str_len(v) + 1)) != NULL) {
             memcpy(copy, fmlx_json_str(v), fmlx_json_str_len(v));
             copy[fmlx_json_str_len(v)] = '\0';
             out->tpl = classify_tpl(copy, fmlx_json_str_len(v), &out->chat_tpl, &out->chat_tpl_len);
             free(copy);
+        }
+        /* Nessun template nel GGUF: per i Llama/Mistral SentencePiece (arch "llama", bos "<s>") quello ufficiale di Llama-2. */
+        if (!out->chat_tpl && strcmp(out->gguf_arch, "llama") == 0) {
+            v = fmlx_json_obj_get(root, "bos_token");
+            if (v && v->type == FMLX_JSON_STR && fmlx_json_str_len(v) == 3 && !memcmp(fmlx_json_str(v), "<s>", 3))
+                out->tpl = classify_tpl(FMLX_LLAMA2_TPL, sizeof FMLX_LLAMA2_TPL - 1, &out->chat_tpl, &out->chat_tpl_len);
         }
         v = fmlx_json_obj_get(root, "eos_token");
         if (v && v->type == FMLX_JSON_STR) {
