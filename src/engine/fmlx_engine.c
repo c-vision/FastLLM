@@ -262,6 +262,34 @@ static char *read_file(const char *path, size_t *out_len) {
     return buf;
 }
 
+/* Come read_file, per i JSON di CONFIGURAZIONE del modello (config.json, tokenizer_config.json, ...). I repo Hugging Face
+ * contengono interi oltre int64 (`model_max_length: 1000000000000000019884624838656`): il parser lo rifiuta di proposito
+ * (vale per i body API) e il file intero veniva scartato -- per LFM2 si perdeva `bos_token` e il prompt partiva senza BOS,
+ * da cui testo senza senso. Qui ogni intero di 19+ cifre FUORI dalle stringhe diventa `0` seguito da spazi (stessa lunghezza,
+ * stessi offset): nessuno di questi campi serve al motore. */
+static char *read_json_file(const char *path, size_t *out_len) {
+    size_t n = 0;
+    char *buf = read_file(path, &n);
+    int in_str = 0;
+    if (!buf) return NULL;
+    for (size_t i = 0; i < n; i++) {
+        char ch = buf[i];
+        if (in_str) { if (ch == '\\') i++; else if (ch == '"') in_str = 0; continue; }
+        if (ch == '"') { in_str = 1; continue; }
+        if (ch == '-' || (ch >= '0' && ch <= '9')) {
+            size_t j = i + (ch == '-' ? 1 : 0), d0 = j;
+            while (j < n && buf[j] >= '0' && buf[j] <= '9') j++;
+            if (j - d0 >= 19 && (j >= n || (buf[j] != '.' && buf[j] != 'e' && buf[j] != 'E'))) {
+                buf[i] = '0';
+                for (size_t k = i + 1; k < j; k++) buf[k] = ' ';
+            }
+            i = j > i ? j - 1 : i;
+        }
+    }
+    if (out_len) *out_len = n;
+    return buf;
+}
+
 /* Espande un `~` iniziale e copia in `out`. 0 = ok. */
 static int expand_tilde(const char *in, char *out, size_t cap) {
     const char *home;
@@ -314,7 +342,7 @@ static int read_eos_list(const char *dir, int32_t *out, int cap) {
         const FmlxJsonValue *root, *v;
 
         if (snprintf(path, sizeof path, "%s/%s", dir, files[i]) >= (int)sizeof path) continue;
-        txt = read_file(path, &len);
+        txt = read_json_file(path, &len);
         if (!txt) continue;
         fmlx_json_doc_init(&doc);
         if (fmlx_json_parse(txt, len, 0, &doc) != FMLX_JSON_OK) {
@@ -359,7 +387,7 @@ static void read_bos(const char *dir, char *out, size_t cap) {
         const FmlxJsonValue *root, *v;
 
         if (snprintf(path, sizeof path, "%s/%s", dir, files[i]) >= (int)sizeof path) continue;
-        txt = read_file(path, &len);
+        txt = read_json_file(path, &len);
         if (!txt) continue;
         fmlx_json_doc_init(&doc);
         if (fmlx_json_parse(txt, len, 0, &doc) != FMLX_JSON_OK) {
@@ -435,7 +463,7 @@ static FmlxTplKind detect_template(const char *dir, char **out_tpl, size_t *out_
     if (out_len) *out_len = 0;
     if (snprintf(path, sizeof path, "%s/tokenizer_config.json", dir) >= (int)sizeof path)
         return kind;
-    txt = read_file(path, &len);
+    txt = read_json_file(path, &len);
     if (txt) {
         fmlx_json_doc_init(&doc);
         if (fmlx_json_parse(txt, len, 0, &doc) == FMLX_JSON_OK) {
