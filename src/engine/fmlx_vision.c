@@ -3,7 +3,12 @@
  * Usa l'ABI comune `llmengine` del motore llama.cpp/mtmd di LLMEnv:
  *   llmengine_llm_engine_llamacpp()->vision_load / vision_read_image / vision_read_audio /
  *   vision_unload / free_str
- * Nessuna logica di formato qui: il dequant e il forward multimodale stanno nel motore. */
+ * Nessuna logica di formato qui: il dequant e il forward multimodale stanno nel motore.
+ *
+ * PERCHE' SEMPRE llama.cpp E NON IL MOTORE DEL MODELLO. Ne' il motore MLX ne' i due motori ds4
+ * espongono `vision_*` nell'ABI: la visione vive in mtmd (llama.cpp) e li' resta. Questa scelta e'
+ * deliberata — un `CAP_VISION` dichiarato e non implementato sarebbe una promessa falsa, e il
+ * percorso multimodale di GMBasic (che usa `llm_ai_llamacpp`) non va toccato. */
 #include "fmlx_vision.h"
 
 #include "llmengine.h"
@@ -36,7 +41,7 @@ FmlxVision *fmlx_vision_load(const char *model, const char *mmproj, int n_ctx, i
     if (!e || !e->vision_load) {
         set_err(err, errcap,
                 "vision: the llama.cpp/mtmd engine is not available in this build "
-                "(the MLX engine has no vision)");
+                "(MLX and ds4 have no vision: use llama.cpp/mtmd)");
         return NULL;
     }
     h = e->vision_load(model, (mmproj && *mmproj) ? mmproj : NULL, n_ctx, n_gpu_layers);
