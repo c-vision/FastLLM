@@ -1,17 +1,17 @@
-# fastllm — guida della CLI
+# fastllm — CLI guide
 
-`fastllm` è il binario C di FastLLM: **hub** Hugging Face (download e cache), **server**
-OpenAI/Anthropic, **CLI** in stile Ollama per scegliere, ispezionare ed eseguire i modelli.
-Il motore non è in questo repo: è [LLMEnv](https://github.com/c-vision/LLMEnv) (`LLMEngine`,
-`LLMCodec`, `LLMToken`, `LLMJinja`), consumato a sorgente.
+`fastllm` is the C binary of FastLLM: a Hugging Face **hub** (download and cache), an
+OpenAI/Anthropic **server**, and an Ollama-style **CLI** to choose, inspect and run models.
+The engine is not in this repository: it is [LLMEnv](https://github.com/c-vision/LLMEnv) (`LLMEngine`,
+`LLMCodec`, `LLMToken`, `LLMJinja`), consumed as source.
 
-> **Regola d'oro.** I parametri del motore **non sono variabili d'ambiente**: si passano dal
-> **registro opzioni** con `--opt <nome>=<valore>` (ripetibile, prima del load). L'elenco sempre
-> aggiornato è `fastllm options`. Le uniche variabili lette sono quelle di **servizio** (§9).
+> **Golden rule.** Engine parameters are **not environment variables**: they go through the
+> **options registry** with `--opt <name>=<value>` (repeatable, before the model is loaded). The
+> always up-to-date list is `fastllm options`. The only variables read are **service** variables (§9).
 
 ---
 
-## 1. Build e installazione
+## 1. Build and install
 
 ```sh
 cmake -S . -B build-release -DCMAKE_BUILD_TYPE=Release
@@ -20,92 +20,94 @@ export PATH="$PWD/build-release:$PATH"
 fastllm help
 ```
 
-Prerequisiti: macOS su Apple Silicon (Metal), un compilatore C11 e — per la lane MLX — il toolchain
-che LLMEnv richiede. Il binario esce in `build-release/fastllm` e carica le dylib `libllm_ai_mlx`,
-`libllm_ai_llamacpp`, `libllmcodec_ggml`, `libllmtoken` dalla stessa cartella (`@rpath`).
+Requirements: macOS on Apple Silicon (Metal), a C11 compiler and, for the MLX lane, the toolchain
+that LLMEnv requires. The binary is built as `build-release/fastllm` and loads the dylibs
+`libllm_ai_mlx`, `libllm_ai_llamacpp`, `libllmcodec_ggml` and `libllmtoken` from the same folder
+(`@rpath`).
 
 ---
 
-## 2. Come `fastllm` trova un modello
+## 2. How `fastllm` finds a model
 
-Per `<nome|#n>` (usato da `run`, `chat`, `test`, `show`, `rm`) l'ordine è:
+For `<name|#n>` (used by `run`, `chat`, `test`, `show`, `rm`) the lookup order is:
 
-1. **path esplicito** (`./modello.gguf`, `~/ai/Modelli/…`);
-2. **registro locale** — alias e indice `#n` di `fastllm list` (`$FASTLLM_HOME/models.tsv`);
-3. **cache Hugging Face** — repo `models--org--nome` già scaricati;
-4. **directory di ricerca** — `$FASTLLM_HOME/paths`, una per riga (vedi `fastllm paths`).
+1. **explicit path** (`./model.gguf`, `~/ai/Models/…`);
+2. **local registry** — aliases and the `#n` index of `fastllm list` (`$FASTLLM_HOME/models.tsv`);
+3. **Hugging Face cache** — already downloaded `models--org--name` repositories;
+4. **search directories** — `$FASTLLM_HOME/paths`, one per line (see `fastllm paths`).
 
-Nessun default implicito legato alla macchina: le directory di ricerca le decidi tu.
+There is no implicit, machine-specific default: you decide the search directories.
 
-| file | cosa contiene | lo gestisce |
+| file | contents | managed by |
 |---|---|---|
-| `$FASTLLM_HOME/paths` | directory di ricerca dei modelli | `fastllm paths` |
-| `$FASTLLM_HOME/models.tsv` | registro locale alias → path | `fastllm add/rm/show` |
-| cache HF (`HF_HUB_CACHE`/`HF_HOME`) | repo scaricati | `fastllm pull/models/doctor/serve` |
+| `$FASTLLM_HOME/paths` | model search directories | `fastllm paths` |
+| `$FASTLLM_HOME/models.tsv` | local registry, alias → path | `fastllm add/rm/show` |
+| HF cache (`HF_HUB_CACHE`/`HF_HOME`) | downloaded repositories | `fastllm pull/models/doctor/serve` |
 
-`$FASTLLM_HOME` vale `~/.fastllm` se non impostata.
+`$FASTLLM_HOME` is `~/.fastllm` when not set.
 
 ---
 
-## 3. Gestione dei modelli
+## 3. Managing models
 
-### `pull <repo>` — scaricare un repo (o alcuni file)
+### `pull <repo>` — download a repository (or some of its files)
 
 ```sh
 fastllm pull mlx-community/Qwen3-8B-4bit
 fastllm pull antirez/deepseek-v4-gguf --file '*IQ2XXS*imatrix-0731.gguf'
 fastllm pull antirez/glm-5.3-flash-gguf --file 'GLM-5.3-Flash-Q2.gguf'
-fastllm pull org/modello --revision main --cache ~/.cache/huggingface \
+fastllm pull org/model --revision main --cache ~/.cache/huggingface \
     --dest ~/ai/Models --max-bytes 5000000000 --stall-timeout 60 --stall-retries 3 --repair
 ```
 
-| bandiera | effetto |
+| flag | effect |
 |---|---|
-| `--revision <ref>` | ramo o commit (default `main`) |
-| `--cache <dir>` | radice del cache (default: quella di Hugging Face) |
-| `--endpoint <url>` | server diverso da `huggingface.co` |
-| `--dest <dir>` | specchia in `<dir>/<nome-repo>` con **hardlink** (mai symlink) |
-| `--file <glob>` | scarica **solo** i file che corrispondono: `*` = qualsiasi sequenza (anche `/`), `?` = un carattere. **Ripetibile**, max 16. Senza `--file` si scarica **tutto** il repo |
-| `--max-bytes <n>` | tetto di byte per **un** file |
-| `--stall-timeout <s>` | secondi senza byte prima di riprovare (default 60) |
-| `--stall-retries <n>` | riprese con `Range` dopo uno stall (default 3) |
-| `--offline` | mai rete: se manca un file, errore |
-| `--repair` | permesso di sostituire un blob che non verifica |
-| `--quiet` | niente righe di progresso |
+| `--revision <ref>` | branch or commit (default `main`) |
+| `--cache <dir>` | cache root (default: the Hugging Face one) |
+| `--endpoint <url>` | a server other than `huggingface.co` |
+| `--dest <dir>` | mirror into `<dir>/<repo-name>` with **hardlinks** (never symlinks) |
+| `--file <glob>` | download **only** the matching files: `*` = any sequence (including `/`), `?` = one character. **Repeatable**, at most 16. Without `--file` the **whole** repository is downloaded |
+| `--max-bytes <n>` | byte limit for **one** file |
+| `--stall-timeout <s>` | seconds without bytes before retrying (default 60) |
+| `--stall-retries <n>` | `Range` resumes after a stall (default 3) |
+| `--offline` | never use the network: a missing file is an error |
+| `--repair` | allow replacing a blob that does not verify |
+| `--quiet` | no progress lines |
 
-Note che contano:
+Notes that matter:
 
-- il commit è **uno solo** (quello del manifesto): un pull non produce mai uno snapshot misto;
-- il download è **riprendibile**: i byte parziali restano in `<etag>.incomplete` e ripartono da lì;
-- un `--file` che non seleziona **nulla** è un **errore** (`nessun file corrisponde…`), mai un
-  successo con zero file: il messaggio dice anche quanti file ha il repo;
-- `--dest` è un hardlink quando cache e destinazione sono sullo stesso volume, una copia atomica
-  altrimenti. Il modello è specchiato **solo** dopo che il cache è completo.
+- there is **one** commit (the manifest's): a pull never produces a mixed snapshot;
+- the download is **resumable**: partial bytes stay in `<etag>.incomplete` and restart from there;
+- a `--file` that selects **nothing** is an **error** (`no file matches…`), never a success with
+  zero files: the message also says how many files the repository has;
+- `--dest` is a hardlink when cache and destination are on the same volume, an atomic copy
+  otherwise. The model is mirrored **only** after the cache is complete.
 
-I comandi per-modello (ds4, GLM, Qwen, MLX, OCR, ASR) sono in [MODELS.md](MODELS.md).
+The per-model commands (ds4, GLM, Qwen, MLX, OCR, ASR) are in [MODELS.md](MODELS.md).
 
-### `models [<filtro>]` — cosa c'è già nel cache (senza rete)
+### `models [<filter>]` — what is already in the cache (no network)
 
 ```sh
 fastllm models
 fastllm models qwen
 fastllm models mlx-community/* --json
-fastllm models --quiet            # solo gli id, uno per riga
+fastllm models --quiet            # ids only, one per line
 ```
 
-Il filtro ha **tre forme**: `org/nome`, `nome` (ultima parte dell'id), `org/*`. Zero match = uscita
-1 con stdout vuoto (convenzione di `grep`).
+The filter has **three forms**: `org/name`, `name` (last part of the id), `org/*`. Zero matches =
+exit 1 with empty stdout (the `grep` convention).
 
-### `list` (`ls`) — i modelli disponibili, numerati
+### `list` (`ls`) — available models, numbered
 
-Unisce **registro locale** e **cache HF**; il numero `#n` è quello usato da `run`/`chat`/`rm`/`show`.
+Merges the **local registry** and the **HF cache**; the number `#n` is the one used by
+`run`/`chat`/`rm`/`show`.
 
 ```sh
 fastllm list
 fastllm list --cache ~/.cache/huggingface --json
 ```
 
-### `add <nome> <path>` / `rm` / `show` — registro locale
+### `add <name> <path>` / `rm` / `show` — local registry
 
 ```sh
 fastllm add llama1b ~/ai/Models/Llama-3.2-1B-Instruct-4bit
@@ -113,97 +115,97 @@ fastllm add ds4 ~/ds4/ds4flash.gguf --modality chat
 fastllm add doodle-ocr ~/ai/Models/gguf/PaddleOCR-VL-1.6-GGUF.gguf \
     --mmproj ~/ai/Models/gguf/PaddleOCR-VL-1.6-GGUF-mmproj.gguf --modality ocr
 
-fastllm show ds4          # dettagli della voce
-fastllm rm ds4            # toglie la voce, NON i file
+fastllm show ds4          # details of the entry
+fastllm rm ds4            # removes the entry, NOT the files
 fastllm rm 2
-fastllm rm doodle-ocr --purge   # cancella anche i file
+fastllm rm doodle-ocr --purge   # also deletes the files
 ```
 
-`--modality chat|vlm|ocr|audio` decide come `run` interpreta il secondo argomento (testo, immagine,
-file audio). Per `vlm`/`ocr` serve `--mmproj`.
+`--modality chat|vlm|ocr|audio` decides how `run` interprets the second argument (text, image,
+audio file). `vlm`/`ocr` need `--mmproj`.
 
 ---
 
-## 4. Trovare modelli su disco
+## 4. Finding models on disk
 
-### `paths` — dove cercare
+### `paths` — where to look
 
 ```sh
-fastllm paths                      # elenco NUMERATO (il progressivo serve a rm)
+fastllm paths                      # NUMBERED list (the number is what rm takes)
 fastllm paths add ~/ai/Models
-fastllm paths add /Volumes/disco/ai/Models
+fastllm paths add /Volumes/disk/ai/Models
 fastllm paths rm 2
-fastllm paths scan --json          # inventario: dove ESISTONO modelli
+fastllm paths scan --json          # inventory: where models EXIST
 ```
 
-### `search` — trovare i modelli
+### `search` — find models
 
 ```sh
-fastllm search                          # tutti i dischi accessibili
+fastllm search                          # every accessible disk
 fastllm search ~/ai --max-depth 4
-fastllm search ~/ai --roots --max-depth 4   # albero delle CARTELLE RADICE
-fastllm search /Volumes/disco --type gguf --json
-fastllm search ~/ai --walk              # forza il walk (niente Spotlight)
+fastllm search ~/ai --roots --max-depth 4   # tree of the ROOT FOLDERS
+fastllm search /Volumes/disk --type gguf --json
+fastllm search ~/ai --walk              # force the walk (no Spotlight)
 ```
 
-Default: lista **numerata e alfabetica** dei modelli, nome su una riga e percorso sotto, senza
-accorciature; i duplicati si mostrano **tutti**. Un «modello» è: una dir con `config.json` + pesi
-(`*.safetensors`/`.bin`/`.npz`), un file `*.gguf` (≥ 1 MB, non `ggml-vocab-*`; N gguf in una
-cartella = N modelli) oppure un repo-cache HF.
+Default: a **numbered, alphabetical** list of models, name on one line and path below, with no
+shortening; duplicates are **all** shown. A "model" is: a directory with `config.json` + weights
+(`*.safetensors`/`.bin`/`.npz`), a `*.gguf` file (≥ 1 MB, not `ggml-vocab-*`; N ggufs in one
+folder = N models), or an HF cache repository.
 
-### `test` — il modello è completo e non corrotto?
+### `test` — is the model complete and not corrupted?
 
 ```sh
 fastllm test ds4
 fastllm test 2
-fastllm test /Volumes/disco/ai/models/Qwen3.8-27B-DFlash2
+fastllm test /Volumes/disk/ai/models/Qwen3.8-27B-DFlash2
 ```
 
-Verifica **senza caricare il modello**: header GGUF + tensori che ci stanno nel file; per una dir
-MLX/HF `config.json`, pesi presenti, header safetensors; per un repo-cache blob e snapshot (nessun
-symlink rotto); in tutti i casi i marker di download incompleto
-(`*.part`/`*.incomplete`/`*.download`/`*.tmp`). **Uscita 0 = completo, 1 = problema col motivo.**
+Checks **without loading the model**: GGUF header + the tensors that fit in the file; for an MLX/HF
+directory `config.json`, the weights present and the safetensors header; for a cache repository the
+blobs and snapshot (no broken symlinks); in every case the incomplete-download markers
+(`*.part`/`*.incomplete`/`*.download`/`*.tmp`). **Exit 0 = complete, 1 = problem, with the reason.**
 
 ---
 
-## 5. Generazione
+## 5. Generation
 
-### `run <nome|#n> [prompt]`
+### `run <name|#n> [prompt]`
 
 ```sh
-fastllm run llama1b "Ciao, presentati in una frase."
-fastllm run 0 --cache ~/.cache/huggingface --system "Sei conciso." \
+fastllm run llama1b "Hello, introduce yourself in one sentence."
+fastllm run 0 --cache ~/.cache/huggingface --system "Be concise." \
     --max-tokens 256 --think --offload-experts
-fastllm run ds4 "Spiega il MoE in due righe." --context 32k
+fastllm run ds4 "Explain MoE in two lines." --context 32k
 ```
 
-Il testo esce **token-live** su stdout. Senza `[prompt]` legge una riga per volta da stdin (una
-generazione per riga).
+The text is streamed **token by token** to stdout. Without `[prompt]` it reads one line at a time
+from stdin (one generation per line).
 
-### `chat <nome|#n>`
+### `chat <name|#n>`
 
 ```sh
 fastllm chat llama1b
-fastllm chat 0 --system "Sei un assistente." --max-tokens 512 --think
+fastllm chat 0 --system "You are an assistant." --max-tokens 512 --think
 ```
 
-Comandi REPL: `/exit` `/quit` `/clear` `/new` `/system` `/thinking` `/prompt` `/compact` `/help`.
+REPL commands: `/exit` `/quit` `/clear` `/new` `/system` `/thinking` `/prompt` `/compact` `/help`.
 
-| bandiera (run/chat) | effetto |
+| flag (run/chat) | effect |
 |---|---|
-| `--system <testo>` | messaggio di sistema (per `ocr`/`vlm`/`audio`: l'istruzione al modello) |
-| `--max-tokens <n>` | tetto sui token generati |
-| `--context <n>` | contesto in token (`32k`, `1m`, numero); default: quello del modello |
-| `--think` | abilita e mostra il thinking (default: **disattivato**) |
-| `--offload-experts` | streama gli esperti MoE da disco (modelli più grandi della RAM) |
-| `--cache <dir>` | radice da cui risolvere il modello |
+| `--system <text>` | system message (for `ocr`/`vlm`/`audio`: the instruction to the model) |
+| `--max-tokens <n>` | limit on generated tokens |
+| `--context <n>` | context in tokens (`32k`, `1m`, a number); default: the model's own |
+| `--think` | enable and show thinking (default: **off**) |
+| `--offload-experts` | stream the MoE experts from disk (models larger than RAM) |
+| `--cache <dir>` | root from which the model is resolved |
 
-Con `--modality vlm|ocr|audio` il secondo argomento è un **file** (immagine/audio) e `--system` è
-l'istruzione (`"OCR:"`, `"Table Recognition:"`).
+With `--modality vlm|ocr|audio` the second argument is a **file** (image/audio) and `--system` is
+the instruction (`"OCR:"`, `"Table Recognition:"`).
 
-> Se il modello supera metà della memoria libera+reclamabile e manca `--offload-experts`,
-> `run`/`chat` chiedono `[Y/n]` sul terminale. La domanda si disabilita con
-> `FASTLLM_NO_OFFLOAD_PROMPT=1` (l'opzione resta `--offload-experts`).
+> If the model exceeds half of the free+reclaimable memory and `--offload-experts` is missing,
+> `run`/`chat` ask `[Y/n]` on the terminal. The question is disabled with
+> `FASTLLM_NO_OFFLOAD_PROMPT=1` (the option stays `--offload-experts`).
 
 ---
 
@@ -215,25 +217,25 @@ l'istruzione (`"OCR:"`, `"Table Recognition:"`).
 fastllm serve
 fastllm serve --host 0.0.0.0 --port 8000 --cache ~/.cache/huggingface \
     --max-body 64000000 --offload-experts --quiet
-fastllm serve --once          # serve UNA richiesta e esce (smoke test)
+fastllm serve --once          # serve ONE request and exit (smoke test)
 ```
 
-Rotte: `/v1/models`, `/v1/chat/completions`, `/v1/completions`, `/v1/responses`,
-`/v1/messages` (Anthropic), `/v1/embeddings`, `/health`, più le rotte di gestione
-`/v1/models/load`, `/v1/models/status`, `/v1/models/unload`. Ogni rotta che non può essere
-servita risponde con il **suo** codice e la **sua** ragione (mai un 200 dal corpo vuoto).
+Routes: `/v1/models`, `/v1/chat/completions`, `/v1/completions`, `/v1/responses`,
+`/v1/messages` (Anthropic), `/v1/embeddings`, `/health`, plus the management routes
+`/v1/models/load`, `/v1/models/status`, `/v1/models/unload`. A route that cannot be served answers
+with **its own** status code and **its own** reason (never a 200 with an empty body).
 
-| bandiera | effetto |
+| flag | effect |
 |---|---|
-| `--host <if>` | interfaccia di ascolto (default `127.0.0.1`) |
-| `--port <n>` | porta (default 8000) |
-| `--max-body <n>` | tetto di byte di un corpo di richiesta |
-| `--parallel <n>` | pool I/O + worker (default 1) |
-| `--batch` | lotto continuo: N richieste decodificano insieme (implica `--parallel`) |
-| `--vision-model` / `--vision-mmproj` | VLM per input immagini (servono entrambi) |
-| `--once` | una richiesta e esce |
+| `--host <if>` | listening interface (default `127.0.0.1`) |
+| `--port <n>` | port (default 8000) |
+| `--max-body <n>` | byte limit of a request body |
+| `--parallel <n>` | I/O pool + workers (default 1) |
+| `--batch` | continuous batching: N requests decode together (implies `--parallel`) |
+| `--vision-model` / `--vision-mmproj` | VLM for image input (both are required) |
+| `--once` | one request, then exit |
 
-### `ps` — c'è un server in ascolto?
+### `ps` — is a server listening?
 
 ```sh
 fastllm ps
@@ -242,66 +244,66 @@ fastllm ps --host 127.0.0.1 --port 8000
 
 ---
 
-## 7. Ispezione e media
+## 7. Inspection and media
 
 ### `compare <a.gguf> <b.gguf>`
 
-Confronto **numerico per tensore** (dequantizza i tensori comuni):
+**Per-tensor numeric** comparison (dequantizes the common tensors):
 
 ```sh
 fastllm compare base.gguf quant.gguf
 fastllm compare a.gguf b.gguf --glob 'blk.*.ffn_*'
 ```
 
-`rel_l2` e `avg_diff%` (0 = identico, ~100 = casuale): serve per il **lineage** (i layer congelati
-hanno `avg_diff ≈ 0`) e per il breakdown per-ruolo dopo quantizzazione o surgery.
+`rel_l2` and `avg_diff%` (0 = identical, ~100 = random): useful for **lineage** (frozen layers have
+`avg_diff ≈ 0`) and for the per-role breakdown after quantization or surgery.
 
 ### `tensors <model.gguf>`
 
 ```sh
-fastllm tensors modello.gguf
-fastllm tensors modello.gguf --diffable   # output deterministico: due file identici danno lo stesso testo
+fastllm tensors model.gguf
+fastllm tensors model.gguf --diffable   # deterministic output: two identical files give the same text
 ```
 
-Metadati (key-value) e tabella tensori (tipo, nome, dims; offset e byte senza `--diffable`).
+Metadata (key-value) and the tensor table (type, name, dims; offset and bytes without `--diffable`).
 
-### `gmbarch <url|org/nome|cartella>`
+### `gmbarch <url|org/name|folder>`
 
 ```sh
 fastllm gmbarch mlx-community/Mixtral-8x22B-4bit
 fastllm gmbarch ~/ai/Models/Qwen3-8B-4bit
 ```
 
-Crea `<model_type>.gmbarch` nella cartella **ABI di LLMEnv** (ruoli dei tensori, mappa dei campi di
-`config.json`, strutture attenzione/MoE/vision) **solo se l'architettura non ha già un descrittore**:
-uno esistente non viene mai sovrascritto. Lo stesso controllo parte da solo dopo `pull` e `add`.
+Creates `<model_type>.gmbarch` in the **LLMEnv ABI** folder (tensor roles, the `config.json` field
+map, attention/MoE/vision structures) **only if the architecture has no descriptor yet**: an
+existing one is never overwritten. The same check runs by itself after `pull` and `add`.
 
 ### `asr <model_dir|model.gguf> <file>`
 
 ```sh
-fastllm asr ~/ai/Models/Qwen3-ASR-0.6B discorso.wav
+fastllm asr ~/ai/Models/Qwen3-ASR-0.6B speech.wav
 fastllm asr parakeet-tdt.gguf audio.mp3
 ```
 
-Due famiglie: **Qwen3-ASR** (safetensors HF, 0.6B/1.7B) e **Parakeet-TDT** in GGUF (25 lingue
-europee; su macOS accetta anche mp3/m4a/aiff). Il testo esce **token-live** (chunk 2 s + cache delle
-finestre encoder + prefix rollback).
+Two families: **Qwen3-ASR** (HF safetensors, 0.6B/1.7B) and **Parakeet-TDT** in GGUF (25 European
+languages; on macOS it also accepts mp3/m4a/aiff). The text is streamed **token by token** (2 s
+chunks + encoder window cache + prefix rollback).
 
 ---
 
-## 8. Diagnostica
+## 8. Diagnostics
 
-### `doctor [<filtro>]`
+### `doctor [<filter>]`
 
 ```sh
 fastllm doctor
 fastllm doctor qwen
-fastllm doctor mlx-community/* --quiet     # solo i PROBLEMA
+fastllm doctor mlx-community/* --quiet     # only the PROBLEMs
 ```
 
-Hasha **davvero** i byte del cache e li confronta con il nome del blob (la stessa verifica usata da
-`pull`). Due ordini: i PROBLEMA muovono l'uscita, le note no. Il danno non si tocca: la cura è
-`pull --repair`. Zero match = fallimento.
+**Actually hashes** the cache bytes and compares them with the blob name (the same check `pull`
+uses). Two orders: PROBLEMs change the exit code, notes do not. Damage is not touched: the cure is
+`pull --repair`. Zero matches = failure.
 
 ### `options`
 
@@ -310,108 +312,109 @@ fastllm options
 fastllm options --json
 ```
 
-Elenca **tutte** le opzioni del motore (registro, senza env) con valore corrente ed esempio. Non
-carica alcun modello: è la fonte di verità per `--opt`.
+Lists **all** engine options (registry, no env) with the current value and an example. It loads no
+model: it is the source of truth for `--opt`.
 
 ---
 
-## 9. Opzioni globali, ambiente, uscite
+## 9. Global options, environment, exit codes
 
-| opzione | effetto |
+| option | effect |
 |---|---|
-| `--opt <nome>=<valore>` | parametro del motore (ripetibile, prima del load) |
-| `--context <n>` | contesto in token (`32k`, `1m`), alias dell'opzione di registro `context` |
-| `--offload-experts` | streama gli esperti MoE da disco |
-| `--cache <dir>` | radice del cache (`pull`, `models`, `list`, `serve`, `doctor`) |
-| `--quiet` | niente progresso/riepilogo |
-| `-h`, `--help` | aiuto del comando (uscita 0) |
+| `--opt <name>=<value>` | engine parameter (repeatable, before the load) |
+| `--context <n>` | context in tokens (`32k`, `1m`), alias of the registry option `context` |
+| `--offload-experts` | stream the MoE experts from disk |
+| `--cache <dir>` | cache root (`pull`, `models`, `list`, `serve`, `doctor`) |
+| `--quiet` | no progress/summary |
+| `-h`, `--help` | command help (exit 0) |
 
-Una bandiera che il verbo **non legge** è un **errore**, non un'opzione ignorata.
+A flag that the verb **does not read** is an **error**, not an ignored option.
 
-Variabili d'ambiente (solo **servizio**, mai parametri del motore):
+Environment variables (**service** only, never engine parameters):
 
-| variabile | uso |
+| variable | use |
 |---|---|
-| `HF_TOKEN` | token Hugging Face per repo privati/gated (mai in file, log o commit) |
-| `FASTLLM_HOME` | radice dei file di stato (default `~/.fastllm`) |
-| `FASTLLM_PORT` | porta di default per `ps` (poi 8000) |
-| `FASTLLM_NO_OFFLOAD_PROMPT=1` | disabilita la domanda `[Y/n]` sull'offload |
-| `HF_HUB_CACHE` / `HF_HOME` | posizione del cache Hugging Face |
+| `HF_TOKEN` | Hugging Face token for private/gated repositories (never in files, logs or commits) |
+| `FASTLLM_HOME` | root of the state files (default `~/.fastllm`) |
+| `FASTLLM_PORT` | default port for `ps` (then 8000) |
+| `FASTLLM_NO_OFFLOAD_PROMPT=1` | disables the `[Y/n]` offload question |
+| `HF_HUB_CACHE` / `HF_HOME` | location of the Hugging Face cache |
 
-Uscite: `0` successo · `1` uso errato/errore di lane (il codice preciso è nel messaggio) ·
-`2` verbo non ancora cablato (dice quale pezzo manca).
+Exit codes: `0` success · `1` wrong usage/lane error (the exact code is in the message) ·
+`2` verb not wired yet (it says which piece is missing).
 
-**Scelta del motore DS4.** Dal 2026-10-30 c'è **un solo** motore DS4: il **vendor**
-(`LLMEngine/ds4`), che copre tutte le famiglie. Il motore nativo (ex ds4-slow) è **ritirato** —
-era più lento e usava il doppio della RAM sullo stesso GGUF. L'opzione resta per compatibilità:
+**DS4 engine choice.** Since 2026-10-30 there is **one** DS4 engine: the **vendor**
+(`LLMEngine/ds4`), which covers all the families. The native engine (formerly ds4-slow) is
+**retired** — it was slower and used twice the RAM on the same GGUF. The option remains for
+compatibility:
 
 ```sh
-fastllm --opt ds4_engine=auto   run modello.gguf   # default: vendor
-fastllm --opt ds4_engine=vendor run modello.gguf   # idem
-fastllm --opt ds4_engine=native run modello.gguf   # accettato, avvisa che il nativo è ritirato
+fastllm --opt ds4_engine=auto   run model.gguf   # default: vendor
+fastllm --opt ds4_engine=vendor run model.gguf   # same
+fastllm --opt ds4_engine=native run model.gguf   # accepted, warns that the native engine is retired
 ```
 
-`auto` instrada `deepseek4`, `deepseek41`, `glm5-next` e `qwen4exp` sul vendor, `glm-dsa` su
-llama.cpp (il vendor si può forzare con `vendor`). Il valore è nel registro
-(`fastllm options`), non in una variabile d'ambiente.
+`auto` routes `deepseek4`, `deepseek41`, `glm5-next` and `qwen4exp` to the vendor, and `glm-dsa` to
+llama.cpp (the vendor can be forced with `vendor`). The value lives in the registry
+(`fastllm options`), not in an environment variable.
 
-**MTP/DSpark del vendor.** Opzioni del registro, lette all'apertura del motore:
+**Vendor MTP/DSpark.** Registry options, read when the engine opens:
 
 ```sh
-fastllm --opt ds4_mtp=/percorso/DSpark-support.gguf --opt ds4_dspark=1 run modello.gguf
+fastllm --opt ds4_mtp=/path/DSpark-support.gguf --opt ds4_dspark=1 run model.gguf
 ```
 
-`ds4_dspark=1` richiede `ds4_mtp` (errore esplicito se manca); un path non leggibile viene nominato
-prima di aprire.
+`ds4_dspark=1` requires `ds4_mtp` (explicit error if missing); an unreadable path is named before
+opening.
 
-**Visione: resta su llama.cpp.** I motori MLX e ds4 **non** espongono `vision_*` nell'ABI: VLM e OCR
-passano da `--vision-model`/`--vision-mmproj` con l'engine llama.cpp/mtmd. Non esiste un
-`--opt ds4_vision` — sarebbe una promessa che il motore non mantiene.
+**Vision stays on llama.cpp.** The MLX and ds4 engines do **not** expose `vision_*` in their ABI:
+VLM and OCR go through `--vision-model`/`--vision-mmproj` with the llama.cpp/mtmd engine. There is
+no `--opt ds4_vision` — it would be a promise the engine does not keep.
 
 ---
 
-## 10. Ricette
+## 10. Recipes
 
 ```sh
-# Dal repo al primo token, in cinque righe
+# From repository to first token, in five lines
 fastllm pull mlx-community/Qwen3-8B-4bit
 fastllm list
 fastllm test mlx-community/Qwen3-8B-4bit
-fastllm run mlx-community/Qwen3-8B-4bit "Ciao"
+fastllm run mlx-community/Qwen3-8B-4bit "Hello"
 
-# Un GGUF enorme, con gli esperti su disco
+# A huge GGUF, with the experts on disk
 fastllm pull antirez/glm-5.3-flash-gguf --file 'GLM-5.3-Flash-Q2.gguf'
 fastllm add glm53 ~/.cache/huggingface/hub/models--antirez--glm-5.3-flash-gguf/snapshots/*/GLM-5.3-Flash-Q2.gguf
-fastllm run glm53 --offload-experts --context 32k "Riassumi in tre punti."
+fastllm run glm53 --offload-experts --context 32k "Summarize in three points."
 
-# Server in rete locale
+# Server on the local network
 fastllm serve --host 0.0.0.0 --port 8000 --cache ~/.cache/huggingface --batch --parallel 4
 
-# Un modello locale su disco esterno
-fastllm paths add /Volumes/disco/ai/Models
-fastllm search /Volumes/disco/ai/Models --type mlx
-fastllm add locale 1
-fastllm chat locale
+# A local model on an external disk
+fastllm paths add /Volumes/disk/ai/Models
+fastllm search /Volumes/disk/ai/Models --type mlx
+fastllm add local 1
+fastllm chat local
 ```
 
 ---
 
-## 11. Problemi comuni
+## 11. Common problems
 
-| sintomo | causa | rimedio |
+| symptom | cause | remedy |
 |---|---|---|
-| `pull` scarica troppo | il repo contiene più varianti | `--file '<glob>'` (vedi [MODELS.md](MODELS.md)) |
-| `test` esce 1 | download incompleto o blob corrotto | riprovare `pull`; se il blob è corrotto `pull --repair` |
-| `doctor` segnala PROBLEMA | byte diversi dal nome del blob | `pull --repair` sul repo indicato |
-| «motore non disponibile» | dylib LLMEnv non trovata accanto al binario | ricostruire `fastllm` (le dylib escono nel build) |
-| il modello non entra in RAM | residente troppo grande | `--offload-experts` e `--context` più corto |
-| `run` chiede `[Y/n]` | modello oltre metà della memoria libera | rispondere, o `FASTLLM_NO_OFFLOAD_PROMPT=1` |
+| `pull` downloads too much | the repository holds several variants | `--file '<glob>'` (see [MODELS.md](MODELS.md)) |
+| `test` exits 1 | incomplete download or corrupted blob | retry `pull`; if the blob is corrupted, `pull --repair` |
+| `doctor` reports PROBLEM | bytes differ from the blob name | `pull --repair` on the repository named |
+| "engine not available" | LLMEnv dylib not found next to the binary | rebuild `fastllm` (the dylibs are produced in the build) |
+| the model does not fit in RAM | resident size too large | `--offload-experts` and a shorter `--context` |
+| `run` asks `[Y/n]` | model above half of the free memory | answer, or `FASTLLM_NO_OFFLOAD_PROMPT=1` |
 
 ---
 
-## 12. Riferimenti
+## 12. References
 
-- [MODELS.md](MODELS.md) — comandi di download per ogni modello gestito.
-- [README.md](README.md) — stato del codice e confini.
-- `fastllm help <comando>` — l'aiuto vivo di ogni verbo (questa guida lo segue).
-- `docs/quant-coverage.md`, `docs/json-contract.md`, `docs/mlx-quant-bridge.md` — contratti interni.
+- [MODELS.md](MODELS.md) — download commands for every supported model.
+- [README.md](README.md) — overview, tested models and what to expect.
+- `fastllm help <command>` — the live help of each verb (this guide follows it).
+- `docs/quant-coverage.md`, `docs/json-contract.md`, `docs/mlx-quant-bridge.md` — internal contracts.
