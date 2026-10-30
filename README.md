@@ -7,7 +7,7 @@ It runs **MLX** models (Hugging Face safetensors folders, quantized to 2, 3, 4, 
 models. It also downloads models from Hugging Face with resume, checks the files on disk, and creates the architecture descriptors
 the engine needs.
 
-The inference engine is not in this repository. It is [LLMEnv](../LLMEnv) (`LLMEngine`, `LLMCodec`, `LLMToken`, `LLMJinja`), built
+The inference engine is not in this repository. It is [LLMEnv](https://github.com/c-vision/LLMEnv) (`LLMEngine`, `LLMCodec`, `LLMToken`, `LLMJinja`), built
 together with FastLLM from the sibling directory.
 
 ## Quick start
@@ -117,11 +117,10 @@ fastllm run parakeet.gguf speech.wav
 fastllm run PaddleOCR-VL.gguf invoice.jpg    # the *-mmproj.gguf file sits next to the model
 ```
 
-## Models served by the ds4 engine (not tested here)
+## Models served by the ds4 engine
 
 The GGUF files of the [DwarfStar (ds4)](https://github.com/antirez/ds4) project run on a dedicated engine that FastLLM starts
-automatically, chosen by the architecture inside the GGUF (`deepseek4`, `deepseek41`, `glm-dsa`, `glm5-next`, `qwen4exp`). These
-models are **not** tested through FastLLM, except the Qwen3.8-Flash-Next Q2 row above. The list comes from the vendor's own model guide
+automatically, chosen by the architecture inside the GGUF (`deepseek4`, `deepseek41`, `glm-dsa`, `glm5-next`, `qwen4exp`). The models below were tested by the ds4 project (see `QA_BEFORE_RELEASES.md` in its repository). The list comes from its model guide
 and download script. These are not general GGUF files: use the vendor's downloads. Sizes are file sizes from the vendor's guide.
 
 | Model | Variants | Notes |
