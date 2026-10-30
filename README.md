@@ -87,25 +87,30 @@ Note sulle misure:
 Servono i descrittori `Parakeet` e `PaddleOCR-VL` della cartella ABI di LLMEnv; il motore Parakeet e' in
 `LLMEnv/LLMEngine/asr/llm_parakeet.c`.
 
-### Provati ma NON funzionanti
+### Modelli con problemi noti
 
-| Modello | Problema |
+| Modello | Stato |
 |---|---|
-| gemma-4-26b-a4b-it (MoE) | testo senza senso: causa ancora da analizzare |
+| gemma-4-26b-a4b-it (MoE, 128 esperti) | produceva testo senza senso: il motore ignorava router ed esperti. Il ramo MoE e' stato aggiunto ma la verifica sul checkpoint e' ancora da fare |
 
-Phi-3, StableLM-2, StarCoder2 e Gemma-3 davano testo degenerato per due difetti del motore (cache KV con padding visto dall'attention; bias q/k/v mancanti in StableLM e StarCoder2), ora corretti.
+Phi-3, StableLM-2, StarCoder2 e Gemma-3 davano testo degenerato per due difetti del motore (cache KV con padding visto
+dall'attention; bias q/k/v mancanti in StableLM e StarCoder2), ora corretti e presenti nella tabella sopra.
 
-### Altri modelli che dovrebbero funzionare senza modifiche
+### Famiglie che dovrebbero funzionare anche se non sono state provate
 
-- **GGUF**: qualunque architettura supportata da llama.cpp (Llama, Mistral, Gemma, Qwen, Phi, OLMo, DeepSeek, GLM, Granite...), con
-  tokenizer SentencePiece e BPE, chat template Jinja e fine turno dalla template. Provati cinque modelli di famiglie diverse.
-- **MLX, stessa famiglia dei modelli provati**: Qwen2/Qwen2.5/Qwen3/Qwen3-MoE/Qwen3-Next/Qwen3.5-MoE, Llama 3.x, Mistral/Mixtral,
-  OLMo 2/3, OLMoE, GLM-4.x, DeepSeek-V2/V3, Kimi, ERNIE 4.5, Granite/GraniteMoE, LFM2, gpt-oss, Gemma-4.
-- **MLX, presenti nel motore ma non provati su un checkpoint**: Qwen2-MoE, DeepSeek-V3.x, Kimi-K2, GLM-4 denso e GLM-4-MoE-Lite,
-  Mamba/Mamba2/Falcon-Mamba, RWKV7, Falcon-H1, Jamba, GraniteMoE-hybrid, GPT-NeoX, InternLM2, MiniCPM, Hunyuan, GPT-2,
-  GPT-BigCode, OpenELM, Mistral3, dots1, Telechat3, Youtu, JoyAI. Visto cosa e' successo a Phi-3, StableLM e StarCoder2, aspettati
-  sorprese: vanno provati uno per uno.
-- Quantizzazioni lette: affine 2/3/4/6/8 bit, MXFP4/MXFP8, AWQ, GPTQ, bitsandbytes (vedi `docs/quant-coverage.md`).
+Nessuna di queste e' stata eseguita su un checkpoint reale: il codice c'e' e passa i test sintetici, ma la storia di Phi-3, StableLM,
+StarCoder2 e Gemma-4 MoE insegna che un'architettura mai provata ha di solito almeno un difetto. Vanno verificate una per una
+(`fastllm pull <modello>`, una domanda semplice, confronto col GGUF dello stesso modello).
+
+| Formato | Famiglie |
+|---|---|
+| **GGUF** | qualunque architettura supportata da llama.cpp: Llama 2/3, Mistral, Mixtral, Gemma 1/2/3, Qwen 2/2.5/3, Phi-2/3/4, OLMo, DeepSeek, GLM, Granite, Command-R, Falcon, StarCoder, Yi, InternLM, MiniCPM. Provati cinque modelli di famiglie diverse |
+| **MLX, stessa famiglia di modelli provati** | Qwen2, Qwen2.5, Qwen3, Qwen3-MoE, Qwen3-Next, Qwen3.5-MoE, Llama 3.x, Mistral, OLMo 2/3, OLMoE, GLM-4.x, DeepSeek-V2/V3, Kimi, ERNIE 4.5, Granite/GraniteMoE, LFM2, gpt-oss, Gemma-4 denso |
+| **MLX, nel motore ma mai provate** | Qwen2-MoE, DeepSeek-V3.x, Kimi-K2, GLM-4 denso, GLM-4-MoE-Lite, Mamba/Mamba2/Falcon-Mamba, RWKV7, Falcon-H1, Jamba, GraniteMoE-hybrid, GPT-NeoX/Pythia, InternLM2, MiniCPM, Hunyuan, GPT-2, GPT-BigCode, OpenELM, Mistral3, dots1, Telechat3, Youtu, JoyAI, Lille, OLMo-3 |
+| **Quantizzazioni** | affine 2/3/4/6/8 bit, MXFP4/MXFP8, AWQ, GPTQ, bitsandbytes (vedi `docs/quant-coverage.md`) |
+
+Il test per ogni famiglia nuova e' sempre lo stesso: una risposta corta e corretta, la stessa risposta con un prompt lungo
+(la cache KV con padding ha gia' ingannato una quindicina di architetture) e il confronto con un oracolo, di solito il GGUF su llama.cpp.
 
 ### Descrittori delle architetture (`.gmbarch`)
 
