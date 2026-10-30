@@ -43,7 +43,8 @@ void fmlx_cli_usage(FILE *out) {
             "uso: fastllm <comando> [argomenti] [opzioni]\n"
             "\n"
             "GESTIONE MODELLI\n"
-            "  pull <repo>            scarica (o ritrova) TUTTO il repo nel cache HF, con resume\n"
+            "  pull <repo>            scarica (o ritrova) il repo nel cache HF, con resume\n"
+            "                         (--file <glob>: solo i file scelti; senza, TUTTO il repo)\n"
             "  models [<filtro>]      cosa c'e' gia' nel cache HF, senza rete\n"
             "  list, ls               i modelli DISPONIBILI, NUMERATI (registro locale + cache HF)\n"
             "  add <nome> <path>      registra un modello locale per percorso (dir MLX, .gguf, VLM)\n"
@@ -100,6 +101,9 @@ static void usage_verb(FILE *out, const char *v) {
             "  --cache <dir>          radice del cache (default: quella di Hugging Face)\n"
             "  --endpoint <url>       server diverso da huggingface.co\n"
             "  --dest <dir>           specchia in <dir>/<nome-repo> (hardlink, mai symlink)\n"
+            "  --file <glob>          scarica SOLO i file che corrispondono (ripetibile, max 16):\n"
+            "                         '*' = qualsiasi sequenza (anche '/'), '?' = un carattere.\n"
+            "                         Senza --file si scarica TUTTO il repo.\n"
             "  --max-bytes <n>        tetto di byte per UN file\n"
             "  --stall-timeout <s>    secondi senza byte prima di riprovare (default 60)\n"
             "  --stall-retries <n>    riprese con Range dopo uno stall (default 3)\n"
@@ -110,6 +114,7 @@ static void usage_verb(FILE *out, const char *v) {
             "\n"
             "esempi:\n"
             "  fastllm pull mlx-community/Qwen3-8B-4bit\n"
+            "  fastllm pull antirez/deepseek-v4-gguf --file '*IQ2XXS*'\n"
             "  fastllm pull org/modello --revision main --cache ~/.cache/huggingface \\\n"
             "      --endpoint https://huggingface.co --dest ~/ai/Models --max-bytes 5000000000 \\\n"
             "      --stall-timeout 60 --stall-retries 3 --repair --quiet\n"
@@ -445,7 +450,7 @@ static FmlxCliStatus fail(FmlxCliArgs *out, char *msg, size_t msg_len, const cha
  * nessun insieme ESCLUSIVO: valgono per ogni verbo. */
 enum {
     F_QUIET = 0, F_CACHE,                                  /* shared */
-    F_REVISION, F_ENDPOINT, F_MAXBYTES, F_STALLTO, F_STALLRE, F_DEST, F_OFFLINE, F_REPAIR,
+    F_REVISION, F_ENDPOINT, F_MAXBYTES, F_STALLTO, F_STALLRE, F_DEST, F_OFFLINE, F_REPAIR, F_FILE,
     F_HOST, F_PORT, F_MAXBODY, F_ONCE,
     F_VISION_MODEL, F_VISION_MMPROJ,
     F_JSON, F_MAXTOKENS, F_SYSTEM, F_THINK, F_OFFLOAD,
@@ -456,32 +461,32 @@ enum {
     F_N
 };
 #define F_PULL_ONLY                                                                                            \
-    ((1u << F_REVISION) | (1u << F_ENDPOINT) | (1u << F_MAXBYTES) | (1u << F_STALLTO) |                        \
-     (1u << F_STALLRE) | (1u << F_DEST) | (1u << F_OFFLINE) | (1u << F_REPAIR))
-#define F_SERVE_ONLY ((1u << F_HOST) | (1u << F_PORT) | (1u << F_MAXBODY) | (1u << F_ONCE) | \
-                      (1u << F_OFFLOAD) | (1u << F_VISION_MODEL) | (1u << F_VISION_MMPROJ) | \
-                      (1u << F_PARALLEL) | (1u << F_BATCH))
-#define F_MODELS_ONLY ((1u << F_JSON))
-#define F_RUNCHAT_ONLY ((1u << F_MAXTOKENS) | (1u << F_SYSTEM) | (1u << F_THINK) | (1u << F_OFFLOAD))
+    ((1ull << F_REVISION) | (1ull << F_ENDPOINT) | (1ull << F_MAXBYTES) | (1ull << F_STALLTO) |                        \
+     (1ull << F_STALLRE) | (1ull << F_DEST) | (1ull << F_OFFLINE) | (1ull << F_REPAIR) | (1ull << F_FILE))
+#define F_SERVE_ONLY ((1ull << F_HOST) | (1ull << F_PORT) | (1ull << F_MAXBODY) | (1ull << F_ONCE) | \
+                      (1ull << F_OFFLOAD) | (1ull << F_VISION_MODEL) | (1ull << F_VISION_MMPROJ) | \
+                      (1ull << F_PARALLEL) | (1ull << F_BATCH))
+#define F_MODELS_ONLY ((1ull << F_JSON))
+#define F_RUNCHAT_ONLY ((1ull << F_MAXTOKENS) | (1ull << F_SYSTEM) | (1ull << F_THINK) | (1ull << F_OFFLOAD))
 /* `add` porta il proiettore e la modalità di un modello locale; `rm` la cancellazione dei file. */
-#define F_ADD_ONLY ((1u << F_MMPROJ) | (1u << F_MODALITY))
-#define F_RM_ONLY ((1u << F_PURGE))
+#define F_ADD_ONLY ((1ull << F_MMPROJ) | (1ull << F_MODALITY))
+#define F_RM_ONLY ((1ull << F_PURGE))
 /* `ps` non ha una superficie sua: guarda dove `serve` ascolta, quindi prende gli STESSI due bit
  * (`--host`/`--port`). Due maschere con gli stessi bit sono la stessa decisione (dove sta il
  * server), detta una volta e usata da due verbi. */
-#define F_PS_ONLY ((1u << F_HOST) | (1u << F_PORT))
+#define F_PS_ONLY ((1ull << F_HOST) | (1ull << F_PORT))
 /* Le bandiere che SONO un fatto, non un dato: la forma `--flag=valore` è un errore per tutte con
  * UNA regola, invece che una rinuncia per una. `--quiet=1` e `--quiet=0` sono la stessa cosa, e
  * `--offline=` (vuoto) direbbe che qualcuno ha dato un valore a una parola che non lo prende: due
  * semantiche con la stessa grafia sono peggio di un rifiuto. */
 #define F_BOOLEANI                                                                                             \
-    ((1u << F_QUIET) | (1u << F_OFFLINE) | (1u << F_REPAIR) | (1u << F_ONCE) | (1u << F_JSON) |                \
-     (1u << F_THINK) | (1u << F_OFFLOAD) | (1u << F_PURGE) | (1u << F_WALK) | (1u << F_ROOTS) |      \
-     (1u << F_BATCH) | (1ull << F_DIFFABLE))
+    ((1ull << F_QUIET) | (1ull << F_OFFLINE) | (1ull << F_REPAIR) | (1ull << F_ONCE) | (1ull << F_JSON) |                \
+     (1ull << F_THINK) | (1ull << F_OFFLOAD) | (1ull << F_PURGE) | (1ull << F_WALK) | (1ull << F_ROOTS) |      \
+     (1ull << F_BATCH) | (1ull << F_DIFFABLE))
 
 static const char *const FLN[F_N] = {
     "--quiet",    "--cache",        "--revision", "--endpoint", "--max-bytes", "--stall-timeout",
-    "--stall-retries", "--dest",     "--offline",  "--repair",   "--host",      "--port",
+    "--stall-retries", "--dest",     "--offline",  "--repair",   "--file",      "--host",      "--port",
     "--max-body", "--once",         "--vision-model", "--vision-mmproj", "--json", "--max-tokens", "--system", "--think",
     "--offload-experts", "--mmproj", "--modality", "--purge", "--opt", "--walk", "--max-depth", "--roots", "--type",
     "--parallel", "--batch", "--glob", "--diffable"};
@@ -632,6 +637,13 @@ FmlxCliStatus fmlx_cli_parse(int argc, char **argv, FmlxCliArgs *out, char *msg,
 
         if (!strcmp(name, "--revision")) {
             out->revision = val;
+        } else if (!strcmp(name, "--file")) {
+            /* Ripetibile, con un tetto DICHIARATO: oltre 16 pattern la risposta è un errore, non
+             * "gli ultimi si ignorano". `val` vive nell'argv del processo (come `--dest`). */
+            if (out->pull.n_files >= (int)(sizeof out->pull.files / sizeof out->pull.files[0]))
+                return fail(out, msg, msg_len, "--file: al massimo %zu pattern",
+                            sizeof out->pull.files / sizeof out->pull.files[0]);
+            out->pull.files[out->pull.n_files++] = val;
         } else if (!strcmp(name, "--dest")) {
             out->pull.dest = val;
         } else if (!strcmp(name, "--cache")) {
@@ -766,17 +778,17 @@ FmlxCliStatus fmlx_cli_parse(int argc, char **argv, FmlxCliArgs *out, char *msg,
         else if (!strcmp(out->verb, "run") || !strcmp(out->verb, "chat")) allowed |= F_RUNCHAT_ONLY;
         else if (!strcmp(out->verb, "ps")) allowed |= F_PS_ONLY;
         else if (!strcmp(out->verb, "add")) allowed |= F_ADD_ONLY;
-        else if (!strcmp(out->verb, "paths")) allowed |= (1u << F_JSON);
+        else if (!strcmp(out->verb, "paths")) allowed |= (1ull << F_JSON);
         else if (!strcmp(out->verb, "search"))
-            allowed |= (1u << F_JSON) | (1u << F_WALK) | (1u << F_MAXDEPTH) | (1u << F_ROOTS) | (1u << F_TYPE);
+            allowed |= (1ull << F_JSON) | (1ull << F_WALK) | (1ull << F_MAXDEPTH) | (1ull << F_ROOTS) | (1ull << F_TYPE);
         else if (!strcmp(out->verb, "test")) allowed |= 0; /* solo le condivise (--quiet) */
-        else if (!strcmp(out->verb, "compare")) allowed |= (1u << F_GLOB);
+        else if (!strcmp(out->verb, "compare")) allowed |= (1ull << F_GLOB);
         else if (!strcmp(out->verb, "tensors")) allowed |= (1ull << F_DIFFABLE);
         else if (!strcmp(out->verb, "rm")) allowed |= F_RM_ONLY;
         else if (!strcmp(out->verb, "show") || !strcmp(out->verb, "help")) allowed |= 0;
         else has_surface = 0; /* cp: nessuna superficie da difendere */
         for (k = 0; has_surface && k < F_N; k++)
-            if (!(allowed & (1u << k)) && (seen & (1u << k))) {
+            if (!(allowed & (1ull << k)) && (seen & (1ull << k))) {
                 char vv[16];
                 snprintf(vv, sizeof vv, "%s", out->verb); /* `fail` azzera `out`: vedi sopra */
                 return fail(out, msg, msg_len, "%s non è un'opzione di %s", FLN[k], vv);

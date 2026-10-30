@@ -31,6 +31,19 @@ void fmlx_cli_fmt_bytes(int64_t b, char *out, size_t n);
 int fmlx_cli_filter_shape_ok(const char *f);
 int fmlx_cli_filter_match(const char *f, const char *id);
 
+/* --- il filtro dei FILE del `pull` (definito in fmlx_pull.c) ----------------------------------
+ *
+ * `pull --file <glob>` seleziona i file del manifesto. Il match è deliberatamente SEMPLICE e
+ * dichiarato: `*` = qualsiasi sequenza (anche `/`), `?` = un carattere, tutto il resto letterale,
+ * case-sensitive (i nomi dei file HF lo sono). Niente classi `[...]`, niente `**`, niente escape:
+ * ogni costrutto in più è una cosa che l'utente può sbagliare senza accorgersene, e i nomi che
+ * dobbiamo selezionare (`*Q4*`, `*DSpark*`, `mmproj-*.gguf`) non ne hanno bisogno.
+ *
+ * Non è `static` per la stessa ragione di `fmlx_pull_copy_stream`: il caso «il filtro è sbagliato»
+ * deve poter essere eseguito da un test, e un `*.gguf` che combacia con `*.gguf.part` è il tipo di
+ * bug che si vede solo con un pattern vero. */
+int fmlx_pull_match(const char *pattern, const char *path);
+
 /* --- l'avanzamento del `pull` (definito in fmlx_pull_progress.c) -----------------------------
  *
  * Una riga sola per file, che si RISCRIVE da sola con `\r` quando lo schermo è un terminale, e che

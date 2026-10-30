@@ -34,6 +34,49 @@
 
 #define COPY_CHUNK 65536
 
+/* ---- filtro dei file (`--file <glob>`) -------------------------------------------------------
+ *
+ * Un glob minuscolo e DICHIARATO: `*` = qualsiasi sequenza (anche `/`), `?` = un carattere, tutto
+ * il resto letterale, case-sensitive. Niente classi `[...]`, niente `**`, niente escape.
+ *
+ * Perché non `fnmatch(3)`: `fnmatch` con `FNM_PATHNAME` tratta `/` in modo diverso a seconda della
+ * bandiera, e i nomi dei file HF contengono `/` (`vision/encoder.gguf`). Qui la regola è una sola e
+ * si legge in dieci righe; soprattutto, il comportamento è lo stesso su ogni libc.
+ *
+ * L'algoritmo è il classico con backtracking sull'ultimo `*`: nessuna ricorsione, nessuna
+ * allocazione, e nessun caso patologico oltre il prodotto delle lunghezze (i pattern sono corti).
+ */
+int fmlx_pull_match(const char *pattern, const char *path) {
+    const char *p = pattern, *s = path;
+    const char *star_p = NULL, *star_s = NULL;
+    if (!pattern || !path) return 0;
+    while (*s) {
+        if (*p == '?' || (*p != '\0' && *p == *s)) {
+            p++;
+            s++;
+        } else if (*p == '*') {
+            star_p = ++p;
+            star_s = s;
+        } else if (star_p) {
+            p = star_p;
+            s = ++star_s;
+        } else {
+            return 0;
+        }
+    }
+    while (*p == '*') p++;
+    return *p == '\0';
+}
+
+/* 1 = il file va scaricato. Nessun pattern = tutto (comportamento storico). */
+static int pull_selected(const FmlxPullOpts *o, const char *rel) {
+    int i;
+    if (!o || o->n_files == 0) return 1;
+    for (i = 0; i < o->n_files; i++)
+        if (fmlx_pull_match(o->files[i], rel)) return 1;
+    return 0;
+}
+
 /* Il messaggio viene dalla lane hf quando è la lane hf ad aver fallito: copiarlo qui vuol dire non
  * inventarsi una seconda descrizione dello stesso rifiuto. `fmlx_hf_last_error` resta valida fino
  * alla prossima chiamata di quella lane, quindi si copia SUBITO. */
@@ -211,6 +254,23 @@ static FmlxHfStatus pull_go(const char *repo_id, const char *revision, const Fml
     snprintf(rep->commit, sizeof rep->commit, "%s", m.commit);
     rep->n_files = m.n;
 
+    /* 1b) `--file`: si tiene solo ciò che il filtro seleziona. Un filtro che non seleziona NULLA è
+     * un errore esplicito, non un successo con zero file: chi ha scritto `--file *Q4*` su un repo
+     * che non ha Q4 deve saperlo subito, e con il numero di file che il repo HA davvero. */
+    if (d.n_files > 0) {
+        size_t sel = 0;
+        for (i = 0; i < m.n; i++)
+            if (pull_selected(&d, m.files[i].path)) sel++;
+        if (sel == 0) {
+            fail_own(rep, FMLX_HF_ERR_NO_MATCH, NULL,
+                     "pull di %s: nessun file corrisponde ai %d filtri --file (il repo ne ha %zu)",
+                     repo_id, d.n_files, m.n);
+            fmlx_hf_manifest_free(&m);
+            return rep->error;
+        }
+        rep->n_files = sel;
+    }
+
     s = fmlx_hf_repo_dir(root, repo_id, repo_dir, sizeof repo_dir);
     if (s != FMLX_HF_OK) {
         fail_lane(rep, s, NULL);
@@ -223,29 +283,35 @@ static FmlxHfStatus pull_go(const char *repo_id, const char *revision, const Fml
         fail_own(rep, FMLX_HF_ERR_BUF_SMALL, NULL, "pull: il path dello snapshot non sta nel buffer");
         return rep->error;
     }
-    if (log) fprintf(log, "pull %s@%s -> commit %.12s…  %zu file\n", repo_id, revision, m.commit, m.n);
+    if (log) fprintf(log, "pull %s@%s -> commit %.12s…  %zu file%s\n", repo_id, revision, m.commit,
+                     rep->n_files, rep->n_files != m.n ? " (filtro --file)" : "");
 
     /* 2) un file alla volta, tutti allo STESSO commit. */
-    for (i = 0; i < m.n; i++) {
-        FmlxHfRef ref;
-        const char *rel = m.files[i].path;
+    {
+        size_t k = 0;
+        for (i = 0; i < m.n; i++) {
+            FmlxHfRef ref;
+            const char *rel = m.files[i].path;
 
-        memset(&ref, 0, sizeof ref);
-        if (m.files[i].size >= 0) rep->bytes_declared += m.files[i].size;
-        fmlx_pull_progress_begin(&prog, i + 1, m.n, rel, m.files[i].size, (int64_t)time(NULL));
-        s = fmlx_hf_download_with(repo_id, m.commit, rel, &fo, t, &ref);
-        if (s != FMLX_HF_OK) {
-            /* La riga aperta va chiusa PRIMA del messaggio: un errore che compare in mezzo a una
-             * barra a metà schermo è illeggibile, e su un terminale resterebbe scritta. */
-            fmlx_pull_progress_abort(&prog);
-            fail_lane(rep, s, rel);
-            break;
+            if (!pull_selected(&d, rel)) continue;
+            k++;
+            memset(&ref, 0, sizeof ref);
+            if (m.files[i].size >= 0) rep->bytes_declared += m.files[i].size;
+            fmlx_pull_progress_begin(&prog, k, rep->n_files, rel, m.files[i].size, (int64_t)time(NULL));
+            s = fmlx_hf_download_with(repo_id, m.commit, rel, &fo, t, &ref);
+            if (s != FMLX_HF_OK) {
+                /* La riga aperta va chiusa PRIMA del messaggio: un errore che compare in mezzo a una
+                 * barra a metà schermo è illeggibile, e su un terminale resterebbe scritta. */
+                fmlx_pull_progress_abort(&prog);
+                fail_lane(rep, s, rel);
+                break;
+            }
+            rep->n_ok++;
+            if (fmlx_pull_progress_inplace(&prog))
+                fmlx_pull_progress_end(&prog, ref.size, (int64_t)time(NULL));
+            else if (log)
+                fprintf(log, "  [%zu/%zu] %s  %" PRId64 " byte\n", k, rep->n_files, rel, ref.size);
         }
-        rep->n_ok++;
-        if (fmlx_pull_progress_inplace(&prog))
-            fmlx_pull_progress_end(&prog, ref.size, (int64_t)time(NULL));
-        else if (log)
-            fprintf(log, "  [%zu/%zu] %s  %" PRId64 " byte\n", i + 1, m.n, rel, ref.size);
     }
 
     /* 3) il ramo, scritto solo quando tutto il commit è a posto: `refs/<revision>` è ciò che rende
@@ -275,40 +341,45 @@ static FmlxHfStatus pull_go(const char *repo_id, const char *revision, const Fml
          * riepilogo in fondo basta, e aggiungere una riga là avrebbe rotto un output che i test
          * contano. */
         if (log && fmlx_pull_progress_inplace(&prog)) fprintf(log, "specchio → %s\n", dst_root);
-        for (i = 0; i < m.n; i++) {
-            FmlxHfRef ref;
-            const char *rel = m.files[i].path;
+        {
+            size_t k = 0;
+            for (i = 0; i < m.n; i++) {
+                FmlxHfRef ref;
+                const char *rel = m.files[i].path;
 
-            memset(&ref, 0, sizeof ref);
-            s = fmlx_hf_locate(root, repo_id, m.commit, rel, &ref);
-            if (s != FMLX_HF_OK) {
-                fail_lane(rep, s, rel);
-                break;
+                if (!pull_selected(&d, rel)) continue;
+                k++;
+                memset(&ref, 0, sizeof ref);
+                s = fmlx_hf_locate(root, repo_id, m.commit, rel, &ref);
+                if (s != FMLX_HF_OK) {
+                    fail_lane(rep, s, rel);
+                    break;
+                }
+                if (fmlx_hf_pjoin(dst, sizeof dst, dst_root, rel) != FMLX_HF_OK) {
+                    fail_own(rep, FMLX_HF_ERR_BUF_SMALL, rel, "pull: il path specchiato non sta nel buffer");
+                    s = rep->error;
+                    break;
+                }
+                if (fmlx_hf_ensure_parent(dst) != 0) {
+                    fail_own(rep, FMLX_HF_ERR_IO, rel, "pull: mkdir per %s: %s", dst, strerror(errno));
+                    s = rep->error;
+                    break;
+                }
+                snprintf(src, sizeof src, "%s", ref.path);
+                fmlx_pull_progress_begin(&prog, k, rep->n_files, rel, ref.size, (int64_t)time(NULL));
+                s = mirror_one(src, dst, &prog);
+                if (s != FMLX_HF_OK) {
+                    fmlx_pull_progress_abort(&prog);
+                    fail_own(rep, s, rel, "pull: specchio %s -> %s: %s", src, dst, strerror(errno));
+                    s = rep->error;
+                    break;
+                }
+                rep->n_mirrored++;
+                if (fmlx_pull_progress_inplace(&prog))
+                    fmlx_pull_progress_end(&prog, ref.size, (int64_t)time(NULL));
+                else if (log)
+                    fprintf(log, "  specchio %s\n", dst);
             }
-            if (fmlx_hf_pjoin(dst, sizeof dst, dst_root, rel) != FMLX_HF_OK) {
-                fail_own(rep, FMLX_HF_ERR_BUF_SMALL, rel, "pull: il path specchiato non sta nel buffer");
-                s = rep->error;
-                break;
-            }
-            if (fmlx_hf_ensure_parent(dst) != 0) {
-                fail_own(rep, FMLX_HF_ERR_IO, rel, "pull: mkdir per %s: %s", dst, strerror(errno));
-                s = rep->error;
-                break;
-            }
-            snprintf(src, sizeof src, "%s", ref.path);
-            fmlx_pull_progress_begin(&prog, i + 1, m.n, rel, ref.size, (int64_t)time(NULL));
-            s = mirror_one(src, dst, &prog);
-            if (s != FMLX_HF_OK) {
-                fmlx_pull_progress_abort(&prog);
-                fail_own(rep, s, rel, "pull: specchio %s -> %s: %s", src, dst, strerror(errno));
-                s = rep->error;
-                break;
-            }
-            rep->n_mirrored++;
-            if (fmlx_pull_progress_inplace(&prog))
-                fmlx_pull_progress_end(&prog, ref.size, (int64_t)time(NULL));
-            else if (log)
-                fprintf(log, "  specchio %s\n", dst);
         }
     }
 

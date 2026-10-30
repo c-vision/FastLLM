@@ -93,7 +93,12 @@ typedef enum {
      * "HF_HOME punta nel posto sbagliato" e "non hai ancora scaricato niente" sono due consigli
      * diversi — e un `models` che stampasse l'elenco vuoto per la seconda ragione quando vale la
      * prima sarebbe il risultato silenzioso che il piano vieta. */
-    FMLX_HF_ERR_NO_CACHE = 27
+    FMLX_HF_ERR_NO_CACHE = 27,
+    /* 28: `pull --file <glob>` non ha selezionato NESSUN file del manifesto. Non è "tutto a posto
+     * con zero file": un filtro che non morde è un comando che ha chiesto una cosa e non l'ha
+     * ottenuta — l'utente deve saperlo subito, con il numero di file che il repo HA, altrimenti
+     * crede di aver scaricato il modello. */
+    FMLX_HF_ERR_NO_MATCH = 28
 } FmlxHfStatus;
 
 const char *fmlx_hf_status_str(FmlxHfStatus s);

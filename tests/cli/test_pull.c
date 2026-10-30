@@ -864,6 +864,76 @@ static void case_progress_pty(void) {
     CK(is_file(dst, NULL) && content_is(dst, BODY_B), "manca il file specchiato %s", dst);
 }
 
+/* g) `--file <glob>`: il filtro sceglie i file, e un filtro che non morde è un ERRORE. */
+static void case_pull_filter(void) {
+    FmlxPullOpts o;
+    FmlxPullReport rep;
+    char p[FMLX_HF_PATH_MAX], dir[FMLX_HF_PATH_MAX], sub[FMLX_HF_PATH_MAX], snap[FMLX_HF_PATH_MAX];
+
+    fresh("filter");
+    opts_for(&o);
+    o.files[0] = "*.json";
+    o.n_files = 1;
+    memset(&rep, 0, sizeof rep);
+    CK_ST(fmlx_pull_with(REPO, "main", &o, &VT, &rep, NULL), FMLX_HF_OK);
+    CK(rep.n_files == 1, "n_files=%zu (il repo ne ha 2, il filtro ne sceglie 1)", rep.n_files);
+    CK(rep.n_ok == 1, "n_ok=%zu", rep.n_ok);
+    CK(rep.bytes_declared == 7, "bytes_declared=%" PRId64, rep.bytes_declared);
+    CK(n_meta == 1 && n_get == 1, "meta=%d get=%d: il file escluso NON si chiede", n_meta, n_get);
+
+    fmlx_hf_pjoin(dir, sizeof dir, ROOT, "models--org--repo");
+    fmlx_hf_pjoin(sub, sizeof sub, dir, "snapshots");
+    fmlx_hf_pjoin(snap, sizeof snap, sub, COMMIT);
+    fmlx_hf_pjoin(p, sizeof p, snap, "config.json");
+    CK(is_symlink(p), "il file scelto deve esserci: %s", p);
+    fmlx_hf_pjoin(p, sizeof p, snap, "weights/model.safetensors");
+    CK(!is_symlink(p), "il file NON scelto non deve esistere: %s", p);
+
+    /* Lo STESSO snapshot: due pattern si sommano, il secondo con la barra nel nome. */
+    fresh("filter-multi");
+    opts_for(&o);
+    o.files[0] = "config.json";
+    o.files[1] = "weights/*.safetensors";
+    o.n_files = 2;
+    memset(&rep, 0, sizeof rep);
+    CK_ST(fmlx_pull_with(REPO, "main", &o, &VT, &rep, NULL), FMLX_HF_OK);
+    CK(rep.n_files == 2 && rep.n_ok == 2, "n_files=%zu n_ok=%zu", rep.n_files, rep.n_ok);
+    CK(n_meta == 2 && n_get == 2, "meta=%d get=%d", n_meta, n_get);
+
+    /* Nessun match: errore esplicito, zero richieste di file, nessun ref scritto. */
+    fresh("filter-none");
+    opts_for(&o);
+    o.files[0] = "*.nothing";
+    o.n_files = 1;
+    memset(&rep, 0, sizeof rep);
+    CK_ST(fmlx_pull_with(REPO, "main", &o, &VT, &rep, NULL), FMLX_HF_ERR_NO_MATCH);
+    CK(rep.error == FMLX_HF_ERR_NO_MATCH, "rep.error=%d", (int)rep.error);
+    CK(n_get == 0 && n_meta == 0, "meta=%d get=%d: nessun file va chiesto", n_meta, n_get);
+    fmlx_hf_pjoin(dir, sizeof dir, ROOT, "models--org--repo");
+    fmlx_hf_pjoin(p, sizeof p, dir, "refs");
+    fmlx_hf_pjoin(p, sizeof p, p, "main");
+    CK(!is_file(p, NULL), "un pull che non seleziona nulla NON deve scrivere refs/main: %s", p);
+}
+
+/* f) il glob, provato DA SOLO: `*.gguf` che combacia con `*.gguf.part` è il bug che si vede solo
+ * con un pattern vero. */
+static void case_match_glob(void) {
+    CK(fmlx_pull_match("*", "weights/model.safetensors") == 1, "* deve attraversare la barra");
+    CK(fmlx_pull_match("*.json", "config.json") == 1, "*.json");
+    CK(fmlx_pull_match("*.json", "weights/config.json") == 1, "* attraversa la barra");
+    CK(fmlx_pull_match("weights/*.safetensors", "weights/model.safetensors") == 1, "sotto-cartella");
+    CK(fmlx_pull_match("*.gguf", "model.gguf") == 1, "*.gguf");
+    CK(fmlx_pull_match("*.gguf", "model.gguf.part") == 0, "*.gguf NON deve combaciare con .gguf.part");
+    CK(fmlx_pull_match("*Q4*", "DeepSeek-V4-Flash-Q4K.gguf") == 1, "*Q4*");
+    CK(fmlx_pull_match("*Q4*", "deepseek-v4-flash-q4k.gguf") == 0, "il match e' case-sensitive");
+    CK(fmlx_pull_match("DeepSeek-V4.1-Flash-Q?.gguf", "DeepSeek-V4.1-Flash-Q4.gguf") == 1, "? = un carattere");
+    CK(fmlx_pull_match("DeepSeek-V4.1-Flash-Q?.gguf", "DeepSeek-V4.1-Flash-Q44.gguf") == 0, "? = UN carattere");
+    CK(fmlx_pull_match("", "") == 1, "pattern vuoto combacia con path vuoto");
+    CK(fmlx_pull_match("", "x") == 0, "pattern vuoto non combacia con nulla");
+    CK(fmlx_pull_match("a*b*c", "aXXbYYc") == 1, "piu' stelle");
+    CK(fmlx_pull_match("a*b*c", "aXXbYY") == 0, "piu' stelle, coda mancante");
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) {
         printf("uso: %s <dir-di-lavoro>\n", argv[0]);
@@ -895,6 +965,8 @@ int main(int argc, char **argv) {
     case_copy_stream();
     case_progress_pipe();
     case_progress_pty();
+    case_pull_filter();
+    case_match_glob();
 
     printf("test_pull: %d verifiche, %d fallimenti\n", checks, failures);
     return failures ? 1 : 0;

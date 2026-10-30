@@ -26,7 +26,7 @@
 /* Uscita del processo: 0 = fatto, 1 = fallito o non possibile, 2 = argv sbagliato (la convenzione
  * di getopt). `USAGE` non è lo stesso codice di un download fallito: uno è un errore di chi
  *digita, l'altro è il mondo esterno. */
-#define FMLX_CLI_PROMPT_MAX 8192 /* il prompt one-shot di `run`; oltre, è un argv che non si legge */
+#define FMLX_CLI_PROMPT_MAX 131072 /* il prompt one-shot di `run`; oltre, è un argv che non si legge */
 
 typedef enum {
     FMLX_CLI_OK = 0,
@@ -48,6 +48,16 @@ void fmlx_cli_usage(FILE *out);
 typedef struct {
     FmlxHfFetchOpts fetch;
     const char *dest; /* NULL = il modello resta nel cache: non c'è un default implicito */
+    /* `--file <glob>`, ripetibile (16 è un tetto dichiarato, non un silenzio): scarica SOLO i file
+     * del manifesto che corrispondono ad ALMENO uno dei pattern. Vuoto = tutto il repo, che è il
+     * comportamento storico e l'unico sensato per un repo di un modello solo.
+     * Perché serve: i repo di ds4 contengono 4-8 varianti dello stesso modello (Q2/Q4/MXFP4/vision),
+     * ~100-190 GB l'una; `pull` senza filtro le scaricherebbe TUTTE. I pattern usano `*` (qualsiasi
+     * sequenza, anche `/`) e `?` (un carattere): `*.gguf`, `*Q4*`, e i file dentro una sottocartella.
+     * L'esempio con la barra (`vision/` + `*.gguf`) non si può scrivere qui: la sequenza barra-asterisco
+     * aprirebbe un commento dentro il commento. */
+    const char *files[16];
+    int n_files;
 } FmlxPullOpts;
 
 typedef struct {

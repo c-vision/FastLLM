@@ -68,6 +68,7 @@ const char *fmlx_hf_status_str(FmlxHfStatus s) {
         case FMLX_HF_ERR_STALL: return "lo stream si e' fermato: nessun byte per il tempo limite";
         case FMLX_HF_ERR_TOO_MANY: return "la risposta chiede piu' di quanto questo limite tiene";
         case FMLX_HF_ERR_NO_CACHE: return "la radice del cache non esiste";
+        case FMLX_HF_ERR_NO_MATCH: return "nessun file del repo corrisponde al filtro --file";
     }
     return "codice sconosciuto";
 }
