@@ -1,16 +1,133 @@
 # FastLLM
 
-Motore LLM in C puro: due programmi, **`MLXEngine`** (i motori MLX e GGUF veri, con swap
-su disco) e **`FastLLM`** (server OpenAI/Anthropic + CLI in stile Ollama + download e cache
-da Hugging Face). Piano completo: `AiWiki/01-Projects/FastLLM/Piani/(open) - FastLLM-Piano-Fondativo.md`
-(vault, non versionato qui).
+Binario C unico, **`fastllm`**: server OpenAI/Anthropic/embeddings, CLI in stile Ollama, download e
+cache da Hugging Face, ispezione dei modelli. **Il motore non è qui**: è [LLMEnv](../LLMEnv)
+(`LLMEngine`, `LLMCodec`, `LLMToken`, `LLMJinja`), consumato a sorgente con `add_subdirectory`
+(vedi `CMakeLists.txt:16-59`). Stesso schema di GMBasic: due consumatori, una sola sorgente.
+Piano e appunti: `AiWiki/01-Projects/FastLLM/` (vault, non versionato qui).
 
-## Stato reale del codice (non quello del piano)
+## Cosa FastLLM esegue
+
+FastLLM e' una CLI di chat in stile Ollama sopra il motore LLMEnv. Esegue modelli **MLX** (cartelle safetensors di Hugging Face,
+quantizzate 2/3/4/6/8 bit, MXFP4/MXFP8) e modelli **GGUF**. Non e' un'applicazione di OCR o di trascrizione, ma sa instradare
+due modelli di questo tipo (PaddleOCR-VL e Parakeet) con lo stesso comando `run`, vedi sotto.
+
+```sh
+fastllm pull mlx-community/Qwen3-8B-4bit      # scarica nel cache HF e crea da solo il .gmbarch se manca
+fastllm add mio-gguf ~/ai/Models/gguf/modello.gguf
+fastllm run Qwen3-8B-4bit "Ciao"               # nome del registro, #n, percorso o id HF
+fastllm run modello.gguf "Ciao"                # GGUF: motore llama.cpp
+fastllm run parakeet.gguf discorso.wav         # trascrizione (anche mp3/m4a su macOS)
+fastllm run PaddleOCR-VL.gguf fattura.jpg      # OCR; il *-mmproj.gguf sta accanto al modello
+fastllm gmbarch mlx-community/Mixtral-8x22B-4bit   # crea il descrittore dell'architettura da un URL, senza scaricare i pesi
+```
+
+### Modelli provati e funzionanti
+
+Misure su un Mac Apple Silicon con 128 GB, una sola esecuzione per modello (`tools/bench_models.sh`): prompt unico di circa
+2000-3000 token per il **prefill**, 128 token generati per il **decode**, campionamento di default. Il prefill e il decode dei
+modelli molto grandi, letti dal disco, dipendono dalla velocita' dell'SSD.
+
+| Modello | Formato | Prefill tok/s | Decode tok/s |
+|---|---|---:|---:|
+| SmolLM2-135M-Instruct | MLX 8 bit | 14105 | 492 |
+| Llama-3.2-1B-Instruct | MLX 4 bit | 9501 | 561 |
+| Qwen3-0.6B | MLX 4 bit | 5539 | 267 |
+| Qwen3-0.6B | MLX 8 bit | 5744 | 342 |
+| Qwen3.5-4B | MLX 4 bit | 3638 | 119 |
+| Ternary-Bonsai-4B | MLX 2 bit | 2895 | 182 |
+| Qwen3-8B | MLX 4 bit | 2041 | 95 |
+| LFM2-8B-A1B | MLX 4 bit | 1472 | 208 |
+| DeepSeek-V2-Lite-Chat | MLX 4 bit | 1953 | 116 |
+| gpt-oss-20b | MXFP4 + Q8 | 4039 | 137 |
+| Granite-3.3-2B-Instruct | MLX 4 bit | 2732 | 119 |
+| LFM2.5-24B-A2B | MLX 8 bit | 547 | 63 |
+| Qwen3.6-27B | MLX 4 bit | 748 | 27.5 |
+| Qwen3.6-35B-A3B (OptiQ) | MLX 4 bit | 1871 | 62 |
+| Qwen3-Coder-30B-A3B-Instruct | MLX 8 bit | 435 | 67 |
+| Qwen3-Coder-Next | MXFP4 | 929 | 77 |
+| gemma-4-31b-it | MLX 4 bit | 523 | 19.3 |
+| Kimi-Linear-48B-A3B-Instruct | MLX 4 bit | 2198 | 101 |
+| GLM-4.5-Air | MLX 4 bit | 143 | 27.5 |
+| DeepSeek-R1-Distill-Qwen-32B | MLX 8 bit | 501 | 13.3 |
+| Qwen3.5-27B (Claude-4.6-Opus distilled) | MLX 6 bit | 525 | 18.2 |
+| Qwen3.8-27B | MLX 8 bit | 490 | 17.6 (37.8 con il draft DFlash2, vedi sotto) |
+| Qwen3.8-Flash-Next | MLX 2 bit, pesi letti da disco | 62 | 18.5 |
+| Qwen3.8-Flash-Next | MLX 4 bit, pesi letti da disco (104 GB) | 29 | 4.5 |
+| Phi-3-mini-4k-instruct | MLX 4 bit | 544 (prompt di 4187 token) | 25.6 (111 su prompt breve) |
+| StableLM-2-zephyr-1.6B | MLX 4 bit | 1451 | 41.6 (235 su prompt breve) |
+| StarCoder2-3B (modello base, non chat) | MLX 4 bit | 1625 | 86.2 |
+| Gemma-3-1B-it | MLX 4 bit | 4126 | 317.6 |
+| Mixtral-8x22B (modello base) | MLX 4 bit, pesi letti da disco (74 GB) | 16 (prompt di 1752 token) | 11.2 |
+
+| TinyLlama-1.1B-Chat | GGUF Q4_K_M | 12926 | 252 |
+| gemma-3-270m-it | GGUF Q4_K_M | 6907 | 297 |
+| OLMoE-1B-7B-Instruct | GGUF Q4_K_M | 6572 | 42 |
+| gemma-2-2b-it | GGUF Q4_K_M | 4403 | 44 |
+| Llama-2-7B-Chat | GGUF Q4_K_M | 1499 | 9.0 |
+| Qwen3.8-Flash-Next (ds4 integrato) | GGUF Q2, 137 GB | 728 | 52 |
+
+Note sulle misure:
+
+- Qwen3.8-27B usa da solo il draft `Qwen3.8-27B-DFlash2` se sta accanto al modello (decodifica speculativa, testo identico):
+  37.8 tok/s su un prompt breve di codice contro 16.5 senza draft.
+- I modelli con stato ricorrente (Qwen3.5/3.6/3.8, Qwen3-Next, LFM2, Kimi-Linear, Mamba, Jamba...) non riusano i prefissi
+  salvati: il prefill si rifa' ad ogni richiesta, ma il testo e' corretto.
+- Modelli piu' grandi del 55% della RAM passano da soli ai pesi `packed` (letti dai file a richiesta): Flash-Next 2 e 4 bit.
+- gemma-3-270m: il decode e' misurato su un prompt breve (sul prompt lungo di prova risponde subito con la fine del testo).
+- La velocita' di Mixtral e dei modelli "letti da disco" include il primo accesso ai pesi.
+
+### Parlato e OCR
+
+| Modello | Cosa fa | Esito |
+|---|---|---|
+| NVIDIA Parakeet-TDT 0.6B v3 (GGUF Q8) | trascrizione in 25 lingue europee | JFK parola per parola, italiano e inglese corretti; 216 s di audio in 7.6 s su CPU |
+| PaddleOCR-VL 1.6 (GGUF + mmproj) | OCR di immagini | legge correttamente una fattura di prova |
+
+Servono i descrittori `Parakeet` e `PaddleOCR-VL` della cartella ABI di LLMEnv; il motore Parakeet e' in
+`LLMEnv/LLMEngine/asr/llm_parakeet.c`.
+
+### Provati ma NON funzionanti
+
+| Modello | Problema |
+|---|---|
+| gemma-4-26b-a4b-it (MoE) | testo senza senso: causa ancora da analizzare |
+
+Phi-3, StableLM-2, StarCoder2 e Gemma-3 davano testo degenerato per due difetti del motore (cache KV con padding visto dall'attention; bias q/k/v mancanti in StableLM e StarCoder2), ora corretti.
+
+### Altri modelli che dovrebbero funzionare senza modifiche
+
+- **GGUF**: qualunque architettura supportata da llama.cpp (Llama, Mistral, Gemma, Qwen, Phi, OLMo, DeepSeek, GLM, Granite...), con
+  tokenizer SentencePiece e BPE, chat template Jinja e fine turno dalla template. Provati cinque modelli di famiglie diverse.
+- **MLX, stessa famiglia dei modelli provati**: Qwen2/Qwen2.5/Qwen3/Qwen3-MoE/Qwen3-Next/Qwen3.5-MoE, Llama 3.x, Mistral/Mixtral,
+  OLMo 2/3, OLMoE, GLM-4.x, DeepSeek-V2/V3, Kimi, ERNIE 4.5, Granite/GraniteMoE, LFM2, gpt-oss, Gemma-4.
+- **MLX, presenti nel motore ma non provati su un checkpoint**: Qwen2-MoE, DeepSeek-V3.x, Kimi-K2, GLM-4 denso e GLM-4-MoE-Lite,
+  Mamba/Mamba2/Falcon-Mamba, RWKV7, Falcon-H1, Jamba, GraniteMoE-hybrid, GPT-NeoX, InternLM2, MiniCPM, Hunyuan, GPT-2,
+  GPT-BigCode, OpenELM, Mistral3, dots1, Telechat3, Youtu, JoyAI. Visto cosa e' successo a Phi-3, StableLM e StarCoder2, aspettati
+  sorprese: vanno provati uno per uno.
+- Quantizzazioni lette: affine 2/3/4/6/8 bit, MXFP4/MXFP8, AWQ, GPTQ, bitsandbytes (vedi `docs/quant-coverage.md`).
+
+### Descrittori delle architetture (`.gmbarch`)
+
+Ogni architettura ha un descrittore nella cartella `ABI` di LLMEnv. `fastllm pull` e `fastllm add` lo creano da soli se manca
+(da `config.json` e dai nomi dei tensori); `fastllm gmbarch <url|org/nome|cartella>` lo crea a mano, scaricando solo
+`config.json` e l'indice dei tensori. Un descrittore esistente non viene mai sovrascritto. Creati cosi': `mixtral`, `phi3`,
+`gemma3`, `granite`, `stablelm`, `starcoder2`, `qwen2_vl`.
+
+
+> **Stato al 2026-10-30.** La tabella qui sotto è la fotografia del **2026-09-24** e
+> contiene voci che oggi **non esistono più**: `src/lane_gguf/` e l'ABI `mlxengine_*` sono state
+> **eliminate** (`CMakeLists.txt:85-89`) — il GGUF lo legge e lo dequantizza `llmcodec` di LLMEnv.
+> Non ci sono più «due programmi»: c'è un binario `fastllm` (più i tool e i test). Ciò che resta
+> valido della tabella sono le lane `src/hf`, `src/json`, `src/server`, `src/cli`, che sono di
+> FastLLM. Lo stato corrente è nel vault (`_Index_FastLLM.md`, sezione «Stato al 2026-10-30»).
+
+## Stato reale del codice (fotografia al 2026-09-24; vedi l'avviso sopra)
 
 | componente | stato |
 |---|---|
-| `src/lane_gguf/fmlx_gguf.c` — lettore GGUF di riferimento | **esiste, compilato, testato** (259 verifiche) |
-| `src/lane_gguf/fmlx_quant.c` + `fmlx_quant_ext.c` + `fmlx_quant_iq.c` — dequant ggml → F32 (31 tipi) | **esiste, compilato, testato** (510 verifiche + gate differenziale: 250 confronti, 0 ns. bit divergenti) |
+| `src/lane_gguf/fmlx_gguf.c` — lettore GGUF di riferimento | **ELIMINATO 2026-09** (oggi in `LLMEnv/LLMCodec`); era compilato e testato (259 verifiche) |
+| `src/lane_gguf/fmlx_quant.c` + `fmlx_quant_ext.c` + `fmlx_quant_iq.c` — dequant ggml → F32 (31 tipi) | **ELIMINATO 2026-09** (oggi `llmcodec_ggml` in LLMEnv); era compilato e testato (510 verifiche + gate differenziale: 250 confronti, 0 ns. bit divergenti) |
 | `src/hf/fmlx_hf_cache.c` + `fmlx_hf_hash.c` — cache HF letto, senza rete | **esiste, compilato, testato** (131 verifiche + sonda sul cache reale) |
 | `src/hf/fmlx_hf_fetch.c` + `fmlx_hf_curl.c` — download, lock, resume, watchdog di stall, backend classico su repo xet | **esiste, compilato, testato** (199 verifiche senza rete + probe sul server vero + **`tools/hf_stall_probe.c`: il watchdog misurato per la prima volta su un server locale che si ferma a metà — 16 verifiche, e ha già trovato un difetto: lo stall tagliava come `ERR_HTTP`, cioè «non ritentare», e la ripresa non partiva mai**) |
 | `src/hf/fmlx_hf_manifest.c` — lista dei file di un repo (ciò che serve a `pull` per sapere COSA scaricare) | **esiste, compilato, testato** (51 verifiche senza rete + sonda sul server vero: `bert-base-uncased` 16 file, commit `86b5e09…`, 7 con `lfs`) |
@@ -18,8 +135,8 @@ da Hugging Face). Piano completo: `AiWiki/01-Projects/FastLLM/Piani/(open) - Fas
 | `src/server/fmlx_http.c` — codec HTTP/1.1: framing richiesta, testata risposta, SSE | **esiste, compilato, testato** (127 verifiche byte-esatte) |
 | `src/server/fmlx_api*.c` — router + adapter OpenAI/Anthropic sopra il codec | **esiste, compilato, testato** (151 verifiche). Non c'è ancora un motore sotto: la generazione è attaccata al confine `FmlxApiNext`, che il test copre con un doppio scriptato |
 | `src/server/fmlx_serve_respond.c` + `fmlx_serve.c` — il server: `/v1/models`, `/health`, il 501 per ogni rotta che genera, e il loop TCP | **esiste, compilato, testato, provato su socket vero** (163 verifiche: framing, `bind` rifiutato e arresto su segnale + uno smoke del binario con `curl` vero). Il motore non c'è e **non serve per provarlo** |
-| `include/mlxengine.h` + `src/engine/mlxengine.c` — **MLXEngine, il deliverable ①**: l'ABI del motore come libreria condivisa (`libmlxengine.1.dylib`, 20 simboli `mlxengine_*`) | **esiste, compilato, testato** (192 verifiche). Copre il lettore GGUF e il dequant; i pesi packed, la cache KV, l'attenzione, il MoE e la generazione NON ci sono ancora ed è il punto d'ingresso loro e del numero d'ABI. Prova di fedeltà del confine: la stessa fixture aperta due volte — attraverso l'ABI e dalla parte di dentro — e i bit confrontati. C'è anche un consumatore esterno vero (`tools/engine_abi_probe.c`: un header e una dylib, niente sorgenti) provato su 6 GGUF reali |
-| `src/lane_mlx/` — motore MLX estratto da GMBasic | non scritto. **D2 non blocca il "come"**: i prerequisiti per compilarlo sono già su questa macchina (verificato 2026-09-22: 28 header in `GMBasic/libs/mlx-deps/mlx-c-src/mlx/c/*.h`, più `libmlx.a` 31 MB e `libmlxc.a` 1,0 MB in `libs/mlx-deps/precompiled/darwin-arm64`). D2 decide solo **chi possiede** il motore |
+| `include/mlxengine.h` + `src/engine/mlxengine.c` — **MLXEngine, il deliverable ①**: l'ABI del motore come libreria condivisa (`libmlxengine.1.dylib`, 20 simboli `mlxengine_*`) | **ELIMINATO 2026-09**; era compilato e testato (192 verifiche). Copre il lettore GGUF e il dequant; i pesi packed, la cache KV, l'attenzione, il MoE e la generazione NON ci sono ancora ed è il punto d'ingresso loro e del numero d'ABI. Prova di fedeltà del confine: la stessa fixture aperta due volte — attraverso l'ABI e dalla parte di dentro — e i bit confrontati. C'è anche un consumatore esterno vero (`tools/engine_abi_probe.c`: un header e una dylib, niente sorgenti) provato su 6 GGUF reali |
+| `src/lane_mlx/` — motore MLX estratto da GMBasic | **mai scritto, e non serve**: il motore è arrivato da LLMEnv il 2026-09-28 (`LLMEngine/mlx`). La D2 dell'epoca è superata |
 | `src/cli/fmlx_pull.c` + `fmlx_pull_progress.c` + `fmlx_cli.c` — `fastllm pull`, l'avanzamento, il dispatch e gli esiti | **esiste, compilato, testato, provato sul server vero** (102 + 214 verifiche, di cui 3 piani distinti per la barra: renderer con orologio in mano + terminale finto `openpty` + pipe; pull reale `sshleifer/tiny-gpt2`: 9/9 file, 9 blob il cui nome è il loro hash, snapshot riletto da `hf_probe`) |
 | `src/cli/fmlx_models.c` + `src/hf/fmlx_hf_catalog.c` — `fastllm models` / `list` | **esiste, compilato, testato, provato sul cache vero di questa macchina** (139 + 214 verifiche; 27 repo letti in <0,01 s, 3.675.292.998 byte su 76 inode che coincidono con un conteggio di inode fatto a parte con `find`+`stat`; **la riga `[!]` di un repo che non si è potuto aprire è una classe, non un'assenza** — vedi sotto) |
 | `src/cli/fmlx_serve.c` — `fastllm serve` | **esiste, compilato, testato, provato**: risolve host/porta/chiave (flag > ambiente > default, piano §14) e passa tutto al loop. `--cache` vale anche qui: `pull`, `models` e `serve` guardano LO STESSO disco |
@@ -31,7 +148,11 @@ Qui sotto c'è solo ciò che compila davvero. Nessuna cartella vuota "perché il
 L'enumerazione di ciò che MLX/caricatore loader GGUF sanno davvero fare, con i `file:riga` della
 lettura, è in **`docs/quant-coverage.md`** (ed è lì che è finito il bug dei cinque tipi spostati).
 
-## La lane GGUF oggi
+## La lane GGUF oggi — **STORICO (ora in LLMEnv/LLMCodec)**
+
+> `src/lane_gguf/` è stato eliminato: lettore, dequant e tassonomia d'errore vivono in
+> `LLMEnv/LLMCodec` (`llmcodec`, `llmcodec_ggml`). Questa sezione resta perché descrive i quattro
+> difetti dei lettori storici che il nuovo codec ha evitato.
 
 `include/fmlx/fmlx_gguf.h` + `src/lane_gguf/fmlx_gguf.c`: **un solo** lettore di record GGUF,
 scritto per non ripetere i quattro difetti misurati nei lettori esistenti (due dei quali sono
@@ -113,7 +234,11 @@ non è una copia — lo script **ricalcola i 16 valori dai bit E2M1** della spec
 IQ del lotto C hanno **una sola** sorgente, e lì la prova non è il confronto fra copie: è lo sweep
 eseguito indice per indice. Licenza MIT ggml: vedi `LICENSES.md`.
 
-## MLXEngine — l'ABI del motore (`include/mlxengine.h`, `libmlxengine.1.dylib`)
+## MLXEngine — l'ABI del motore (`include/mlxengine.h`, `libmlxengine.1.dylib`) — **STORICO**
+
+> Rimosso: `include/mlxengine.h`, `src/engine/mlxengine.c` e il target `mlxengine` **non esistono
+> più** (eliminati con `src/lane_gguf/` quando il codec è passato a LLMEnv). Il motore oggi è
+> `llmengine.h` di LLMEnv. La sezione resta come memoria dei gate di fedeltà dell'ABI.
 
 Il deliverable ① del piano esiste da oggi come **oggetto linkerabile**, non come nome di sezione:
 `add_library(mlxengine SHARED)` produce `libmlxengine.1.0.0.dylib` con i symlink
