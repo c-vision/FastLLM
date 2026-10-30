@@ -217,7 +217,10 @@ FmlxCliStatus fmlx_cli_generate_stream(const char *cache_root, const char *name,
         fmlx_json_doc_free(&doc);
         return FMLX_CLI_FAILED;
     }
+    struct timespec tpf0, tpf1;
+    clock_gettime(CLOCK_MONOTONIC, &tpf0);   /* il prefill del prompt avviene dentro fmlx_engine_chat */
     g = fmlx_engine_chat(model, &chat, e, sizeof e);
+    clock_gettime(CLOCK_MONOTONIC, &tpf1);
     if (!g) {
         fprintf(err, "fastllm: %s\n", e);
         fmlx_json_doc_free(&doc);
@@ -282,8 +285,10 @@ FmlxCliStatus fmlx_cli_generate_stream(const char *cache_root, const char *name,
     if (have_done) {
         double secs = (double)(tmv1.tv_sec - tmv0.tv_sec) +
                       (double)(tmv1.tv_nsec - tmv0.tv_nsec) / 1e9;
-        fprintf(err, "[%llu tok · %.1f tok/s · contesto %llu tok]\n", (unsigned long long)ctok,
-                secs > 0.0 ? (double)ctok / secs : 0.0, (unsigned long long)(ptok + ctok));
+        double pf = (double)(tpf1.tv_sec - tpf0.tv_sec) + (double)(tpf1.tv_nsec - tpf0.tv_nsec) / 1e9;
+        fprintf(err, "[%llu tok · %.1f tok/s decode · prefill %llu tok in %.2f s (%.0f tok/s) · contesto %llu tok]\n",
+                (unsigned long long)ctok, secs > 0.0 ? (double)ctok / secs : 0.0, (unsigned long long)ptok, pf,
+                pf > 0.0 ? (double)ptok / pf : 0.0, (unsigned long long)(ptok + ctok));
         fflush(err);
     }
 

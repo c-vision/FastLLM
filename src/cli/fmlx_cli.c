@@ -220,6 +220,20 @@ static void usage_verb(FILE *out, const char *v) {
             "esempi:\n"
             "  fastllm tensors modello.gguf\n"
             "  fastllm tensors modello.gguf --diffable\n");
+    else if (!strcmp(v, "gmbarch"))
+        fprintf(out,
+            "fastllm gmbarch <url|org/nome|cartella>\n"
+            "  <url|org/nome>         repo Hugging Face (anche https://huggingface.co/org/nome/tree/main):\n"
+            "                         scarica SOLO config.json e l'indice dei tensori (pochi kB)\n"
+            "  <cartella>             cartella modello gia' scaricata (config.json + safetensors)\n"
+            "  -h, --help             questo testo\n"
+            "\n"
+            "Crea `<model_type>.gmbarch` nella cartella ABI di LLMEnv se l'architettura non ha ancora un descrittore\n"
+            "(ruoli dei tensori, mappa dei campi di config, strutture attenzione/MoE/vision). Un descrittore esistente\n"
+            "non viene mai sovrascritto. Lo stesso controllo parte da solo dopo `fastllm pull` e `fastllm add`.\n"
+            "esempi:\n"
+            "  fastllm gmbarch mlx-community/Mixtral-8x22B-4bit\n"
+            "  fastllm gmbarch ~/ai/Models/Qwen3-8B-4bit\n");
     else if (!strcmp(v, "asr"))
         fprintf(out,
             "fastllm asr <model_dir|model.gguf> <file.wav>\n"
@@ -390,7 +404,7 @@ static int is_verb(const char *v) {
     static const char *const known[] = {"pull", "run", "chat",  "serve", "models",
                                         "list", "ls",  "ps",    "cp",    "rm",    "doctor",
                                         "add",  "show", "help",  "options", "paths", "search", "test",
-                                        "compare", "tensors", "asr"};
+                                        "compare", "tensors", "asr", "gmbarch"};
     size_t i;
     for (i = 0; i < sizeof known / sizeof known[0]; i++)
         if (!strcmp(v, known[i])) return 1;
@@ -920,6 +934,7 @@ FmlxCliStatus fmlx_cli_exec_with(const FmlxCliArgs *a_in, const FmlxHfTransport 
     if (!strcmp(a->verb, "compare")) return fmlx_compare_exec(a, out, err);
     if (!strcmp(a->verb, "tensors")) return fmlx_tensors_exec(a, out, err);
     if (!strcmp(a->verb, "asr")) return fmlx_asr_exec(a, out, err);
+    if (!strcmp(a->verb, "gmbarch")) return fmlx_gmbarch_exec(a, out, err);
     if (!strcmp(a->verb, "doctor"))
         /* Nemmeno qui il transport viene guardato: l'audit hashà ciò che è già su disco, e una
          * rete finta non aggiungerebbe nessuna prova — semmai ne toglierebbe, perché il verdetto
@@ -953,6 +968,12 @@ FmlxCliStatus fmlx_cli_exec_with(const FmlxCliArgs *a_in, const FmlxHfTransport 
         fprintf(err ? err : stderr, "fastllm pull: %s [%s]\n", rep.error_msg,
                 fmlx_hf_status_str(rep.error));
         return FMLX_CLI_FAILED;
+    }
+    /* Descrittore dell'architettura (cartella ABI di LLMEnv): se manca lo crea da config.json e dai nomi dei tensori. */
+    {
+        FILE *sink = a->quiet ? fopen("/dev/null", "w") : (out ? out : stdout);
+        if (sink) fmlx_gmbarch_ensure_dir(rep.snapshot_dir, sink);
+        if (a->quiet && sink) fclose(sink);
     }
     return FMLX_CLI_OK;
 }

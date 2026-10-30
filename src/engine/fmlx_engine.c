@@ -163,7 +163,7 @@ static void maybe_prompt_offload(const char *dir) {
     }
 }
 
-/* Modello MLX piu' grande della memoria utile (oltre il 70% della RAM fisica): i pesi in memoria non entrano (il piano
+/* Modello MLX piu' grande della memoria utile (oltre il 55% della RAM fisica (i pesi in memoria pesano ~1.3x il file)): i pesi in memoria non entrano (il piano
  * KV risulta 0 e la richiesta e' rifiutata). Si passa al backend `packed`, che legge i pesi dai file a richiesta, salvo
  * che l'utente abbia gia' scelto un backend. Non vale per i GGUF (hanno i loro motori). */
 static void maybe_auto_packed(const char *dir) {
@@ -178,9 +178,9 @@ static void maybe_auto_packed(const char *dir) {
     if (cur[0] != '\0' && strcmp(cur, "mlx") != 0) return;
     if (sysctlbyname("hw.memsize", &mem, &sz, NULL, 0) != 0 || mem == 0) return;
     need = model_footprint_bytes(dir);
-    if (need == 0 || (double)need <= 0.70 * (double)mem) return;
+    if (need == 0 || (double)need <= 0.55 * (double)mem) return;
     if (llm_ai_mlx_opt_set("weights_backend", "packed") == 0)
-        fprintf(stderr, "Il modello pesa %.1f GiB (oltre il 70%% della RAM): pesi letti dai file a richiesta (weights_backend=packed).\n",
+        fprintf(stderr, "Il modello pesa %.1f GiB (oltre il 55%% della RAM): pesi letti dai file a richiesta (weights_backend=packed).\n",
                 (double)need / 1073741824.0);
 #else
     (void)dir;

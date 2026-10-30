@@ -250,6 +250,7 @@ FmlxCliStatus fmlx_registry_add_exec(const FmlxCliArgs *a, FILE *out, FILE *err)
     if (reg_save(v, n + 1, e, sizeof e) != 0) { free(v); fprintf(err, "fastllm add: %s\n", e); return FMLX_CLI_FAILED; }
     free(v);
     fprintf(out ? out : stdout, "aggiunto: %s -> %s (%s)\n", a->repo, path, eff_modality[0] ? eff_modality : "chat");
+    fmlx_gmbarch_ensure_dir(path, out ? out : stdout);   /* cartella MLX/HF locale: crea il .gmbarch dell'architettura se manca */
     return FMLX_CLI_OK;
 }
 

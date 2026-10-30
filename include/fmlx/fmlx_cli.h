@@ -161,6 +161,10 @@ FmlxCliStatus fmlx_tensors_exec(const FmlxCliArgs *a, FILE *out, FILE *err);
  * Il testo esce TOKEN-LIVE su `out` (streaming). Engine in LLMEnv/LLMEngine/asr (target `llm_asr`),
  * la STESSA sorgente usata da GMBasic (superficie BASIC `ASR.RECOGNIZE`). */
 FmlxCliStatus fmlx_asr_exec(const FmlxCliArgs *a, FILE *out, FILE *err);
+/* `gmbarch <url|org/nome|cartella>`: crea il descrittore `.gmbarch` dell'architettura nella cartella ABI di LLMEnv se manca. */
+FmlxCliStatus fmlx_gmbarch_exec(const FmlxCliArgs *a, FILE *out, FILE *err);
+/* Lo stesso controllo per una cartella modello gia' scaricata: lo chiamano `pull` e `add`. Scrive una riga `[abi] ...`. */
+void fmlx_gmbarch_ensure_dir(const char *dir, FILE *out);
 /* 1 se `path` e' un GGUF multimodale riconosciuto da general.architecture (parakeet -> audio, paddleocr -> ocr con il
  * `*-mmproj.gguf` accanto): scrive modality e mmproj. 0 = un normale modello di chat. */
 int fmlx_media_detect(const char *path, char *modality, size_t mcap, char *mmproj, size_t pcap);
