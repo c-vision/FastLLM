@@ -20,11 +20,19 @@ Requires a Mac with Apple Silicon and macOS 14 or later. On macOS 26.2 and later
 
 ```sh
 brew tap c-vision/fastllm
-brew trust c-vision/fastllm      # Homebrew 7 does not load a third-party tap until you trust it
+brew trust c-vision/fastllm
 brew install fastllm
 ```
 
 This also installs the engine (the `llmenv` formula of the same tap). Upgrade with `brew upgrade fastllm`.
+
+*About `brew trust`.* Homebrew 7 and later refuse to load formulae from a tap that is not its own until you say you trust it, because a
+formula is code that runs on your Mac. Without it, `brew install fastllm` stops with "Refusing to load formula … from untrusted tap" and tells
+you the command to run. `brew trust c-vision/fastllm` trusts the whole tap (the two formulae `fastllm` and `llmenv`, both built from the
+[GitHub releases](https://github.com/c-vision/FastLLM/releases) of this project). To trust only what you install, use
+`brew trust --formula c-vision/fastllm/fastllm c-vision/fastllm/llmenv` instead. The choice is saved in `~/.homebrew/trust.json`, and you can
+read the tap's formulae in its [repository](https://github.com/c-vision/homebrew-fastllm) before trusting it. If you would rather not trust
+a tap, use the installer script below.
 
 **Installer script** (no sudo, installs into `~/.local`)
 
