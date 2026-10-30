@@ -21,6 +21,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/sysctl.h>
 #include <unistd.h>
 
 #ifdef __APPLE__
@@ -160,6 +161,30 @@ static void maybe_prompt_offload(const char *dir) {
             fprintf(stderr, "offload non attivato (il load potrebbe non entrare in memoria).\n");
         }
     }
+}
+
+/* Modello MLX piu' grande della memoria utile (oltre il 70% della RAM fisica): i pesi in memoria non entrano (il piano
+ * KV risulta 0 e la richiesta e' rifiutata). Si passa al backend `packed`, che legge i pesi dai file a richiesta, salvo
+ * che l'utente abbia gia' scelto un backend. Non vale per i GGUF (hanno i loro motori). */
+static void maybe_auto_packed(const char *dir) {
+#ifdef __APPLE__
+    char cur[32] = "";
+    uint64_t mem = 0;
+    size_t sz = sizeof mem, need;
+    struct stat st;
+
+    if (stat(dir, &st) != 0 || !S_ISDIR(st.st_mode)) return;
+    if (llm_ai_mlx_opt_get_str("weights_backend", cur, sizeof cur) != 0) cur[0] = '\0';   /* non ancora impostata */
+    if (cur[0] != '\0' && strcmp(cur, "mlx") != 0) return;
+    if (sysctlbyname("hw.memsize", &mem, &sz, NULL, 0) != 0 || mem == 0) return;
+    need = model_footprint_bytes(dir);
+    if (need == 0 || (double)need <= 0.70 * (double)mem) return;
+    if (llm_ai_mlx_opt_set("weights_backend", "packed") == 0)
+        fprintf(stderr, "Il modello pesa %.1f GiB (oltre il 70%% della RAM): pesi letti dai file a richiesta (weights_backend=packed).\n",
+                (double)need / 1073741824.0);
+#else
+    (void)dir;
+#endif
 }
 
 /* ---- stringa dinamica ---- */
@@ -371,6 +396,66 @@ static int read_eos_list(const char *dir, int32_t *out, int cap) {
         if (n > 0) break;
     }
     return n;
+}
+
+/* Completa `eos_list` per i modelli la cui fine turno non e' in `eos_token_id` di config.json: i VLM (Qwen3.5, Gemma)
+ * annidano l'id in `text_config`, e `eos_token` di tokenizer_config.json (es. `<|im_end|>`) e' il token che la chat
+ * template emette davvero. Senza, la generazione stampa `<|im_end|>` e prosegue. Il token del tokenizer entra in TESTA
+ * (l'ultimo della lista, quello passato all'ABI, resta quello scelto da read_eos_list). */
+static void add_eos_extra(FmlxEngineModel *m) {
+    char path[FMLX_ENGINE_PATH_MAX];
+    char *txt;
+    size_t len;
+    FmlxJsonDoc doc;
+
+    if (m->n_eos == 0 && snprintf(path, sizeof path, "%s/config.json", m->dir) < (int)sizeof path &&
+        (txt = read_json_file(path, &len)) != NULL) {
+        fmlx_json_doc_init(&doc);
+        if (fmlx_json_parse(txt, len, 0, &doc) == FMLX_JSON_OK) {
+            const FmlxJsonValue *tc = fmlx_json_obj_get(fmlx_json_root(&doc), "text_config");
+            const FmlxJsonValue *v = tc ? fmlx_json_obj_get(tc, "eos_token_id") : NULL;
+            int64_t x;
+            if (v && fmlx_json_as_i64(v, &x)) {
+                if (x >= 0 && x <= INT32_MAX) m->eos_list[m->n_eos++] = (int32_t)x;
+            } else if (v && v->type == FMLX_JSON_ARR) {
+                size_t na = fmlx_json_arr_n(v);
+                for (size_t k = 0; k < na && m->n_eos < FMLX_ENGINE_EOS_MAX; k++) {
+                    const FmlxJsonValue *e = fmlx_json_arr_at(v, k);
+                    if (e && fmlx_json_as_i64(e, &x) && x >= 0 && x <= INT32_MAX) m->eos_list[m->n_eos++] = (int32_t)x;
+                }
+            }
+        }
+        fmlx_json_doc_free(&doc);
+        free(txt);
+    }
+    if (snprintf(path, sizeof path, "%s/tokenizer_config.json", m->dir) >= (int)sizeof path) return;
+    txt = read_json_file(path, &len);
+    if (!txt) return;
+    fmlx_json_doc_init(&doc);
+    if (fmlx_json_parse(txt, len, 0, &doc) == FMLX_JSON_OK) {
+        const FmlxJsonValue *v = fmlx_json_obj_get(fmlx_json_root(&doc), "eos_token");
+        if (v && v->type == FMLX_JSON_OBJ) v = fmlx_json_obj_get(v, "content");
+        if (v && v->type == FMLX_JSON_STR) {
+            char s[128];
+            int32_t eid = -1;
+            size_t sn = fmlx_json_str_len(v);
+            if (sn > 0 && sn < sizeof s) {
+                memcpy(s, fmlx_json_str(v), sn);
+                s[sn] = '\0';
+                if (llmtoken_encode(m->tok, s, &eid, 1) == 1 && eid >= 0) {
+                    int have = 0;
+                    for (int i = 0; i < m->n_eos; i++) if (m->eos_list[i] == eid) have = 1;
+                    if (!have && m->n_eos < FMLX_ENGINE_EOS_MAX) {
+                        memmove(m->eos_list + 1, m->eos_list, (size_t)m->n_eos * sizeof m->eos_list[0]);
+                        m->eos_list[0] = eid;
+                        m->n_eos++;
+                    }
+                }
+            }
+        }
+    }
+    fmlx_json_doc_free(&doc);
+    free(txt);
 }
 
 /* Legge `bos_token` (stringa o nodo {content}) da tokenizer_config.json / config.json.
@@ -690,6 +775,7 @@ int fmlx_engine_load(const char *cache_root, const char *name, FmlxEngineModel *
         out->eos = out->n_eos > 0 ? out->eos_list[out->n_eos - 1] : -1;
     } else {
         out->n_eos = read_eos_list(out->dir, out->eos_list, FMLX_ENGINE_EOS_MAX);
+        add_eos_extra(out);
         /* L'ABI accetta UN eos: si passa l'ULTIMO della lista (nei modelli instruct è il token di
          * fine turno, es. `<|eot_id|>`, mentre i primi sono fine-testo/fine-sequenza). Gli altri
          * restano in `eos_list` e li ferma il consumer token per token. */
@@ -728,6 +814,7 @@ int fmlx_engine_load(const char *cache_root, const char *name, FmlxEngineModel *
      * Prima del load: se il modello supera il 50% della memoria libera+reclamabile e l'utente non
      * ha già dato --offload-experts, lo si chiede (Y/N) su terminale interattivo (run/chat). */
     maybe_prompt_offload(out->dir);
+    maybe_auto_packed(out->dir);
     if (out->eng->set_expert_swap)
         out->eng->set_expert_swap(g_offload_experts ? out->dir : NULL);
     out->model = out->eng->load_model(out->dir);
