@@ -725,6 +725,8 @@ FmlxCliStatus fmlx_cli_parse(int argc, char **argv, FmlxCliArgs *out, char *msg,
             /* Parametro del motore `nome=valore` (registro; nessuna env). Ripetibile. */
             if (!val || !strchr(val, '='))
                 return fail(out, msg, msg_len, "--opt vuole nome=valore");
+            if (strlen(val) >= sizeof out->opts[0])
+                return fail(out, msg, msg_len, "--opt: valore troppo lungo (massimo %d caratteri)", (int)sizeof out->opts[0] - 1);
             if (out->n_opts < (int)(sizeof out->opts / sizeof out->opts[0]))
                 snprintf(out->opts[out->n_opts++], sizeof out->opts[0], "%s", val);
             else
@@ -885,7 +887,7 @@ FmlxCliStatus fmlx_cli_exec_with(const FmlxCliArgs *a_in, const FmlxHfTransport 
     a = &ac;
     /* Parametri del motore (`--opt nome=valore`): applicati PRIMA di ogni load (registro, no env). */
     for (int oi = 0; oi < a->n_opts; oi++) {
-        char kv[192];
+        char kv[1100];
         char *eq;
         snprintf(kv, sizeof kv, "%s", a->opts[oi]);
         eq = strchr(kv, '=');

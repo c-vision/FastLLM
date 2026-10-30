@@ -1070,6 +1070,24 @@ static void case_installazione(void) {
     free(b);
 }
 
+/* `--opt nome=valore`: un percorso lungo (anche > 192 caratteri) non si tronca; oltre il limite si rifiuta con un errore. */
+static void case_opt_lunghe(void) {
+    FmlxCliArgs a;
+    char msg[256], longopt[400], hugeopt[1300];
+    size_t i;
+
+    memset(longopt, 0, sizeof longopt);
+    memcpy(longopt, "prefix_cache=/", 14);
+    for (i = 14; i < 300; i++) longopt[i] = 'a';
+    CK_PARSE(FMLX_CLI_OK, "fastllm", "--opt", longopt, "models");
+    CK(a.n_opts == 1 && strlen(a.opts[0]) == 300, "un valore da 286 caratteri e' stato troncato (%zu)", strlen(a.opts[0]));
+
+    memset(hugeopt, 'b', sizeof hugeopt - 1);
+    hugeopt[sizeof hugeopt - 1] = '\0';
+    memcpy(hugeopt, "prefix_cache=", 13);
+    CK_PARSE(FMLX_CLI_USAGE, "fastllm", "--opt", hugeopt, "models");
+}
+
 int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
     /* L'ambiente di chi esegue non decide i risultati. */
@@ -1124,6 +1142,7 @@ int main(int argc, char **argv) {
     case_aiuto();
     case_media_run();
     case_installazione();
+    case_opt_lunghe();
 
     printf("test_cli: %d verifiche, %d fallimenti\n", checks, failures);
     return failures ? 1 : 0;

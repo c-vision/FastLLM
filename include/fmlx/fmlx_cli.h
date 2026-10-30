@@ -115,7 +115,7 @@ typedef struct {
     char search_type[8];  /* `search --type`: filtra mlx|gguf|hf (vuoto = tutti) */
     const char *glob;     /* `compare --glob`: filtro glob sui nomi tensore, NULL = tutti */
     /* Parametri del motore (registro, NIENTE env): `--opt nome=valore`, ripetibile. */
-    char opts[16][192];
+    char opts[16][1100];   /* nome=valore: il valore (anche un percorso) puo' arrivare a 1023 caratteri, come nel registro del motore */
     int  n_opts;
 } FmlxCliArgs;
 
