@@ -284,6 +284,14 @@ target_include_directories(test_tools PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/includ
 target_link_libraries(test_tools PRIVATE fmlx_json)
 add_test(NAME tools COMMAND test_tools)
 
+# La scelta del motore DS4 (nativo vs vendor): funzione PURA, provata senza un modello.
+# È la prova che `--opt ds4_engine=native|vendor` cambia davvero il motore per lo stesso GGUF.
+add_executable(test_routing tests/engine/test_routing.c)
+target_include_directories(test_routing PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/engine
+                                               ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(test_routing PRIVATE fmlx_serve)
+add_test(NAME routing COMMAND test_routing)
+
 # --- lane_cli: il binario `fastllm` (piano §10.3, §13) --------------------------------------
 # Un file per verbo, non uno: `pull` è una lane con un report e delle regole sui path, `models` è
 # una tabella letta da disco, l'argv è una terza cosa che cambia con motivi diversi (una bandiera

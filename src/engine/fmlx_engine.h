@@ -156,6 +156,26 @@ void fmlx_engine_batch_request(int on);
 int fmlx_engine_batch_enable(FmlxEngineModel *m, int max);
 void fmlx_engine_batch_disable(void);
 
+/* ---- scelta del motore per i GGUF DS4 (`--opt ds4_engine=auto|native|vendor`) ----------------
+ *
+ * Lo STESSO file GGUF può girare su due motori diversi:
+ *   - `FMLX_ENGINE_DS4`  = ds4 nativo (ex ds4-slow), solo `deepseek4`;
+ *   - `FMLX_ENGINE_DS4N` = vendor antirez, tutte le famiglie (`deepseek4`, `deepseek41`,
+ *                          `glm-dsa`, `glm5-next`, `qwen4exp`).
+ * `auto` = il default di oggi (nativo per `deepseek4`, vendor per le famiglie che il nativo non ha);
+ * `native`/`vendor` forzano, per poter misurare lo stesso modello sui due motori e decidere.
+ * Il valore viene letto dal registro (`ds4_engine`), non da una env.
+ *
+ * La scelta è una funzione PURA di (arch, preferenza): si prova senza caricare un modello. */
+typedef enum { FMLX_DS4_AUTO = 0, FMLX_DS4_NATIVE = 1, FMLX_DS4_VENDOR = 2 } FmlxDs4Pref;
+typedef enum { FMLX_ENGINE_MLX = 0, FMLX_ENGINE_DS4, FMLX_ENGINE_DS4N, FMLX_ENGINE_DS41,
+               FMLX_ENGINE_LLAMACPP } FmlxEngineChoice;
+
+/* Arch vuota/NULL = non è un GGUF DS4: il chiamante resta sull'engine MLX. */
+FmlxEngineChoice fmlx_engine_ds4_choose(const char *arch, FmlxDs4Pref pref);
+/* Preferenza corrente dal registro; un valore sconosciuto torna AUTO **e lo dice** su stderr. */
+FmlxDs4Pref fmlx_engine_ds4_pref(void);
+
 /* Libera la cache residente (per i test e per uno shutdown pulito). */
 void fmlx_engine_shutdown(void);
 

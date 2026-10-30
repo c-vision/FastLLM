@@ -81,6 +81,30 @@ int fmlx_engine_opt_at(int i, const char **name, const char **desc, char *value,
 int fmlx_engine_opt_example(int i, char *buf, int cap) {
     return llm_ai_mlx_opt_example(i, buf, cap);
 }
+
+FmlxDs4Pref fmlx_engine_ds4_pref(void) {
+    char v[16];
+    if (llm_ai_mlx_opt_is_set("ds4_engine") != 1) return FMLX_DS4_AUTO;
+    v[0] = '\0';
+    if (llm_ai_mlx_opt_get_str("ds4_engine", v, sizeof v) != 0) return FMLX_DS4_AUTO;
+    if (strcmp(v, "auto") == 0) return FMLX_DS4_AUTO;
+    if (strcmp(v, "native") == 0 || strcmp(v, "ds4") == 0) return FMLX_DS4_NATIVE;
+    if (strcmp(v, "vendor") == 0 || strcmp(v, "ds4n") == 0) return FMLX_DS4_VENDOR;
+    fprintf(stderr, "[ds4] ds4_engine='%s' non riconosciuto (auto|native|vendor): uso auto\n", v);
+    return FMLX_DS4_AUTO;
+}
+
+FmlxEngineChoice fmlx_engine_ds4_choose(const char *arch, FmlxDs4Pref pref) {
+    if (arch == NULL || arch[0] == '\0') return FMLX_ENGINE_MLX;   /* non è un GGUF DS4 */
+    if (strcmp(arch, "qwen4exp") == 0) return FMLX_ENGINE_DS4N;    /* solo il vendor lo esegue */
+    if (strcmp(arch, "deepseek4") == 0)
+        return pref == FMLX_DS4_VENDOR ? FMLX_ENGINE_DS4N : FMLX_ENGINE_DS4;
+    if (strcmp(arch, "deepseek41") == 0) return FMLX_ENGINE_DS4N;  /* il nativo legge solo dir */
+    if (strcmp(arch, "glm5-next") == 0) return FMLX_ENGINE_DS4N;   /* solo il vendor */
+    if (strcmp(arch, "glm-dsa") == 0)
+        return pref == FMLX_DS4_VENDOR ? FMLX_ENGINE_DS4N : FMLX_ENGINE_LLAMACPP;
+    return FMLX_ENGINE_LLAMACPP;                                    /* GGUF generico */
+}
 int fmlx_engine_think_enabled(void) { return g_think; }
 
 /* 1 = sessione interattiva (run/chat da terminale): abilita il PROMPT Y/N per l'offload. Il server
@@ -805,20 +829,35 @@ int fmlx_engine_load(const char *cache_root, const char *name, FmlxEngineModel *
     }
 
     out->eng = llmengine_llm_engine_mlx();
-    /* DS4 (firma GGUF "deepseek4"): motore unico DS4 nativo (LLMEngine/mlx/ds4) via ABI. */
+    /* Scelta del motore per i GGUF DS4: nativo (ex ds4-slow) o vendor. `--opt ds4_engine=` decide;
+     * `auto` = comportamento storico (nativo per `deepseek4`, vendor per le altre famiglie).
+     * La decisione è la funzione pura `fmlx_engine_ds4_choose` (provata da `test_routing`). */
     {
         size_t dn = strlen(out->dir);
-        if (dn > 5 && strcmp(out->dir + dn - 5, ".gguf") == 0 && strcmp(out->gguf_arch, "qwen4exp") == 0) {
-            /* Qwen3.8-Flash-Next in GGUF: motore ds4 integrato in LLMEngine. */
-            const LlmEngineLlmEngine* e = fmlx_engine_symbol("llmengine_llm_engine_ds4n");
-            if (e != NULL) out->eng = e;
-        } else if (dn > 5 && strcmp(out->dir + dn - 5, ".gguf") == 0 && strcmp(out->gguf_arch, "deepseek4") == 0) {
-            const LlmEngineLlmEngine* e = fmlx_engine_symbol("llmengine_llm_engine_ds4");
-            if (e != NULL) out->eng = e;   /* altrimenti resta l'engine MLX */
-        } else if (dn > 5 && strcmp(out->dir + dn - 5, ".gguf") == 0 && out->gguf_arch[0] != '\0') {
-            /* Ogni altro GGUF: llama.cpp in versione a id (stessi tokenizer/template/streaming degli altri motori). */
-            const LlmEngineLlmEngine* e = fmlx_engine_symbol("llmengine_llm_engine_llamacpp_ids");
-            if (e != NULL) out->eng = e;
+        int is_gguf = dn > 5 && strcmp(out->dir + dn - 5, ".gguf") == 0;
+        FmlxDs4Pref pref = fmlx_engine_ds4_pref();
+        if (is_gguf) {
+            FmlxEngineChoice ch = fmlx_engine_ds4_choose(out->gguf_arch, pref);
+            const char *sym = ch == FMLX_ENGINE_DS4       ? "llmengine_llm_engine_ds4"
+                            : ch == FMLX_ENGINE_DS4N      ? "llmengine_llm_engine_ds4n"
+                            : ch == FMLX_ENGINE_LLAMACPP  ? "llmengine_llm_engine_llamacpp_ids"
+                                                          : NULL;
+            if (sym != NULL) {
+                const LlmEngineLlmEngine *e = fmlx_engine_symbol(sym);
+                if (e == NULL && ch == FMLX_ENGINE_DS4) {
+                    /* Il nativo manca in questa build: NON si finge che sia lui. */
+                    e = fmlx_engine_symbol("llmengine_llm_engine_ds4n");
+                    if (e != NULL) fprintf(stderr, "[ds4] motore nativo assente: uso il vendor\n");
+                }
+                if (e != NULL) out->eng = e;
+                else fprintf(stderr, "[ds4] motore richiesto (%s) assente: resta MLX\n", sym);
+            }
+            if (pref != FMLX_DS4_AUTO && out->eng != NULL)
+                fprintf(stderr, "[ds4] motore scelto: %s (arch '%s')\n", out->eng->name, out->gguf_arch);
+            if (pref == FMLX_DS4_NATIVE && ch != FMLX_ENGINE_DS4 && ch != FMLX_ENGINE_DS41 &&
+                out->eng != NULL)
+                fprintf(stderr, "[ds4] nessun motore nativo per '%s': uso %s\n", out->gguf_arch,
+                        out->eng->name);
         } else if (is_dsv41_dir(out->dir)) {
             /* DS4.1 (deepseek_v41): motore `ds41-native`, stessi 9 metodi dell'ABI. */
             const LlmEngineLlmEngine* e = fmlx_engine_symbol("llmengine_llm_engine_ds41");
