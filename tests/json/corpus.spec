@@ -6,7 +6,7 @@
 # Quindi `\\n` è la sequenza JSON backslash-n (due byte nel sorgente), `\n` è il byte di
 # controllo 0x0A dentro i delimitatori: il secondo è CONTROL, il primo è una newline.
 #
-# `tools/json_oracle.py hex corpus.spec > corpus.hex` produce il file che entrambi i
+# (il vecchio `tools/json_oracle.py hex corpus.spec`, rimosso, produceva corpus.hex che entrambi i
 # programmi leggono. Le righe qui sotto sono raggruppate per che cosa dimostrano; il
 # commento `#->` dice cosa CI ASPETTIAMO noi da quell'input, non cosa fa Python.
 #

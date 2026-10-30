@@ -172,11 +172,11 @@ Esito dello sweep (2026-09-23): 256/256, 512/512, 256/256, 512/512, 1024/1024, 2
 2048/2048 (tipo 29), 16/16 ×4 — **nessun bit divergente**.
 
 **Lezione 1 — lo sweep serve, e l'ho misurato.** Scambiando due voci adiacenti dell'header generato
-(`iq2s_grid[504]` ↔ `[505]`) il gate `gen_codebooks.py --check` dice *"tutte le copie concordano"*
+(`iq2s_grid[504]` ↔ `[505]`) il vecchio gate `gen_codebooks.py --check` (rimosso: progetto Python-free) diceva *"tutte le copie concordano"*
 exit 0 — perché confronta le **copie sorgente** e non rilegge mai l'header scritto — e passa anche
 la forma (voci distinte, alfabeto dei byte: sono due valori *legali*, solo al posto sbagliato).
 A rispondere è stato solo `grid_sweep`: `DIVERGENZA C (ggml) su "iq2s_grid"[160]: 11 vs 34.375`,
-uscita 1. È la ragione per cui quello sweep esiste, ed è scritta in `tools/gen_codebooks.py` per
+uscita 1. È la ragione per cui quello sweep esiste, ed era scritta nel generatore `gen_codebooks.py` (rimosso, restano le tabelle e i test di conformita') per
 non far finta che la rete di forma copra più di quanto copra.
 
 **Lezione 2 — il segno si applica negando il PRODOTTO.** La riga C di ggml è

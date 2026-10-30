@@ -90,7 +90,7 @@ che avevamo scritto per entrarci è stata rispettata alla lettera: **nessun camp
 ognuna delle 11 righe di codebook (256, 512, 256, 512, 1024, 2048×2, 16×4) e batte i float contro
 la tabella **compilata dentro** `libggml-base.dylib`: `256/256 … 2048/2048, nessun bit divergente`.
 Lo sweep non è ridondante, e il perché è misurato: scambiando due voci adiacenti dell'header
-generato, `gen_codebooks.py --check` dice «tutte le copie concordano» (confronta le copie
+generato, il vecchio `gen_codebooks.py --check` (rimosso: Python-free) diceva «tutte le copie concordano» (confrontava le copie
 sorgenti, non rilegge il file scritto) e la forma passa lo stesso (due valori legali, scambiati
 di posto); risponde solo lo sweep. Le cinque griglie che mancavano ora ci sono (`src/lane_gguf/
 fmlx_iqgrid_tables.h` + `fmlx_iq1s_tables.h`, generate), mentre `iq1s_grid_gpu` **non si copia**:
@@ -102,7 +102,7 @@ coperto** (istogrammi: `F32 F16 Q8_0 Q2_K Q4_K Q6_K IQ2_XXS I32 BF16`), e il gat
 conferma bit a bit su quei tensori reali.
 
 Le codebook (`src/lane_gguf/fmlx_iq2_tables.h`, `fmlx_iqgrid_tables.h`, `fmlx_iq1s_tables.h`) sono
-**generate**, non trascritte a mano: `python3 tools/gen_codebooks.py --check` confronta voce per
+**generate**, non trascritte a mano (dal generatore `gen_codebooks.py`, poi rimosso perche' il repo e' Python-free; restano le tabelle e lo sweep di conformita'): il generatore confrontava voce per
 voce le copie indipendenti su disco e rifiuta di scrivere se divergono anche di un solo bit. Il
 **grado** di prova non è lo stesso ovunque, e i file generati lo dicono:
 `iq2xxs_grid`/`iq2_ksigns` hanno **due autori distinti** (ds4 + la linea ggml dei duplicati
@@ -429,7 +429,7 @@ accumulava gli esiti del writer così: `bad |= fmlx_jsonw_key(w, "id") | fmlx_js
 Il C garantisce che i due valori vengano prodotti, non **in quale ordine**: un compilatore può
 calcolare `id` prima di emettere la chiave, o un `arr_end` prima del suo `arr_begin`. La forma
 corretta è `if (A || B) return …;` — `||` sequenzia. L'accumulatore `bad` è stato rimosso del tutto
-(tutti i punti migrati con `tools/gmb_seq_unbad.py`, che ha anche la modalità `--wrap` per il limite
+(tutti i punti migrati con uno script una tantum, poi rimosso, che aveva anche la modalità di a capo per il limite
 di 100 colonne), e il gate è un `grep`: `bad |=` deve restituire zero in `src/server/`.
 
 **Zero allocazioni anche qui**, come nel codec: gli adapter scrivono nella memoria del chiamante e
@@ -864,7 +864,7 @@ HF_HUB_CACHE=work/probe-cache ./build/hf_fetch_probe <org>/<repo> [<rev>] [<file
 ```
 
 **Verde che prova qualcosa.** Un'asserzione che non è mai stata vista rossa può essere verde perché
-il codice è giusto, o perché non guarda niente: da fuori sono lo stesso colore. `tools/mut_prove.py`
+il codice è giusto, o perché non guarda niente: da fuori sono lo stesso colore. `tools/mut_prove.c` (`build-release/mut_prove`)
 è il pezzo che chiude il conto — copia il sorgente toccato in `build/probe-<tag>/`, applica UNA
 sostituzione letterale (se combacia zero o due volte si ferma: un mutante ambiguo non è una prova),
 ricompila e linka il `.o` mutato PRIMA dell'archivio, esegue e dice **quali** verifiche sono diventate
@@ -876,7 +876,7 @@ versionate in `tests/mutants/*.json`** (le quattro `unreadable-*`), e si rilanci
 bersaglio va detto, perché lo spec elenca i mutanti ma non il binario da ricompilare:
 
 ```sh
-python3 tools/mut_prove.py --target test_hf_catalog --spec tests/mutants/unreadable-catalog.json --tag unreadable-catalog
+build-release/mut_prove --build build-release --lib fmlx_cli --target test_hf_catalog --spec tests/mutants/unreadable-catalog.json --tag unreadable-catalog
 ```
 
 un `rm -rf build` non deve cancellare la prova che un'asserzione è rossa davvero.
@@ -998,5 +998,5 @@ con ggml, 0 incoerenze, 0 gap colmabili, 3 byte in disaccordo tra testimoni`):
 * **Nessun nome di persona o azienda nei nomi dei file.**
 * Licenze e attribuzioni: vedi `LICENSES.md`. **Un'obbligazione esiste già oggi**: le codebook ggml
   (IQ2, le cinque griglie IQ del lotto C, `kvalues_iq4nl`) sono **dati** MIT copiati con
-  `tools/gen_codebooks.py`, attribuiti nei file generati e in `LICENSES.md`. Le altre (oMLX
+  il generatore `gen_codebooks.py` (poi rimosso), attribuiti nei file generati e in `LICENSES.md`. Le altre (oMLX
   Apache-2.0, mlx/mlx-c, llama.cpp linkato nel prodotto) scattano con la lane MLX.

@@ -6,12 +6,11 @@
 ## Come si riproduce
 
 ```
-python3 tools/json_oracle.py hex  tests/json/corpus.spec tests/json/corpus.hex   # rigenera il corpus
-python3 tools/json_oracle.py diff tests/json/corpus.hex  build/json_diff         # il differenziale
-ctest --test-dir build -R json                                                    # incluso il gate json_oracle
+# (il differenziale con json.loads di CPython e' stato rimosso: tutti i progetti sono Python-free)
+ctest --test-dir build -R json
 ```
 
-`ctest` fissa il verdetto atteso con `PASS_REGULAR_EXPRESSION`: una divergenza dura in più, o un
+Il verdetto del parser sul corpus ostile è fissato dai test C (`test_json`): una divergenza in più, o un
 round-trip che si rompe, **rendono il test rosso**, non "una nota in più". È il motivo per cui il
 contatore è nell'output e non solo in questo file.
 

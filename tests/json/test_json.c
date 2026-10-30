@@ -3,7 +3,7 @@
  *
  * Da dove vengono le aspettative: la maggior parte dei casi di rifiuto è stata prima
  * passata da un oracolo indipendente — `json.loads` di Python 3.14, vedi
- * tools/json_oracle.py + docs/json-contract.md — e per ciascuno si è scritta qui la
+ * tools/json_diff.c (il vecchio oracolo Python tools/json_oracle.py e' stato rimosso) + docs/json-contract.md — e per ciascuno si è scritta qui la
  * decisione PRESA (che non è sempre "come Python": i float troncati e i controllore nudi
  * sono i due punti dove divergiamo deliberatamente). Un reference scritto da me avrebbe
  * nascosto i bug come è già successo per gli hash GGUF (docs/quant-coverage.md §5).

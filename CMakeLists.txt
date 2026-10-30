@@ -185,22 +185,27 @@ add_executable(test_jsonw tests/json/test_jsonw.c)
 target_link_libraries(test_jsonw PRIVATE fmlx_json)
 add_test(NAME jsonw COMMAND test_jsonw)
 
-# Verdetto del parser su un input: è lo strumento con cui il parser è stato confrontato con
-# `json.loads` (tools/json_oracle.py). Da solo NON è un test — stampa e basta.
+# Verdetto del parser su un input (codifica canonica): strumento di diagnosi, da solo NON è un test — stampa e basta.
+# Il confronto differenziale con `json.loads` di CPython (tools/json_oracle.py) è stato rimosso: tutti i progetti sono
+# Python-free. Il corpus ostile resta in tests/json/corpus.spec ed è esercitato in C da test_json.
 add_executable(json_diff tools/json_diff.c)
 target_link_libraries(json_diff PRIVATE fmlx_json)
 
-# Il differenziale gira in ctest SOLO DOVE Python c'è: `find_package`Quiet, e il test si
-# registra solo se l'interprete esiste. La macchina senza Python NON lo vede verde per
-# assenza: semplicemente non c'è, e il numero di test in output lo dice.
-find_package(Python3 COMPONENTS Interpreter QUIET)
-if(Python3_Interpreter_FOUND)
-    add_test(NAME json_oracle
-             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/json_oracle.py diff
-                     ${CMAKE_CURRENT_SOURCE_DIR}/tests/json/corpus.hex $<TARGET_FILE:json_diff>)
-    set_tests_properties(json_oracle PROPERTIES
-        PASS_REGULAR_EXPRESSION "divergenze dure 8, round-trip 0")
-endif()
+# Strumenti di sviluppo in C (ex Python): banco di valutazione, taratura kernel, gate di promozione, mutation check.
+# Non sono parte del prodotto: si compilano con `cmake --build build-release --target fastllm_tools`.
+add_executable(fastllm_eval tools/fastllm_eval.c)
+target_link_libraries(fastllm_eval PRIVATE fmlx_json m)
+add_executable(kernel_tune tools/kernel_tune.c)
+target_link_libraries(kernel_tune PRIVATE ${CMAKE_DL_LIBS})
+add_executable(moe_gate tools/moe_gate.c)
+add_executable(spec_gate tools/spec_gate.c)
+add_executable(mut_prove tools/mut_prove.c)
+target_link_libraries(mut_prove PRIVATE fmlx_json)
+add_custom_target(fastllm_tools DEPENDS fastllm_eval kernel_tune moe_gate spec_gate mut_prove)
+# Il banco di valutazione con il backend finto: gate deterministici (e rileva il non determinismo).
+add_test(NAME eval_mock COMMAND fastllm_eval --backend mock)
+add_test(NAME eval_mock_detects_nondeterminism COMMAND fastllm_eval --backend mock-vary)
+set_tests_properties(eval_mock_detects_nondeterminism PROPERTIES WILL_FAIL TRUE)
 
 # Il codec GGUF è più in su: FastLLM CONSUMA `llmcodec` (LLMEnv) col suo test (`codec`).
 # Le lane che non hanno ancora codice si aggiungono QUI quando esistono, non come target vuoti:

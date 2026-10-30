@@ -1,7 +1,6 @@
 /* json_diff.c — stampa la CODIFICA CANONICA di ogni record di un corpus JSON col NOSTRO
- * parser, per essere confrontata byte per byte con `tools/json_oracle.py` (che usa
- * `json.loads` di Python: un codice che non abbiamo scritto noi). Senza un confronto del
- * genere i test di questa lane direbbero solo che il parser è d'accordo con sé stesso.
+ * parser, per essere confrontata con un riferimento esterno. Il confronto con `json.loads` di Python
+ * (tools/json_oracle.py) è stato rimosso: tutti i progetti sono Python-free; strumento di diagnosi.
  *
  * Grammatica della codifica (doc: docs/json-contract.md):
  *   N                     null
