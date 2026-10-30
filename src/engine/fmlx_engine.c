@@ -458,6 +458,25 @@ static void add_eos_extra(FmlxEngineModel *m) {
     free(txt);
 }
 
+/* Marcatori di FINE TURNO che la chat template emette (es. `<end_of_turn>` di Gemma, `<|end|>` di Phi-3): il modello li genera
+ * a fine risposta ma di solito NON sono in eos_token_id. Se compaiono nel testo della template e sono UN solo token, entrano
+ * in eos_list (in testa: l'ultimo resta quello scelto da read_eos_list). */
+static void add_eos_from_template(FmlxEngineModel *m) {
+    static const char *const marks[] = { "<end_of_turn>", "<|im_end|>", "<|eot_id|>", "<|end|>", "<|endoftext|>" };
+    if (!m->chat_tpl || !m->tok) return;
+    for (size_t k = 0; k < sizeof marks / sizeof marks[0]; k++) {
+        int32_t id = -1;
+        int have = 0;
+        if (!strstr(m->chat_tpl, marks[k])) continue;
+        if (llmtoken_encode(m->tok, marks[k], &id, 1) != 1 || id < 0) continue;
+        for (int i = 0; i < m->n_eos; i++) if (m->eos_list[i] == id) have = 1;
+        if (have || m->n_eos >= FMLX_ENGINE_EOS_MAX) continue;
+        memmove(m->eos_list + 1, m->eos_list, (size_t)m->n_eos * sizeof m->eos_list[0]);
+        m->eos_list[0] = id;
+        m->n_eos++;
+    }
+}
+
 /* Legge `bos_token` (stringa o nodo {content}) da tokenizer_config.json / config.json.
  * Solo la forma stringa viene copiata: la template la rende come testo. */
 static void read_bos(const char *dir, char *out, size_t cap) {
@@ -781,6 +800,7 @@ int fmlx_engine_load(const char *cache_root, const char *name, FmlxEngineModel *
          * restano in `eos_list` e li ferma il consumer token per token. */
         out->eos = out->n_eos > 0 ? out->eos_list[out->n_eos - 1] : -1;
         out->tpl = detect_template(out->dir, &out->chat_tpl, &out->chat_tpl_len);
+        add_eos_from_template(out);
         read_bos(out->dir, out->bos, sizeof out->bos);
     }
 
