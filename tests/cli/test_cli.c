@@ -1031,6 +1031,11 @@ static void case_media_run(void) {
     a.prompt[0] = '\0';
     rewind(err);
     CK(fmlx_media_run_exec(&a, "/nonexistent.gguf", NULL, "audio", out, err) == FMLX_CLI_USAGE, "run audio senza file");
+    {   /* il rilevamento per architettura non tocca cio' che non e' un GGUF esistente */
+        char md[16] = "x", mp[64] = "x";
+        CK(fmlx_media_detect("/nonexistent.gguf", md, sizeof md, mp, sizeof mp) == 0, "detect su un file inesistente");
+        CK(fmlx_media_detect("modello-mlx-dir", md, sizeof md, mp, sizeof mp) == 0, "detect su un nome non GGUF");
+    }
     fclose(out);
     fclose(err);
 }

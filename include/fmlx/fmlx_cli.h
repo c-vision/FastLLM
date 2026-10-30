@@ -161,7 +161,10 @@ FmlxCliStatus fmlx_tensors_exec(const FmlxCliArgs *a, FILE *out, FILE *err);
  * Il testo esce TOKEN-LIVE su `out` (streaming). Engine in LLMEnv/LLMEngine/asr (target `llm_asr`),
  * la STESSA sorgente usata da GMBasic (superficie BASIC `ASR.RECOGNIZE`). */
 FmlxCliStatus fmlx_asr_exec(const FmlxCliArgs *a, FILE *out, FILE *err);
-/* `run <alias> <file>` per i modelli registrati con --modality ocr|vlm|audio (lane vision, llama.cpp/mtmd). */
+/* 1 se `path` e' un GGUF multimodale riconosciuto da general.architecture (parakeet -> audio, paddleocr -> ocr con il
+ * `*-mmproj.gguf` accanto): scrive modality e mmproj. 0 = un normale modello di chat. */
+int fmlx_media_detect(const char *path, char *modality, size_t mcap, char *mmproj, size_t pcap);
+/* `run <alias> <file>` per i modelli ocr|vlm|audio: lane vision (llama.cpp/mtmd) oppure, per parakeet, l'engine ASR di LLMEnv. */
 FmlxCliStatus fmlx_media_run_exec(const FmlxCliArgs *a, const char *model, const char *mmproj, const char *modality,
                                   FILE *out, FILE *err);
 

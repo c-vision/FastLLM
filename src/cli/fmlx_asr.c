@@ -7,6 +7,7 @@
 #include "fmlx/fmlx_paths.h"
 #include "gmb_asr.h"
 #include "gmb_asr_tok.h"
+#include "llm_parakeet.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -54,6 +55,12 @@ FmlxCliStatus fmlx_asr_exec(const FmlxCliArgs *a, FILE *out, FILE *err) {
     if (!a || !a->repo[0] || !a->path[0]) {
         fprintf(err, "fastllm asr <model_dir> <file.wav>: servono il modello e il WAV\n");
         return FMLX_CLI_USAGE;
+    }
+    /* GGUF Parakeet (percorso o alias): stesso comando, engine diverso (llm_parakeet) */
+    if (asr_resolve(a->repo, model, sizeof model) == 0 && !asr_is_dir(model) && llm_parakeet_is_gguf(model)) {
+        FmlxCliArgs b = *a;
+        snprintf(b.prompt, sizeof b.prompt, "%s", a->path);
+        return fmlx_media_run_exec(&b, model, "", "audio", out, err);
     }
     if (asr_resolve(a->repo, model, sizeof model) != 0 || !asr_is_dir(model)) {
         fprintf(err, "fastllm asr: modello '%s' non trovato (percorso/registro/`paths`)\n", a->repo);

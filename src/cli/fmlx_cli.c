@@ -222,9 +222,11 @@ static void usage_verb(FILE *out, const char *v) {
             "  fastllm tensors modello.gguf --diffable\n");
     else if (!strcmp(v, "asr"))
         fprintf(out,
-            "fastllm asr <model_dir> <file.wav>\n"
+            "fastllm asr <model_dir|model.gguf> <file.wav>\n"
             "  <model_dir>            dir di un modello Qwen3-ASR (0.6B/1.7B, safetensors HF)\n"
-            "  <file.wav>             audio da trascrivere (PCM 16-bit, mono/stereo, qualsiasi rate)\n"
+            "  <model.gguf>           GGUF NVIDIA Parakeet-TDT (multilingue, 25 lingue europee)\n"
+            "  <file.wav>             audio da trascrivere (WAV PCM 16-bit, mono/stereo, qualsiasi rate; per Parakeet anche\n"
+            "                         mp3/m4a/aiff su macOS)\n"
             "  -h, --help             questo testo\n"
             "\n"
             "Speech-to-text (engine ASR nativo, inference). Il testo esce TOKEN-LIVE su stdout\n"
@@ -878,7 +880,13 @@ FmlxCliStatus fmlx_cli_exec_with(const FmlxCliArgs *a_in, const FmlxHfTransport 
         char rp[FMLX_HF_PATH_MAX], mmproj[FMLX_HF_PATH_MAX] = "", modality[16] = "";
         if (fmlx_registry_resolve(a->repo, rp, sizeof rp, mmproj, sizeof mmproj, modality, sizeof modality))
             snprintf(ac.repo, sizeof ac.repo, "%s", rp);
-        /* Modello registrato come ocr|vlm|audio: non e' una chat MLX, passa dalla lane vision (il secondo argomento e' il file). */
+        /* Un GGUF passato per percorso: l'architettura dice se e' un modello vocale/OCR (parakeet, paddleocr). */
+        if (!modality[0] || !strcmp(modality, "chat")) {
+            modality[0] = '\0';
+            if (!strcmp(a->verb, "run") && !a->want_help)
+                fmlx_media_detect(ac.repo, modality, sizeof modality, mmproj, sizeof mmproj);
+        }
+        /* Modello ocr|vlm|audio: non e' una chat MLX, passa dalla lane media (il secondo argomento e' il file). */
         if (!strcmp(a->verb, "run") && !a->want_help && modality[0] && strcmp(modality, "chat"))
             return fmlx_media_run_exec(a, ac.repo, mmproj, modality, out, err);
     }
