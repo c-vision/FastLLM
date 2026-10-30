@@ -1040,6 +1040,36 @@ static void case_media_run(void) {
     fclose(err);
 }
 
+/* installazione: i verbi `version`, `upgrade`, `doctor --install` esistono, prendono SOLO le loro bandiere, e il controllo di
+ * compatibilita' col motore non blocca una build di sviluppo (nessun LLMENV_VERSION accanto alla libreria). */
+static void case_installazione(void) {
+    FmlxCliArgs a;
+    char msg[256], *b = NULL;
+    size_t n = 0;
+    FILE *out = open_memstream(&b, &n);
+
+    CK_PARSE(FMLX_CLI_OK, "fastllm", "version");
+    CK_ST(fmlx_cli_exec_with(&a, &DEAD, out, out), FMLX_CLI_OK);
+    fflush(out);
+    CK(b && strstr(b, "fastllm ") == b, "version non comincia con il nome e la versione: %s", b ? b : "(vuoto)");
+    CK(b && strstr(b, "engine LLMEnv") != NULL, "version non nomina il motore: %s", b ? b : "(vuoto)");
+
+    CK_PARSE(FMLX_CLI_OK, "fastllm", "doctor", "--install");
+    CK(a.check_install == 1, "doctor --install non imposta il campo");
+    CK_PARSE(FMLX_CLI_OK, "fastllm", "upgrade", "--check");
+    CK(a.upgrade_check == 1, "upgrade --check non imposta il campo");
+    /* una bandiera che il verbo non legge e' un errore, non un'opzione ignorata */
+    CK_PARSE(FMLX_CLI_USAGE, "fastllm", "models", "--install");
+    CK_PARSE(FMLX_CLI_USAGE, "fastllm", "run", "m", "--check");
+    CK_PARSE(FMLX_CLI_USAGE, "fastllm", "version", "--check");
+    CK_PARSE(FMLX_CLI_USAGE, "fastllm", "doctor", "--install=1");   /* e' un fatto, non un dato */
+
+    /* il controllo di compatibilita' lascia passare una build di sviluppo */
+    CK(fmlx_install_gate(out) == 1, "il gate blocca una build di sviluppo");
+    fclose(out);
+    free(b);
+}
+
 int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
     /* L'ambiente di chi esegue non decide i risultati. */
@@ -1093,6 +1123,7 @@ int main(int argc, char **argv) {
     case_canali();
     case_aiuto();
     case_media_run();
+    case_installazione();
 
     printf("test_cli: %d verifiche, %d fallimenti\n", checks, failures);
     return failures ? 1 : 0;

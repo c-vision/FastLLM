@@ -7,27 +7,63 @@ It runs **MLX** models (Hugging Face safetensors folders, quantized to 2, 3, 4, 
 models. It also downloads models from Hugging Face with resume, checks the files on disk, and creates the architecture descriptors
 the engine needs.
 
-The inference engine is not in this repository. It is [LLMEnv](https://github.com/c-vision/LLMEnv) (`LLMEngine`, `LLMCodec`, `LLMToken`, `LLMJinja`), built
-together with FastLLM from the sibling directory.
+The inference engine is not in this repository. It is [LLMEnv](https://github.com/c-vision/LLMEnv) (`LLMEngine`, `LLMCodec`, `LLMToken`, `LLMJinja`), a separate
+package that FastLLM finds next to itself. Every install method below installs it for you if it is not on the machine yet, and
+leaves it alone if it is.
+
+## Install
+
+Requires a Mac with Apple Silicon and macOS 14 or later. On macOS 26.2 and later you get the engine build with the NAX kernels
+(the tensor units of the M5), which speeds up the prefill; on older systems you get the compatible build. The installers pick the right one.
+
+**Homebrew**
+
+```sh
+brew tap c-vision/fastllm
+brew trust c-vision/fastllm      # Homebrew 7 does not load a third-party tap until you trust it
+brew install fastllm
+```
+
+This also installs the engine (the `llmenv` formula of the same tap). Upgrade with `brew upgrade fastllm`.
+
+**Installer script** (no sudo, installs into `~/.local`)
+
+```sh
+curl -fsSL https://github.com/c-vision/FastLLM/releases/latest/download/install.sh | bash
+```
+
+Run it again whenever you like: it downloads nothing that is already in place. Useful options: `--prefix DIR`, `--version X.Y.Z`,
+`--pull-starter` (also downloads a first model that fits your RAM), `--uninstall`. Add `~/.local/bin` to your `PATH` if the script tells you to.
+To check the script before running it, download it from the [releases page](https://github.com/c-vision/FastLLM/releases) and read it; its
+SHA-256 is in `SHA256SUMS-<version>`.
+
+**Installer package** — download `fastllm-<version>-macos-arm64.pkg` from the [releases page](https://github.com/c-vision/FastLLM/releases) and the
+`llmenv-<version>-macos14-arm64.pkg` (or `macos26` on macOS 26.2+) from the [LLMEnv releases](https://github.com/c-vision/LLMEnv/releases). Both install
+into `/usr/local`. The packages are not signed with an Apple Developer ID, so macOS asks for confirmation when you open them (right-click, Open).
+
+**From source** — see [Building and testing](#building-and-testing).
+
+Check the installation at any time, and update:
+
+```sh
+fastllm doctor --install     # binary, engine version and variant, Metal kernels, model descriptors
+fastllm upgrade              # update fastllm and the engine (fastllm upgrade --check only looks)
+fastllm version
+```
 
 ## Quick start
 
 ```sh
-# Build (macOS on Apple Silicon, LLMEnv checked out next to this directory)
-cmake -S . -B build-release -DCMAKE_BUILD_TYPE=Release
-cmake --build build-release
-
-# Download a model and talk to it
-build-release/fastllm pull mlx-community/Qwen3-8B-4bit
-build-release/fastllm run Qwen3-8B-4bit "Hello"
-build-release/fastllm chat Qwen3-8B-4bit
+fastllm pull mlx-community/Qwen3-8B-4bit     # download a model
+fastllm run Qwen3-8B-4bit "Hello"            # one answer
+fastllm chat Qwen3-8B-4bit                   # conversation
 
 # Use a model you already have
-build-release/fastllm add my-model ~/models/some-model.gguf
-build-release/fastllm run my-model "Hello"
+fastllm add my-model ~/models/some-model.gguf
+fastllm run my-model "Hello"
 
 # Serve an OpenAI/Anthropic compatible API
-build-release/fastllm serve --port 8080
+fastllm serve --port 8080
 ```
 
 A model can be named by its registry name, by its number from `fastllm list`, by a path, or by a Hugging Face id.
@@ -176,11 +212,17 @@ a difference at the very start is a bug.
 
 ## Building and testing
 
+From source you need [LLMEnv](https://github.com/c-vision/LLMEnv) checked out next to this directory (`../LLMEnv`): the build compiles the engine together with FastLLM.
+A development build runs from the build folder, where the engine libraries sit next to the binary.
+
 ```sh
 cmake -S . -B build-release -DCMAKE_BUILD_TYPE=Release
 cmake --build build-release
 ctest --test-dir build-release --output-on-failure
 ```
+
+The default deployment target is macOS 26.2, which builds the NAX kernels. For a binary that also runs on older systems, configure with
+`-DCMAKE_OSX_DEPLOYMENT_TARGET=14.0`. `tools/make_macos_package.sh` makes the release packages from such a build, and `tools/install.sh` is the installer script.
 
 The test suites do not use the network. Useful tools in `tools/`:
 

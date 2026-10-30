@@ -302,13 +302,19 @@ add_test(NAME routing COMMAND test_routing)
 # QUINTO: `models` legge i NOMI, `doctor` verifica gli hash sui byte, e la differenza è un ordine di
 # grandezza di costo — due verbi nello stesso file avrebbero indotto l'uno a pagare il lavoro
 # dell'altro.
+# Versione di FastLLM e versione di LLMEnv con cui si costruisce (stessa minor richiesta a runtime, vedi fmlx_install.c).
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" "${CMAKE_CURRENT_SOURCE_DIR}/../LLMEnv/VERSION")
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" FASTLLM_VERSION_STR LIMIT_COUNT 1)
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/../LLMEnv/VERSION" FASTLLM_LLMENV_VERSION_STR LIMIT_COUNT 1)
 add_library(fmlx_cli STATIC src/cli/fmlx_pull.c src/cli/fmlx_models.c src/cli/fmlx_cli.c
                             src/cli/fmlx_pull_progress.c src/cli/fmlx_serve.c src/cli/fmlx_doctor.c
                             src/cli/fmlx_gen.c src/cli/fmlx_run.c src/cli/fmlx_chat.c
                             src/cli/fmlx_ps.c src/cli/fmlx_banner.c src/cli/fmlx_registry.c
                             src/cli/fmlx_paths_cmd.c src/cli/fmlx_search_cmd.c
                             src/cli/fmlx_test_cmd.c src/cli/fmlx_compare.c src/cli/fmlx_tensors.c
-                            src/cli/fmlx_asr.c src/cli/fmlx_media.c src/cli/fmlx_gmbarch.c)
+                            src/cli/fmlx_asr.c src/cli/fmlx_media.c src/cli/fmlx_gmbarch.c src/cli/fmlx_install.c)
+set_source_files_properties(src/cli/fmlx_install.c PROPERTIES COMPILE_DEFINITIONS
+    "FASTLLM_VERSION=\"${FASTLLM_VERSION_STR}\";FASTLLM_LLMENV_VERSION=\"${FASTLLM_LLMENV_VERSION_STR}\"")
 target_include_directories(fmlx_cli PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
                                       ${CMAKE_CURRENT_SOURCE_DIR}/../LLMEnv/LLMEngine/mlx
                                       ${CMAKE_CURRENT_SOURCE_DIR}/../LLMEnv/LLMEngine/Options

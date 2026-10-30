@@ -67,6 +67,9 @@ void fmlx_cli_usage(FILE *out) {
             "  serve                  server OpenAI/Anthropic (/v1/models, /v1/chat/completions, /v1/messages)\n"
             "  ps                     dice se un `serve` e' in ascolto e i modelli residenti\n"
             "  doctor [<filtro>]      hasha i blob del cache HF e dice se SONO quelli promessi\n"
+            "  doctor --install       controlla l'installazione: binario, motore LLMEnv, metallib, descrittori\n"
+            "  version                versione di fastllm e del motore LLMEnv caricato\n"
+            "  upgrade [--check]      aggiorna fastllm e il motore (--check: dice solo se c'e' una versione nuova)\n"
             "  options                elenca TUTTE le opzioni del motore (registro) con un esempio\n"
             "  help [<comando>]       questo testo, o gli esempi di UN comando\n"
             "\n"
@@ -225,6 +228,14 @@ static void usage_verb(FILE *out, const char *v) {
             "esempi:\n"
             "  fastllm tensors modello.gguf\n"
             "  fastllm tensors modello.gguf --diffable\n");
+    else if (!strcmp(v, "version"))
+        fprintf(out, "fastllm version\n  stampa la versione di fastllm e quella del motore LLMEnv caricato (con la sua cartella).\n");
+    else if (!strcmp(v, "upgrade"))
+        fprintf(out,
+            "fastllm upgrade [--check]\n"
+            "  aggiorna fastllm e il motore LLMEnv all'ultima release (stesso script di install.sh, idempotente).\n"
+            "  --check                dice solo la versione installata e l'ultima, senza installare\n"
+            "  Con Homebrew: brew upgrade fastllm\n");
     else if (!strcmp(v, "gmbarch"))
         fprintf(out,
             "fastllm gmbarch <url|org/nome|cartella>\n"
@@ -367,6 +378,8 @@ static void usage_verb(FILE *out, const char *v) {
     else if (!strcmp(v, "doctor"))
         fprintf(out,
             "fastllm doctor [<filtro>] [opzioni]\n"
+            "fastllm doctor --install: controlla l'installazione (binario, motore LLMEnv e sua versione, mlx.metallib,\n"
+            "  descrittori ABI, copie duplicate di LLMEnv) invece del cache. Uscita 1 se trova un problema.\n"
             "  <filtro>               org/nome, nome, o org/*; nessuno = tutto il cache\n"
             "  --cache <dir>          radice del cache\n"
             "  --quiet                SOLO le righe di problema (uscita 0 = niente corruzione)\n"
@@ -409,7 +422,7 @@ static int is_verb(const char *v) {
     static const char *const known[] = {"pull", "run", "chat",  "serve", "models",
                                         "list", "ls",  "ps",    "cp",    "rm",    "doctor",
                                         "add",  "show", "help",  "options", "paths", "search", "test",
-                                        "compare", "tensors", "asr", "gmbarch"};
+                                        "compare", "tensors", "asr", "gmbarch", "version", "upgrade"};
     size_t i;
     for (i = 0; i < sizeof known / sizeof known[0]; i++)
         if (!strcmp(v, known[i])) return 1;
@@ -457,7 +470,7 @@ enum {
     F_MMPROJ, F_MODALITY, F_PURGE,
     F_OPT,
     F_WALK, F_MAXDEPTH, F_ROOTS, F_TYPE, F_PARALLEL, F_BATCH,
-    F_GLOB, F_DIFFABLE,
+    F_GLOB, F_DIFFABLE, F_INSTALL, F_CHECK,
     F_N
 };
 #define F_PULL_ONLY                                                                                            \
@@ -482,14 +495,14 @@ enum {
 #define F_BOOLEANI                                                                                             \
     ((1ull << F_QUIET) | (1ull << F_OFFLINE) | (1ull << F_REPAIR) | (1ull << F_ONCE) | (1ull << F_JSON) |                \
      (1ull << F_THINK) | (1ull << F_OFFLOAD) | (1ull << F_PURGE) | (1ull << F_WALK) | (1ull << F_ROOTS) |      \
-     (1ull << F_BATCH) | (1ull << F_DIFFABLE))
+     (1ull << F_BATCH) | (1ull << F_DIFFABLE) | (1ull << F_INSTALL) | (1ull << F_CHECK))
 
 static const char *const FLN[F_N] = {
     "--quiet",    "--cache",        "--revision", "--endpoint", "--max-bytes", "--stall-timeout",
     "--stall-retries", "--dest",     "--offline",  "--repair",   "--file",      "--host",      "--port",
     "--max-body", "--once",         "--vision-model", "--vision-mmproj", "--json", "--max-tokens", "--system", "--think",
     "--offload-experts", "--mmproj", "--modality", "--purge", "--opt", "--walk", "--max-depth", "--roots", "--type",
-    "--parallel", "--batch", "--glob", "--diffable"};
+    "--parallel", "--batch", "--glob", "--diffable", "--install", "--check"};
 
 /* Il bit della bandiera `n`, 0 se la bandiera non esiste. */
 static unsigned long long flag_bit(const char *n) {
@@ -619,6 +632,8 @@ FmlxCliStatus fmlx_cli_parse(int argc, char **argv, FmlxCliArgs *out, char *msg,
         if (!strcmp(name, "--once")) { out->serve.max_conns = 1; continue; }
         if (!strcmp(name, "--json")) { out->json = 1; continue; }
         if (!strcmp(name, "--diffable")) { out->diffable = 1; continue; }
+        if (!strcmp(name, "--install")) { out->check_install = 1; continue; }
+        if (!strcmp(name, "--check")) { out->upgrade_check = 1; continue; }
         if (!strcmp(name, "--think")) { out->show_think = 1; continue; }
         if (!strcmp(name, "--offload-experts")) { out->offload_experts = 1; continue; }
         if (!strcmp(name, "--purge")) { out->purge = 1; continue; }
@@ -774,7 +789,9 @@ FmlxCliStatus fmlx_cli_parse(int argc, char **argv, FmlxCliArgs *out, char *msg,
         else if (!strcmp(out->verb, "serve")) allowed |= F_SERVE_ONLY;
         else if (!strcmp(out->verb, "models") || !strcmp(out->verb, "list") || !strcmp(out->verb, "ls"))
             allowed |= F_MODELS_ONLY;
-        else if (!strcmp(out->verb, "doctor")) allowed |= 0; /* solo le condivise */
+        else if (!strcmp(out->verb, "doctor")) allowed |= (1ull << F_INSTALL);
+        else if (!strcmp(out->verb, "upgrade")) allowed |= (1ull << F_CHECK);
+        else if (!strcmp(out->verb, "version")) allowed |= 0; /* solo le condivise */
         else if (!strcmp(out->verb, "run") || !strcmp(out->verb, "chat")) allowed |= F_RUNCHAT_ONLY;
         else if (!strcmp(out->verb, "ps")) allowed |= F_PS_ONLY;
         else if (!strcmp(out->verb, "add")) allowed |= F_ADD_ONLY;
@@ -932,6 +949,10 @@ FmlxCliStatus fmlx_cli_exec_with(const FmlxCliArgs *a_in, const FmlxHfTransport 
         else fmlx_cli_usage(out ? out : stdout);
         return FMLX_CLI_OK;
     }
+    /* Il motore LLMEnv installato deve essere della stessa minor con cui questo binario e' stato costruito. */
+    if ((!strcmp(a->verb, "run") || !strcmp(a->verb, "chat") || !strcmp(a->verb, "serve") || !strcmp(a->verb, "asr")) &&
+        !fmlx_install_gate(err ? err : stderr))
+        return FMLX_CLI_FAILED;
     /* Registro locale (stile Ollama). */
     if (!strcmp(a->verb, "add")) return fmlx_registry_add_exec(a, out, err);
     if (!strcmp(a->verb, "rm")) return fmlx_registry_rm_exec(a, out, err);
@@ -947,6 +968,9 @@ FmlxCliStatus fmlx_cli_exec_with(const FmlxCliArgs *a_in, const FmlxHfTransport 
     if (!strcmp(a->verb, "tensors")) return fmlx_tensors_exec(a, out, err);
     if (!strcmp(a->verb, "asr")) return fmlx_asr_exec(a, out, err);
     if (!strcmp(a->verb, "gmbarch")) return fmlx_gmbarch_exec(a, out, err);
+    if (!strcmp(a->verb, "version")) return fmlx_version_exec(a, out, err);
+    if (!strcmp(a->verb, "upgrade")) return fmlx_upgrade_exec(a, out, err);
+    if (!strcmp(a->verb, "doctor") && a->check_install) return fmlx_doctor_install_exec(a, out, err);
     if (!strcmp(a->verb, "doctor"))
         /* Nemmeno qui il transport viene guardato: l'audit hashà ciò che è già su disco, e una
          * rete finta non aggiungerebbe nessuna prova — semmai ne toglierebbe, perché il verdetto

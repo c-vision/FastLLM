@@ -106,6 +106,8 @@ typedef struct {
     int quiet;
     int json;      /* `models --json`: la stessa tabella in forma macchina-leggibile */
     int diffable;  /* `tensors --diffable`: omette offset/byte -> output deterministico (golden/diff) */
+    int check_install;   /* `doctor --install`: controlla l'installazione (binario, motore LLMEnv, metallib, ABI) invece del cache */
+    int upgrade_check;   /* `upgrade --check`: dice se c'e' una versione piu' nuova, non installa */
     int want_help; /* -h/--help: NON è un errore, e l'uscita è 0 */
     int search_walk;      /* `search --walk`: forza il walk del filesystem (niente Spotlight) */
     int search_max_depth; /* `search --max-depth N`: tetto di profondita' (0 = nessun tetto) */
@@ -207,6 +209,13 @@ int fmlx_registry_resolve(const char *spec, char *out_path, size_t cap, char *ou
  * Con `a->quiet` restano SOLO le righe di PROBLEMA su stdout, più il messaggio d'errore su stderr:
  * il silenzio in `--quiet` deve voler dire una cosa sola, «non c'è niente di rotto». */
 FmlxCliStatus fmlx_doctor_exec(const FmlxCliArgs *a, FILE *out, FILE *err);
+/* `doctor --install`: binario, motore LLMEnv (versione, variante, metallib, descrittori ABI), copie duplicate. */
+FmlxCliStatus fmlx_doctor_install_exec(const FmlxCliArgs *a, FILE *out, FILE *err);
+/* `version`: versione di fastllm e del motore caricato. `upgrade [--check]`: aggiorna fastllm e il motore. */
+FmlxCliStatus fmlx_version_exec(const FmlxCliArgs *a, FILE *out, FILE *err);
+FmlxCliStatus fmlx_upgrade_exec(const FmlxCliArgs *a, FILE *out, FILE *err);
+/* 1 = il motore LLMEnv caricato e' compatibile con questo binario (o e' una build di sviluppo); 0 = no (messaggio su err). */
+int fmlx_install_gate(FILE *err);
 
 /* ---- serve ---- */
 
