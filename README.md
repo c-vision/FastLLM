@@ -142,8 +142,12 @@ Notes:
 
 - **Speculative decoding.** Qwen3.8-27B uses the `Qwen3.8-27B-DFlash2` draft model automatically when it sits next to the model.
   The output text is identical; decode went from 16.5 to 37.8 tok/s on a short coding prompt.
-- **Recurrent models.** Models with recurrent state (Qwen3.5, 3.6 and 3.8, Qwen3-Next, LFM2, Kimi-Linear, Mamba, Jamba) do not reuse
-  saved prompt prefixes, so the prefill is redone for every request. The text is still correct.
+- **Recurrent models and conversations.** Models with recurrent state (Qwen3.5, 3.6 and 3.8, Qwen3-Next, LFM2, Kimi-Linear, Mamba, Jamba)
+  keep a snapshot of that state at the end of the conversation so far (just before the assistant header), so the next turn of a growing
+  conversation prefills only the new tokens. Measured with a 4000-5000 token conversation: Qwen3.6-27B 7.7 s to 0.6 s for the second turn,
+  Qwen3-Coder-Next 6.4 s to 0.4 s, Kimi-Linear 2.8 s to 0.25 s, with identical text. Tested on those three plus Qwen3.6-35B-A3B; LFM2, Mamba, Jamba, Falcon-H1 and the other recurrent families use the same code but have not been run. The snapshots live in memory only (at most 4, option
+  `prefix_recurrent_max`) and are lost when the server stops. `tools/prefix_recurrent_check.sh` runs this check on any model. Qwen3.8-27B
+  with its DFlash2 draft model does not reuse prefixes yet.
 - **Short prompts.** Phi-3 decodes at 111 tok/s and StableLM-2 at 235 tok/s on a short prompt; the table shows the long-prompt speed.
   The Phi-3 prefill prompt had 4187 tokens, Mixtral's had 1752. gemma-3-270m was measured on a short prompt.
 

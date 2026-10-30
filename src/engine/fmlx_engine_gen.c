@@ -441,7 +441,7 @@ static llmjinja_val *jfn_strftime_now(int n, llmjinja_val **args) {
 /* Render con il template reale del modello. Ritorna 0/-1 (con `err`). Su -1 il chiamante può
  * ripiegare sul template di famiglia: un costrutto non supportato non deve far fallire la chat. */
 static int render_jinja(const FmlxEngineModel *m, const FmlxApiChat *c, FmlxSb *b, char *err,
-                        size_t errcap) {
+                        size_t errcap, int gen_prompt) {
     char errbuf[256] = "";
     char *sysmem = malloc(1u << 20);
     FmlxSlice sys = {NULL, 0};
@@ -470,7 +470,7 @@ static int render_jinja(const FmlxEngineModel *m, const FmlxApiChat *c, FmlxSb *
     }
     vars = llmjinja_obj();
     llmjinja_obj_set(vars, "messages", jv_messages(c, aug.p, aug.len));
-    llmjinja_obj_set(vars, "add_generation_prompt", llmjinja_bool(1));
+    llmjinja_obj_set(vars, "add_generation_prompt", llmjinja_bool(gen_prompt ? 1 : 0));
     /* THINKING: di default `false` (disattivato) — i template Qwen pre-riempiono <think></think>.
      * `--think` lo riporta a true. I template che non usano la variabile la ignorano. */
     llmjinja_obj_set(vars, "enable_thinking", llmjinja_bool(fmlx_engine_think_enabled() ? 1 : 0));
@@ -513,7 +513,7 @@ static int render_chat_impl(const FmlxEngineModel *m, const FmlxApiChat *c, Fmlx
      * Jinja non supportato) non è fatale: si ripiega sul template di famiglia, che è meglio di
      * un 500 e viene dichiarato nel log del server. */
     if (m->chat_tpl) {
-        if (render_jinja(m, c, b, err, errcap) == 0) return 0;
+        if (render_jinja(m, c, b, err, errcap, 1) == 0) return 0;
         if (err && errcap) err[0] = '\0';
     }
     sysmem = malloc(1u << 20);
@@ -1225,6 +1225,35 @@ static uint64_t fnv1a_ids(const int32_t *ids, int n) {
     return h;
 }
 
+/* Confine STABILE del prompt, per i modelli il cui stato di prefisso vale solo a lunghezza esatta (stato ricorrente: GDN/KDA/SSM).
+ * Il prompt finisce con l'intestazione di generazione ("<|im_start|>assistant\n<think>..."), che nel turno successivo viene sostituita
+ * dalla risposta vera: salvare lo stato alla fine del prompt non combacerebbe mai. Il confine e' il prefisso comune fra il prompt e lo
+ * stesso prompt reso SENZA intestazione di generazione: li' comincia il turno successivo. 0 = non determinabile (nessun template Jinja,
+ * render fallito): il chiamante ripiega sul comportamento storico. */
+static int stable_prefix_len(const FmlxEngineModel *m, const FmlxApiChat *c, const int32_t *ids, int n_prompt) {
+    FmlxSb b = {0};
+    char err[160] = "";
+    int32_t *t;
+    int n = 0, i, lim, rc;
+
+    if (!m || !c || !m->chat_tpl || !ids || n_prompt <= 0) return 0;
+    t_guard = m->tok;
+    rc = render_jinja(m, c, &b, err, sizeof err, 0);
+    t_guard = NULL;
+    if (rc != 0) {
+        fmlx_sb_free(&b);
+        return 0;
+    }
+    t = tokenize_chat(m->tok, b.p ? b.p : "", &n, err, sizeof err);
+    fmlx_sb_free(&b);
+    if (!t) return 0;
+    lim = n < n_prompt ? n : n_prompt;
+    for (i = 0; i < lim && t[i] == ids[i]; i++) {
+    }
+    free(t);
+    return i;
+}
+
 static FmlxEngineGen *start(const FmlxEngineModel *m, const int32_t *ids, int n_prompt,
                             int max_tokens, const LlmEngineLlmSampling *sp, const FmlxApiChat *c,
                             int want_logprobs, int want_top_logprobs, int think_open, char *err,
@@ -1233,6 +1262,7 @@ static FmlxEngineGen *start(const FmlxEngineModel *m, const int32_t *ids, int n_
     FmlxEngineGen *g;
     int can_prefix;
     int reused = 0;
+    int exact_kv = 0, stable = 0, split = 0;
     int can_lp;
     int can_top;
 
@@ -1284,7 +1314,30 @@ static FmlxEngineGen *start(const FmlxEngineModel *m, const int32_t *ids, int n_
      * non c'è match utile fa l'append normale. Il match non combacia mai per costruzione della
      * ricerca (token-per-token); -1 è un errore vero e abortisce, come nel server C di GMBasic. */
     can_prefix = (m->eng->caps & LLMMODELIO_CAP_PREFIX) && m->eng->append_ids_prefix;
-    if (can_prefix) {
+    /* Modelli con stato ricorrente: il prefisso si salva al confine stabile del prompt (vedi stable_prefix_len), non alla fine. */
+    if (can_prefix && m->eng == llmengine_llm_engine_mlx() &&
+        llm_ai_mlx_model_prefix_exact((llm_ai_mlx_model_handle)m->model)) {
+        const int min_save = opt_int_at_least("prefix_min_save_len", FMLX_PREFIX_MIN_SAVE_LEN, 1);
+        exact_kv = 1;
+        stable = stable_prefix_len(m, c, ids, n_prompt);
+        if (stable >= min_save && stable < n_prompt && m->eng->save_prefix && m->eng->append_ids) split = stable;
+    }
+    if (can_prefix && split > 0) {
+        char key[48];
+        int rc = m->eng->append_ids_prefix(m->model, s, ids, split,
+                                           opt_int_at_least("prefix_min_match", FMLX_PREFIX_MIN_MATCH, 1));
+        if (rc >= 0) {
+            snprintf(key, sizeof key, "fmlx-%016llx", (unsigned long long)fnv1a_ids(ids, split));
+            (void)m->eng->save_prefix(m->model, key, s);
+            if (m->eng->append_ids(s, ids + split, n_prompt - split) != 0) rc = -1;
+        }
+        if (rc < 0) {
+            m->eng->destroy_session(s);
+            snprintf(err, errcap, "the engine failed to ingest the prompt");
+            return NULL;
+        }
+        reused = rc > 0;
+    } else if (can_prefix) {
         /* GRAMMATICA: la decodifica a maschera parte da `pending_h`, che un riuso di prefisso con coda vuota (prompt identico
          * a uno salvato) NON ripristina. Si ingerisce quindi il prompt meno l'ultimo token via prefisso e l'ultimo con un
          * append, cosi' pending_h e' sempre calcolato. */
@@ -1311,15 +1364,15 @@ static FmlxEngineGen *start(const FmlxEngineModel *m, const int32_t *ids, int n_
      * cresce); salvando il solo prompt, due richieste con lo stesso system prompt si riusano
      * anche quando la domanda cambia. L'auto-prefix richiede `n_ids >= token_len`, quindi un
      * prefisso salvato più lungo del prompt successivo non verrebbe comunque riusato. */
-    if (can_prefix && m->eng->save_prefix &&
+    if (can_prefix && m->eng->save_prefix && split == 0 &&
         n_prompt >= opt_int_at_least("prefix_min_save_len", FMLX_PREFIX_MIN_SAVE_LEN, 1)) {
         char key[48];
         snprintf(key, sizeof key, "fmlx-%016llx", (unsigned long long)fnv1a_ids(ids, n_prompt));
         (void)m->eng->save_prefix(m->model, key, s);
     }
     if (getenv("FMLX_PREFIX_DEBUG"))
-        fprintf(stderr, "[prefix] %s prompt=%d\n",
-                reused ? "HIT (riuso KV)" : "miss (prefill)", n_prompt);
+        fprintf(stderr, "[prefix] %s prompt=%d%s stable=%d split=%d\n",
+                reused ? "HIT (riuso KV)" : "miss (prefill)", n_prompt, exact_kv ? " (stato ricorrente)" : "", stable, split);
 
     g = calloc(1, sizeof *g);
     if (!g) {
