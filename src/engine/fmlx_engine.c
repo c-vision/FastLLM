@@ -88,17 +88,22 @@ FmlxDs4Pref fmlx_engine_ds4_pref(void) {
     v[0] = '\0';
     if (llm_ai_mlx_opt_get_str("ds4_engine", v, sizeof v) != 0) return FMLX_DS4_AUTO;
     if (strcmp(v, "auto") == 0) return FMLX_DS4_AUTO;
-    if (strcmp(v, "native") == 0 || strcmp(v, "ds4") == 0) return FMLX_DS4_NATIVE;
+    if (strcmp(v, "native") == 0 || strcmp(v, "ds4") == 0) {
+        /* Il motore nativo (ex ds4-slow) e' stato ritirato il 2026-10-30: la preferenza resta
+         * accettata per compatibilita', ma il motore che risponde e' il vendor. */
+        fprintf(stderr, "[ds4] il motore nativo e' stato ritirato: uso il vendor\n");
+        return FMLX_DS4_NATIVE;
+    }
     if (strcmp(v, "vendor") == 0 || strcmp(v, "ds4n") == 0) return FMLX_DS4_VENDOR;
     fprintf(stderr, "[ds4] ds4_engine='%s' non riconosciuto (auto|native|vendor): uso auto\n", v);
     return FMLX_DS4_AUTO;
 }
 
 FmlxEngineChoice fmlx_engine_ds4_choose(const char *arch, FmlxDs4Pref pref) {
+    (void)pref;   /* dalla rimozione del nativo la preferenza non sposta piu' nulla: un solo motore */
     if (arch == NULL || arch[0] == '\0') return FMLX_ENGINE_MLX;   /* non è un GGUF DS4 */
     if (strcmp(arch, "qwen4exp") == 0) return FMLX_ENGINE_DS4N;    /* solo il vendor lo esegue */
-    if (strcmp(arch, "deepseek4") == 0)
-        return pref == FMLX_DS4_VENDOR ? FMLX_ENGINE_DS4N : FMLX_ENGINE_DS4;
+    if (strcmp(arch, "deepseek4") == 0) return FMLX_ENGINE_DS4N;   /* nativo ritirato: vendor */
     if (strcmp(arch, "deepseek41") == 0) return FMLX_ENGINE_DS4N;  /* il nativo legge solo dir */
     if (strcmp(arch, "glm5-next") == 0) return FMLX_ENGINE_DS4N;   /* solo il vendor */
     if (strcmp(arch, "glm-dsa") == 0)

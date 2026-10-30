@@ -341,18 +341,19 @@ Variabili d'ambiente (solo **servizio**, mai parametri del motore):
 Uscite: `0` successo · `1` uso errato/errore di lane (il codice preciso è nel messaggio) ·
 `2` verbo non ancora cablato (dice quale pezzo manca).
 
-**Scelta del motore DS4.** Lo stesso GGUF DS4 può girare su due motori: il **nativo** (ex ds4-slow,
-`deepseek4`) o il **vendor** (tutte le famiglie). Si sceglie dal registro:
+**Scelta del motore DS4.** Dal 2026-10-30 c'è **un solo** motore DS4: il **vendor**
+(`LLMEngine/ds4`), che copre tutte le famiglie. Il motore nativo (ex ds4-slow) è **ritirato** —
+era più lento e usava il doppio della RAM sullo stesso GGUF. L'opzione resta per compatibilità:
 
 ```sh
-fastllm --opt ds4_engine=auto   run modello.gguf   # default: nativo per deepseek4, vendor per le altre
-fastllm --opt ds4_engine=native run modello.gguf   # forza il nativo
-fastllm --opt ds4_engine=vendor run modello.gguf   # forza il vendor
+fastllm --opt ds4_engine=auto   run modello.gguf   # default: vendor
+fastllm --opt ds4_engine=vendor run modello.gguf   # idem
+fastllm --opt ds4_engine=native run modello.gguf   # accettato, avvisa che il nativo è ritirato
 ```
 
-`auto` instrada `deepseek41` e `glm5-next` sul vendor (llama.cpp non li conosce), `glm-dsa` su
-llama.cpp, `qwen4exp` sul vendor. È così che si misura quale dei due è più veloce sullo stesso file.
-Il valore è nel registro (`fastllm options`), non in una variabile d'ambiente.
+`auto` instrada `deepseek4`, `deepseek41`, `glm5-next` e `qwen4exp` sul vendor, `glm-dsa` su
+llama.cpp (il vendor si può forzare con `vendor`). Il valore è nel registro
+(`fastllm options`), non in una variabile d'ambiente.
 
 **MTP/DSpark del vendor.** Opzioni del registro, lette all'apertura del motore:
 

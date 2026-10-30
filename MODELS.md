@@ -45,17 +45,17 @@ sostituisce se non lo sono.
 
 | architettura | motore in `auto` | esito |
 |---|---|---|
-| `deepseek4` | ds4 **nativo** (`LLMEngine/mlx/ds4`) | funziona; con `--opt ds4_engine=vendor` va sul vendor (per misurare) |
-| `qwen4exp` | ds4 **vendorizzato** (`ds4n`) | funziona |
+| `deepseek4` | ds4 **vendorizzato** (`LLMEngine/ds4`) | funziona (nativo ritirato il 2026-10-30: più lento e doppia RAM) |
+| `qwen4exp` | ds4 **vendorizzato** | funziona |
 | `glm-dsa` (GLM 5.2, GLM 5.3 full) | llama.cpp | funziona; con `--opt ds4_engine=vendor` va sul vendor |
-| `deepseek41` (DeepSeek V4.1) | ds4 **vendorizzato** (`ds4n`) | instradato dal 2026-10-30; prova end-to-end ancora da fare |
-| `glm5-next` (GLM 5.3 **Flash**) | ds4 **vendorizzato** (`ds4n`) | instradato dal 2026-10-30; prova end-to-end ancora da fare |
+| `deepseek41` (DeepSeek V4.1) | ds4 **vendorizzato** | instradato dal 2026-10-30; prova end-to-end ancora da fare |
+| `glm5-next` (GLM 5.3 **Flash**) | ds4 **vendorizzato** | instradato dal 2026-10-30; prova end-to-end ancora da fare |
 | altri GGUF | llama.cpp | dipende dall'architettura |
 | dir MLX (safetensors) | MLX | funziona |
 
-I modelli sotto sono **tutti scaricabili** oggi.  La scelta fra nativo e vendor si forza con
-`fastllm --opt ds4_engine=auto|native|vendor run <modello>`; `auto` è il default e per `deepseek4`
-significa nativo. È così che si misura quale dei due è più veloce sullo stesso file.
+I modelli sotto sono **tutti scaricabili** oggi. `fastllm --opt ds4_engine=auto|native|vendor` resta
+accettato per compatibilità, ma il motore DS4 è **uno solo** (il vendor); `native` avvisa che il
+nativo è ritirato.
 
 ---
 

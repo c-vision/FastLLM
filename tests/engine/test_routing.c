@@ -36,10 +36,11 @@ static const char *choice_name(FmlxEngineChoice c) {
 }
 
 static void case_choose(void) {
-    /* deepseek4: entrambi i motori lo eseguono — è il solo caso in cui la preferenza conta. */
-    CK(fmlx_engine_ds4_choose("deepseek4", FMLX_DS4_AUTO) == FMLX_ENGINE_DS4, "auto/deepseek4 -> %s",
+    /* Il motore nativo e' ritirato: deepseek4 va sul vendor qualunque sia la preferenza.
+     * `native` resta accettato per compatibilita' ma non cambia il motore. */
+    CK(fmlx_engine_ds4_choose("deepseek4", FMLX_DS4_AUTO) == FMLX_ENGINE_DS4N, "auto/deepseek4 -> %s",
        choice_name(fmlx_engine_ds4_choose("deepseek4", FMLX_DS4_AUTO)));
-    CK(fmlx_engine_ds4_choose("deepseek4", FMLX_DS4_NATIVE) == FMLX_ENGINE_DS4, "native/deepseek4");
+    CK(fmlx_engine_ds4_choose("deepseek4", FMLX_DS4_NATIVE) == FMLX_ENGINE_DS4N, "native/deepseek4 -> vendor");
     CK(fmlx_engine_ds4_choose("deepseek4", FMLX_DS4_VENDOR) == FMLX_ENGINE_DS4N, "vendor/deepseek4");
 
     /* Famiglie che il nativo non sa eseguire da GGUF: la preferenza non le sposta. */

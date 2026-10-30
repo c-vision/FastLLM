@@ -159,12 +159,13 @@ void fmlx_engine_batch_disable(void);
 /* ---- scelta del motore per i GGUF DS4 (`--opt ds4_engine=auto|native|vendor`) ----------------
  *
  * Lo STESSO file GGUF può girare su due motori diversi:
- *   - `FMLX_ENGINE_DS4`  = ds4 nativo (ex ds4-slow), solo `deepseek4`;
+ *   - `FMLX_ENGINE_DS4`  = ds4 nativo (ex ds4-slow), **RITIRATO il 2026-10-30** (più lento e con
+ *                          il doppio della RAM); il simbolo resta solo per compatibilità;
  *   - `FMLX_ENGINE_DS4N` = vendor antirez, tutte le famiglie (`deepseek4`, `deepseek41`,
  *                          `glm-dsa`, `glm5-next`, `qwen4exp`).
- * `auto` = il default di oggi (nativo per `deepseek4`, vendor per le famiglie che il nativo non ha);
- * `native`/`vendor` forzano, per poter misurare lo stesso modello sui due motori e decidere.
- * Il valore viene letto dal registro (`ds4_engine`), non da una env.
+ * `auto` = vendor per tutte le famiglie DS4; `native` resta accettato per compatibilità ma il
+ * motore che risponde è il vendor (lo dice su stderr). Il valore viene letto dal registro
+ * (`ds4_engine`), non da una env.
  *
  * La scelta è una funzione PURA di (arch, preferenza): si prova senza caricare un modello. */
 typedef enum { FMLX_DS4_AUTO = 0, FMLX_DS4_NATIVE = 1, FMLX_DS4_VENDOR = 2 } FmlxDs4Pref;
