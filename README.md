@@ -47,6 +47,7 @@ modelli molto grandi, letti dal disco, dipendono dalla velocita' dell'SSD.
 | Qwen3-Coder-30B-A3B-Instruct | MLX 8 bit | 435 | 67 |
 | Qwen3-Coder-Next | MXFP4 | 929 | 77 |
 | gemma-4-31b-it | MLX 4 bit | 523 | 19.3 |
+| gemma-4-26b-a4b-it (MoE, 128 esperti) | MLX 4 bit | 716 | 69.5 |
 | Kimi-Linear-48B-A3B-Instruct | MLX 4 bit | 2198 | 101 |
 | GLM-4.5-Air | MLX 4 bit | 143 | 27.5 |
 | DeepSeek-R1-Distill-Qwen-32B | MLX 8 bit | 501 | 13.3 |
@@ -89,12 +90,10 @@ Servono i descrittori `Parakeet` e `PaddleOCR-VL` della cartella ABI di LLMEnv; 
 
 ### Modelli con problemi noti
 
-| Modello | Stato |
-|---|---|
-| gemma-4-26b-a4b-it (MoE, 128 esperti) | produceva testo senza senso: il motore ignorava router ed esperti. Il ramo MoE e' stato aggiunto ma la verifica sul checkpoint e' ancora da fare |
+Nessuno tra quelli provati.
 
-Phi-3, StableLM-2, StarCoder2 e Gemma-3 davano testo degenerato per due difetti del motore (cache KV con padding visto
-dall'attention; bias q/k/v mancanti in StableLM e StarCoder2), ora corretti e presenti nella tabella sopra.
+Phi-3, StableLM-2, StarCoder2, Gemma-3 e Gemma-4-26b davano testo degenerato o con parole saltate per tre difetti del motore
+(cache KV con padding visto dall'attention; bias q/k/v mancanti in StableLM e StarCoder2; ramo MoE di Gemma-4 assente), ora corretti e presenti nella tabella sopra.
 
 ### Famiglie che dovrebbero funzionare anche se non sono state provate
 
