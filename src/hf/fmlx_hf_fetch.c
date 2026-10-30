@@ -470,6 +470,13 @@ static FmlxHfStatus fetch_one(const char *repo_id, const char *revision, const c
      * (200 invece di 206) il transport ha già azzerato il file, e `stat` dice il vero. */
     {
         int64_t have = file_size(tmp);
+        /* File vuoto dichiarato (es. i file in `.ipynb_checkpoints` nei repo mlx-community): il transport non scrive niente e il
+         * temporaneo puo' non esistere. Un file da 0 byte e' valido: lo si crea, invece di rifiutare l'intero pull. */
+        if (have < 0 && meta.size == 0) {
+            int zfd = open(tmp, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+            if (zfd >= 0) close(zfd);
+            have = file_size(tmp);
+        }
         if (have != meta.size) {
             s = fmlx_hf_fail(FMLX_HF_ERR_SIZE, "%s: %lld byte contro %lld dichiarati (%s)", relpath,
                              (long long)have, (long long)meta.size, tmp);
