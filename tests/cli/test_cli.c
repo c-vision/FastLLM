@@ -1007,6 +1007,34 @@ static void case_aiuto(void) {
     }
 }
 
+/* `run <alias> <file>` per i modelli ocr|vlm|audio: senza file e' un errore d'uso, con un file inesistente un fallimento,
+ * e in entrambi i casi il messaggio dice cosa manca (il modello non viene nemmeno caricato). */
+static void case_media_run(void) {
+    FmlxCliArgs a;
+    FILE *out = tmpfile(), *err = tmpfile();
+    char buf[512] = "";
+    size_t n;
+
+    memset(&a, 0, sizeof a);
+    snprintf(a.repo, sizeof a.repo, "pocr");
+    CK(fmlx_media_run_exec(&a, "/nonexistent.gguf", "/nonexistent-mmproj.gguf", "ocr", out, err) == FMLX_CLI_USAGE,
+       "run ocr senza file non e' un errore d'uso");
+    rewind(err);
+    n = fread(buf, 1, sizeof buf - 1, err);
+    buf[n] = '\0';
+    CK(HAS(buf, "immagine"), "run ocr senza file non dice che serve l'immagine: %s", buf);
+
+    snprintf(a.prompt, sizeof a.prompt, "/nonexistent/foto.png");
+    CK(fmlx_media_run_exec(&a, "/nonexistent.gguf", "/nonexistent-mmproj.gguf", "ocr", out, err) == FMLX_CLI_FAILED,
+       "run ocr con file inesistente non fallisce");
+    snprintf(a.repo, sizeof a.repo, "parakeet");
+    a.prompt[0] = '\0';
+    rewind(err);
+    CK(fmlx_media_run_exec(&a, "/nonexistent.gguf", NULL, "audio", out, err) == FMLX_CLI_USAGE, "run audio senza file");
+    fclose(out);
+    fclose(err);
+}
+
 int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
     /* L'ambiente di chi esegue non decide i risultati. */
@@ -1059,6 +1087,7 @@ int main(int argc, char **argv) {
     case_models_murato();
     case_canali();
     case_aiuto();
+    case_media_run();
 
     printf("test_cli: %d verifiche, %d fallimenti\n", checks, failures);
     return failures ? 1 : 0;

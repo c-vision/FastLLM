@@ -295,7 +295,7 @@ add_library(fmlx_cli STATIC src/cli/fmlx_pull.c src/cli/fmlx_models.c src/cli/fm
                             src/cli/fmlx_ps.c src/cli/fmlx_banner.c src/cli/fmlx_registry.c
                             src/cli/fmlx_paths_cmd.c src/cli/fmlx_search_cmd.c
                             src/cli/fmlx_test_cmd.c src/cli/fmlx_compare.c src/cli/fmlx_tensors.c
-                            src/cli/fmlx_asr.c)
+                            src/cli/fmlx_asr.c src/cli/fmlx_media.c)
 target_include_directories(fmlx_cli PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
                                       ${CMAKE_CURRENT_SOURCE_DIR}/../LLMEnv/LLMEngine/mlx
                                       ${CMAKE_CURRENT_SOURCE_DIR}/../LLMEnv/LLMEngine/Options

@@ -280,9 +280,12 @@ static void usage_verb(FILE *out, const char *v) {
         fprintf(out,
             "fastllm run <nome|#n> [prompt] [opzioni]\n"
             "  <nome|#n>              alias del registro, indice (#n), path/id HF, o dir di `paths`\n"
-            "  [prompt]               one-shot; senza, legge una riga per volta da stdin\n"
+            "  [prompt]               one-shot; senza, legge una riga per volta da stdin.\n"
+            "                         Per un modello registrato con --modality ocr|vlm|audio e' il FILE\n"
+            "                         (immagine o audio) da leggere/trascrivere\n"
             "  --cache <dir>          radice da cui risolvere il modello\n"
-            "  --system <testo>       messaggio di sistema anteposto\n"
+            "  --system <testo>       messaggio di sistema anteposto (per ocr|vlm|audio: l'istruzione al\n"
+            "                         modello, es. \"OCR:\" o \"Table Recognition:\")\n"
             "  --max-tokens <n>       tetto sui token generati\n"
             "  --context <n>          lunghezza del contesto in token (anche 32k, 1m); default: quella del modello\n"
             "  --think                abilita il thinking e lo mostra (default: thinking DISATTIVATO)\n"
@@ -872,9 +875,12 @@ FmlxCliStatus fmlx_cli_exec_with(const FmlxCliArgs *a_in, const FmlxHfTransport 
     /* `run`/`chat`: `<nome|#n>` del registro → percorso. Se non è nel registro resta com'è (path
      * locale, cache HF, $FMLX_MODELS_DIR): un nome non registrato non è un errore, è un'altra via. */
     if ((!strcmp(a->verb, "run") || !strcmp(a->verb, "chat")) && a->repo[0]) {
-        char rp[FMLX_HF_PATH_MAX];
-        if (fmlx_registry_resolve(a->repo, rp, sizeof rp, NULL, 0, NULL, 0))
+        char rp[FMLX_HF_PATH_MAX], mmproj[FMLX_HF_PATH_MAX] = "", modality[16] = "";
+        if (fmlx_registry_resolve(a->repo, rp, sizeof rp, mmproj, sizeof mmproj, modality, sizeof modality))
             snprintf(ac.repo, sizeof ac.repo, "%s", rp);
+        /* Modello registrato come ocr|vlm|audio: non e' una chat MLX, passa dalla lane vision (il secondo argomento e' il file). */
+        if (!strcmp(a->verb, "run") && !a->want_help && modality[0] && strcmp(modality, "chat"))
+            return fmlx_media_run_exec(a, ac.repo, mmproj, modality, out, err);
     }
     if (a->want_help) {
         if (a->verb[0] && strcmp(a->verb, "help"))

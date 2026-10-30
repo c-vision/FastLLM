@@ -161,6 +161,9 @@ FmlxCliStatus fmlx_tensors_exec(const FmlxCliArgs *a, FILE *out, FILE *err);
  * Il testo esce TOKEN-LIVE su `out` (streaming). Engine in LLMEnv/LLMEngine/asr (target `llm_asr`),
  * la STESSA sorgente usata da GMBasic (superficie BASIC `ASR.RECOGNIZE`). */
 FmlxCliStatus fmlx_asr_exec(const FmlxCliArgs *a, FILE *out, FILE *err);
+/* `run <alias> <file>` per i modelli registrati con --modality ocr|vlm|audio (lane vision, llama.cpp/mtmd). */
+FmlxCliStatus fmlx_media_run_exec(const FmlxCliArgs *a, const char *model, const char *mmproj, const char *modality,
+                                  FILE *out, FILE *err);
 
 /* ---- registro locale (stile Ollama) — src/cli/fmlx_registry.c ---- */
 
