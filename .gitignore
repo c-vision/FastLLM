@@ -11,3 +11,6 @@ compile_commands.json
 .cache/
 .DS_Store
 __pycache__/
+
+# Script locali (rilascio, benchmark, controlli): non fanno parte del repository. I sorgenti C dei tool di test stanno in tests/tools/.
+tools/

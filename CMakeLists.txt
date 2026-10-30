@@ -125,7 +125,7 @@ target_link_libraries(test_hf_audit PRIVATE fmlx_hf)
 add_test(NAME hf_audit COMMAND test_hf_audit ${CMAKE_CURRENT_BINARY_DIR}/work-audit)
 
 # Guarda il cache HF reale (sola lettura, nessuna rete): il controllo sul mondo vero.
-add_executable(hf_probe tools/hf_probe.c)
+add_executable(hf_probe tests/tools/hf_probe.c)
 target_link_libraries(hf_probe PRIVATE fmlx_hf)
 
 # --- lane_hf/download: la parte di cache del download + il trasporto libcurl ----------------
@@ -150,12 +150,12 @@ target_link_libraries(test_hf_manifest PRIVATE fmlx_hf_fetch)
 add_test(NAME hf_manifest COMMAND test_hf_manifest)
 
 # Sonda di rete VERA, non un test: due righe di README spiegano perché non sta in ctest.
-add_executable(hf_fetch_probe tools/hf_fetch_probe.c)
+add_executable(hf_fetch_probe tests/tools/hf_fetch_probe.c)
 target_link_libraries(hf_fetch_probe PRIVATE fmlx_hf_fetch)
 
 # Anche questa è una sonda, non un test: una richiesta di metadati al server vero, zero byte di
 # modello. Serve a provare la FORMA della risposta (che il test offline non può provare).
-add_executable(hf_manifest_probe tools/hf_manifest_probe.c)
+add_executable(hf_manifest_probe tests/tools/hf_manifest_probe.c)
 target_link_libraries(hf_manifest_probe PRIVATE fmlx_hf_fetch)
 
 # Terza sonda, e la sola che parli con un server CHE SI FERMA: huggingface.co non lo si può far
@@ -163,7 +163,7 @@ target_link_libraries(hf_manifest_probe PRIVATE fmlx_hf_fetch)
 # 30 GB ripreso all'90%. Sta nel tempo (pochi secondi), quindi NON in ctest — vedi l'intestazione
 # del file. Il path privato serve per il git blob id: calcolarsene uno proprio avrebbe significato
 # avere due autorità sullo stesso nome di blob.
-add_executable(hf_stall_probe tools/hf_stall_probe.c)
+add_executable(hf_stall_probe tests/tools/hf_stall_probe.c)
 target_include_directories(hf_stall_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/hf)
 target_link_libraries(hf_stall_probe PRIVATE fmlx_hf_fetch)
 
@@ -188,18 +188,18 @@ add_test(NAME jsonw COMMAND test_jsonw)
 # Verdetto del parser su un input (codifica canonica): strumento di diagnosi, da solo NON è un test — stampa e basta.
 # Il confronto differenziale con `json.loads` di CPython (tools/json_oracle.py) è stato rimosso: tutti i progetti sono
 # Python-free. Il corpus ostile resta in tests/json/corpus.spec ed è esercitato in C da test_json.
-add_executable(json_diff tools/json_diff.c)
+add_executable(json_diff tests/tools/json_diff.c)
 target_link_libraries(json_diff PRIVATE fmlx_json)
 
 # Strumenti di sviluppo in C (ex Python): banco di valutazione, taratura kernel, gate di promozione, mutation check.
 # Non sono parte del prodotto: si compilano con `cmake --build build-release --target fastllm_tools`.
-add_executable(fastllm_eval tools/fastllm_eval.c)
+add_executable(fastllm_eval tests/tools/fastllm_eval.c)
 target_link_libraries(fastllm_eval PRIVATE fmlx_json m)
-add_executable(kernel_tune tools/kernel_tune.c)
+add_executable(kernel_tune tests/tools/kernel_tune.c)
 target_link_libraries(kernel_tune PRIVATE ${CMAKE_DL_LIBS})
-add_executable(moe_gate tools/moe_gate.c)
-add_executable(spec_gate tools/spec_gate.c)
-add_executable(mut_prove tools/mut_prove.c)
+add_executable(moe_gate tests/tools/moe_gate.c)
+add_executable(spec_gate tests/tools/spec_gate.c)
+add_executable(mut_prove tests/tools/mut_prove.c)
 target_link_libraries(mut_prove PRIVATE fmlx_json)
 add_custom_target(fastllm_tools DEPENDS fastllm_eval kernel_tune moe_gate spec_gate mut_prove)
 # Il banco di valutazione con il backend finto: gate deterministici (e rileva il non determinismo).
@@ -270,7 +270,7 @@ add_test(NAME serve COMMAND test_serve ${CMAKE_CURRENT_BINARY_DIR}/work-serve)
 # Lane VISION/OCR: punto d'ingresso testabile. Carica un VLM (GGUF testo + GGUF `mmproj`) e legge
 # un'immagine (o un audio) via il motore llama.cpp/mtmd. Linka `fmlx_serve` che a sua volta porta
 # `llm_ai_llamacpp` (la lane vision) e `llm_ai_mlx`.
-add_executable(vision_ocr tools/vision_ocr.c)
+add_executable(vision_ocr tests/tools/vision_ocr.c)
 target_include_directories(vision_ocr PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(vision_ocr PRIVATE fmlx_serve)
 add_dependencies(vision_ocr llm_ai_llamacpp)

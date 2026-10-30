@@ -95,7 +95,7 @@ Run `fastllm help` for the full list and `fastllm help <command>` for examples.
 
 ## Tested models
 
-These models were run end to end on a Mac with Apple Silicon and 128 GB of memory. Every row is one run of `tools/bench_models.sh`:
+These models were run end to end on a Mac with Apple Silicon and 128 GB of memory. Every row is one benchmark run:
 a unique prompt of about 2000-3000 tokens for the prefill speed, then 128 generated tokens for the decode speed, default sampling.
 Very large models read from disk are limited by SSD speed, and their numbers include the first access to the weights.
 
@@ -146,7 +146,7 @@ Notes:
   keep a snapshot of that state at the end of the conversation so far (just before the assistant header), so the next turn of a growing
   conversation prefills only the new tokens. Measured with a 4000-5000 token conversation: Qwen3.6-27B 7.7 s to 0.6 s for the second turn,
   Qwen3-Coder-Next 6.4 s to 0.4 s, Kimi-Linear 2.8 s to 0.25 s, with identical text. Tested on those three plus Qwen3.6-35B-A3B; LFM2, Mamba, Jamba, Falcon-H1 and the other recurrent families use the same code but have not been run. The snapshots live in memory only (at most 4, option
-  `prefix_recurrent_max`) and are lost when the server stops. `tools/prefix_recurrent_check.sh` runs this check on any model. Qwen3.8-27B
+  `prefix_recurrent_max`) and are lost when the server stops. Qwen3.8-27B
   with its DFlash2 draft model does not reuse prefixes yet.
 - **Short prompts.** Phi-3 decodes at 111 tok/s and StableLM-2 at 235 tok/s on a short prompt; the table shows the long-prompt speed.
   The Phi-3 prefill prompt had 4187 tokens, Mixtral's had 1752. gemma-3-270m was measured on a short prompt.
@@ -211,7 +211,7 @@ By default the weights of an MLX model are loaded into memory. For a model large
 itself to the `packed` backend, which reads the weights from the model files on demand. This is what lets the 74 GB Mixtral and the
 104 GB Qwen3.8-Flash-Next 4 bit run on a 128 GB Mac. `--opt weights_backend=packed` forces it.
 
-Packed is slower, mostly in prefill. Measured with `tools/packed_vs_resident.sh` on models that use the packed kernels:
+Packed is slower, mostly in prefill. Measured on models that use the packed kernels, same prompt and greedy sampling on both backends:
 
 | Model | Prefill tok/s, resident / packed | Decode tok/s, resident / packed |
 |---|---:|---:|
@@ -219,8 +219,8 @@ Packed is slower, mostly in prefill. Measured with `tools/packed_vs_resident.sh`
 | Qwen3.6-35B-A3B (4 bit) | 1615 / 1441 | 67.6 / 67.2 |
 
 The packed kernels cover only some architectures today (those with GatedDeltaNet layers); other models fall back to the normal path
-without a warning. The script also checks that both backends give the same text: small differences after a few dozen tokens are expected,
-a difference at the very start is a bug.
+without a warning. The text of the two backends is the same for the first few dozen tokens and may then differ slightly because the kernels round
+differently; a difference at the very start would be a bug.
 
 ## Building and testing
 
@@ -234,17 +234,17 @@ ctest --test-dir build-release --output-on-failure
 ```
 
 The default deployment target is macOS 26.2, which builds the NAX kernels. For a binary that also runs on older systems, configure with
-`-DCMAKE_OSX_DEPLOYMENT_TARGET=14.0`. `tools/make_macos_package.sh` makes the release packages from such a build, and `tools/install.sh` is the installer script.
+`-DCMAKE_OSX_DEPLOYMENT_TARGET=14.0`. The release packages are made from such a build, and `install.sh` is attached to every release.
 
-The test suites do not use the network. Useful tools in `tools/`:
+The test suites do not use the network. The test programs in `tests/tools/` are built with the rest:
 
 | Tool | Purpose |
 |---|---|
-| `bench_models.sh` | Prefill and decode speed of one or more models |
-| `packed_vs_resident.sh` | Compare the packed and resident backends: same text, and how much slower |
 | `fastllm_eval.c` | Capability evaluation of a model |
 | `mut_prove.c` | Mutation check: shows which tests turn red when the code is broken |
-| `hf_probe.c`, `hf_fetch_probe.c`, `hf_manifest_probe.c` | Inspect the Hugging Face cache and downloads |
+| `hf_probe.c`, `hf_fetch_probe.c`, `hf_manifest_probe.c`, `hf_stall_probe.c` | Inspect the Hugging Face cache and downloads |
+| `spec_gate.c`, `moe_gate.c`, `kernel_tune.c` | Speculative decoding and MoE gates, kernel autotuning |
+| `vision_ocr.c`, `json_diff.c` | Image and OCR check, JSON parser corpus check |
 
 More files: `CLI.md` (command reference), `MODELS.md` (model notes).
 

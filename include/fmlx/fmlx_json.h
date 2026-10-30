@@ -20,7 +20,7 @@
  * venire da `fmlx_json_doc_init` (o da una `parse` precedente), mai da memoria a caso.
  *
  * Il parser è confrontato con un oracolo indipendente — `json.loads` di Python 3.14 — su
- * un corpus di input ostili (`tools/json_diff.c`; il confronto con `json.loads` di Python, tools/json_oracle.py, e' stato rimosso). Dove
+ * un corpus di input ostili (`tests/tools/json_diff.c`; il confronto con `json.loads` di Python, tools/json_oracle.py, e' stato rimosso). Dove
  * divergiamo è scritto in docs/json-contract.md con la misura accanto.
  */
 #ifndef FMLX_JSON_H

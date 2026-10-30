@@ -91,7 +91,7 @@ typedef struct {
      * di libcurl: dopo una risposta significa che LOW_SPEED_TIME ha troncato uno STREAM fermo, cioè
      * ERR_STALL (ritentabile); prima di ogni risposta è il CONNECTTIMEOUT, cioè un errore DI
      * CONNESSIONE (ERR_HTTP). Misurato su questa macchina (libcurl 8.7.1 SecureTransport, sonda
-     * `tools/hf_stall_probe.c`): la callback di progresso non viene chiamata NEPPURE una volta su
+     * `tests/tools/hf_stall_probe.c`): la callback di progresso non viene chiamata NEPPURE una volta su
      * uno stream muto, quindi il taglio arriva SOLO da lì — e senza questa classe il `pull` non
      * riparte MAI dal byte giusto: vede ERR_HTTP, che è la lingua del «non ritentare». */
     int saw_status;

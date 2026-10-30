@@ -118,7 +118,7 @@ struct FmlxHfFetchOpts {
      * cambiare nulla). `stall_timeout_s` finisce su `CURLOPT_LOW_SPEED_TIME` con limite 1 byte/s,
      * che E' il watchdog di libcurl: niente thread, niente timer, niente segnali (AGENTS: il
      * processo che scarica non è quello che gestisce una UI).
-     * MISURATO con `tools/hf_stall_probe.c` su questa macchina (libcurl 8.7.1 SecureTransport, la
+     * MISURATO con `tests/tools/hf_stall_probe.c` su questa macchina (libcurl 8.7.1 SecureTransport, la
      * libcurl di sistema che il build linka): la Soglia è l'intenzione, non il momento del taglio,
      * che arriva a `soglia + 6` secondi (1→7,03, 2→8,02, 3→9,03, 5→11,04, 6→12,04) e NON tramite
      * `CURLOPT_XFERINFOFUNCTION`, che su uno stream muto viene chiamata zero volte. Il codice 28 di
